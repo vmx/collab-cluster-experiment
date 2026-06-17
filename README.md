@@ -26,6 +26,44 @@ n0:100% ▲ 512K ▼   0K p4   n1: 47% ▲  64K ▼ 256K p2  ...
 
 (`▲` upload KiB/s, `▼` download KiB/s, `pN` connected peers.)
 
+## Run each component separately
+
+`run_network.py` is only a convenience wrapper — you can start every piece by
+hand (e.g. one terminal each) to watch individual logs or restart a single
+component. Start them **in this order**; each keeps running until you Ctrl-C it.
+
+```bash
+# 1. Generate the payload + the v2-only .torrent (writes data/).
+#    Run once; the other components read data/shared.torrent.
+python make_torrent.py
+
+# 2. Tracker (must be up before the nodes announce). Listens on :8000.
+python bittorrent_tracker.py
+
+# 3. The 5 nodes — one process each. node 0 is the seed, 1-4 are leechers.
+#    BitTorrent port = 6881+id, stats HTTP port = 8001+id.
+python node.py --id 0 --role seed
+python node.py --id 1 --role leech
+python node.py --id 2 --role leech
+python node.py --id 3 --role leech
+python node.py --id 4 --role leech
+
+# 4. The monitor (start any time after the nodes; it prints the live summary).
+python monitor.py
+```
+
+Notes:
+- The seed (`--role seed`) reads the existing payload from `data/`; leechers
+  (`--role leech`) download into `nodes/<id>/`.
+- Ports, node count and the seed/leecher split all come from `config.py`, so the
+  commands above match the defaults there. Change `config.py` and the same
+  commands keep working.
+- Order matters only loosely: the tracker should be up before nodes announce,
+  but nodes and the monitor tolerate each other starting in any order (the
+  monitor just shows `n*:--` for nodes that aren't answering yet).
+- Stop with Ctrl-C in each terminal. There's no shared shutdown when run this
+  way, so stop the nodes/tracker individually.
+
 ## Inspect
 
 ```bash
