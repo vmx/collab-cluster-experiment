@@ -33,7 +33,7 @@ def collect_session_stats(values: dict) -> dict:
     return {name: value for name, value in values.items()}
 
 
-def torrent_dict(st) -> dict:
+def torrent_dict(st, ti) -> dict:
     info_hash_v2 = ""
     try:
         info_hash_v2 = str(st.info_hashes.v2)
@@ -42,6 +42,11 @@ def torrent_dict(st) -> dict:
     return {
         "info_hash_v2": info_hash_v2,
         "state": state_name(st.state),
+        # Per-piece ownership bitfield: which pieces (=which data) THIS node holds.
+        # This is the authoritative source for the swarm-wide piece map.
+        "pieces": [bool(b) for b in st.pieces],
+        "piece_length": ti.piece_length(),
+        "total_size": ti.total_size(),
         "progress": st.progress,
         "download_rate": st.download_rate,
         "upload_rate": st.upload_rate,
@@ -111,7 +116,8 @@ def session_loop(args, ns: NodeState) -> None:
     ses = lt.session(settings)
 
     atp = lt.add_torrent_params()
-    atp.ti = lt.torrent_info(config.TORRENT_PATH)
+    ti = lt.torrent_info(config.TORRENT_PATH)
+    atp.ti = ti
     if args.role == "seed":
         atp.save_path = config.DATA_DIR  # the seed already has payload.bin here
     else:
@@ -135,7 +141,7 @@ def session_loop(args, ns: NodeState) -> None:
             "ts": time.time(),
             "bt_port": config.bt_port(args.id),
             "session": last_session_stats,
-            "torrents": [torrent_dict(st)],
+            "torrents": [torrent_dict(st, ti)],
             "peers": [peer_dict(p) for p in peers],
         }
         with ns.lock:

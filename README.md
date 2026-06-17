@@ -76,6 +76,12 @@ curl -s http://127.0.0.1:8000/stats | python -m json.tool
 # summary report from the recorded time-series
 python report.py
 
+# who has which pieces, and how many copies of the file exist
+python piece_map.py            # live snapshot, once
+python piece_map.py --watch 2  # refresh every 2s
+python piece_map.py --pieces   # also list the holders of every piece
+python piece_map.py --snapshot # read newest stats/snapshots/*.json instead of live
+
 # raw SQL
 sqlite3 stats/monitor.db ".tables"
 sqlite3 stats/monitor.db "SELECT node_id, MAX(progress) FROM torrent_status GROUP BY node_id;"
@@ -92,6 +98,7 @@ sqlite3 stats/monitor.db "SELECT node_id, MAX(progress) FROM torrent_status GROU
 | `monitor.py` | Polls all nodes + tracker → SQLite + JSON snapshots. |
 | `run_network.py` | Orchestrates the whole network. |
 | `report.py` | Prints a summary from `stats/monitor.db`. |
+| `piece_map.py` | Shows which peer holds which pieces + how many copies of the file exist. |
 
 ## Ports
 
