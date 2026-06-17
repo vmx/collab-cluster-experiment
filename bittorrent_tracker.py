@@ -55,8 +55,12 @@ def _to_int(b: bytes, default: int = 0) -> int:
 
 
 def reap(info_hash: bytes) -> None:
-    """Drop peers we haven't heard from in a couple of announce intervals."""
-    cutoff = time.time() - 2 * config.ANNOUNCE_INTERVAL
+    """Drop peers we haven't heard from in a few announce intervals.
+
+    The window must comfortably exceed how often peers actually re-announce, or a
+    node that started earlier gets evicted before a later one can discover it.
+    """
+    cutoff = time.time() - 3 * config.ANNOUNCE_INTERVAL
     peers = SWARM.get(info_hash, {})
     for pid in [pid for pid, p in peers.items() if p["last_seen"] < cutoff]:
         del peers[pid]

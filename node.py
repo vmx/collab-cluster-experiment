@@ -102,6 +102,11 @@ def session_loop(args, ns: NodeState) -> None:
         # we must turn that off for the cap to apply to our localhost swarm.
         "upload_rate_limit": config.UPLOAD_RATE_LIMIT,
         "ignore_limits_on_local_network": False,
+        # libtorrent otherwise refuses to re-announce more than once every 300s
+        # (default min_announce_interval), so the tracker would reap a node long
+        # before it checks back in. Honour our short announce interval instead so
+        # nodes started at different times can still find each other.
+        "min_announce_interval": config.ANNOUNCE_INTERVAL,
     }
     ses = lt.session(settings)
 
