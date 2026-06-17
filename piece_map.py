@@ -20,12 +20,12 @@ Usage:
 import argparse
 import glob
 import json
-import math
 import os
 import time
 import urllib.request
 
 import config
+import swarm_stats
 
 MAX_COLS = 100            # max width of the piece map (pieces are bucketed above this)
 HAVE, MISS = "█", "·"   # full block / middle dot
@@ -93,38 +93,31 @@ def render_avail(avail: list, num_pieces: int, cols: int) -> str:
 
 
 def report(nodes: list, source: str, show_pieces: bool) -> None:
-    nodes = [n for n in nodes if n.get("torrents")]
-    if not nodes:
+    rows, meta = swarm_stats.collect(nodes)
+    if not rows:
         print("No nodes responded (are the nodes running? try --snapshot).")
         return
 
-    t0 = nodes[0]["torrents"][0]
-    piece_length = t0["piece_length"]
-    total_size = t0["total_size"]
-    num_pieces = max(1, math.ceil(total_size / piece_length))
-    info_hash = t0.get("info_hash_v2", "")
+    num_pieces = meta["num_pieces"]
+    piece_length = meta["piece_length"]
+    total_size = meta["total_size"]
+    info_hash = meta["info_hash"]
+    name = meta["name"]
+    files = meta["files"]
 
-    # Normalise each node's bitfield to exactly num_pieces booleans.
-    rows = []
-    for n in sorted(nodes, key=lambda n: n["node_id"]):
-        t = n["torrents"][0]
-        bits = [bool(b) for b in (t.get("pieces") or [])]
-        bits = (bits + [False] * num_pieces)[:num_pieces]
-        rows.append({"id": n["node_id"], "role": n.get("role", "?"), "bits": bits})
-
-    avail = [sum(r["bits"][i] for r in rows) for i in range(num_pieces)]
+    avail = swarm_stats.availability(rows, num_pieces)
     min_avail = min(avail)
     total_have = sum(avail)
     full_copies = [r["id"] for r in rows if all(r["bits"])]
     cols = min(num_pieces, MAX_COLS)
 
-    print(f"Swarm piece map  —  file {human(total_size)}, "
+    print(f"Swarm piece map  —  '{name}'  {human(total_size)} in {len(files)} file(s), "
           f"{num_pieces} pieces × {human(piece_length)}")
     print(f"info hash (v2): {info_hash[:16]}...  |  nodes seen: {len(rows)}  |  source: {source}")
     if cols < num_pieces:
         print(f"(map bucketed: {num_pieces} pieces into {cols} columns)")
 
-    print("\nCopies of the file:")
+    print("\nCopies of the complete dataset:")
     print(f"  full copies (one node has everything) : {len(full_copies)}"
           f"{'  (nodes: ' + ','.join(map(str, full_copies)) + ')' if full_copies else ''}")
     print(f"  complete copies incl. partial holders : {min_avail}"
@@ -150,6 +143,21 @@ def report(nodes: list, source: str, show_pieces: bool) -> None:
         if cnt:
             tag = "  <- MISSING from swarm" if k == 0 else ""
             print(f"  {k} node(s): {cnt:>4} pieces{tag}")
+
+    if files:
+        print("\nPer-file copies (full = a node holds the entire file):")
+        print(f"  {'file':<34} {'size':>9} {'full':>5} {'recon':>6}  "
+              f"holders / partial%")
+        for f in sorted(swarm_stats.per_file(rows, files, avail),
+                        key=lambda f: f["path"]):
+            disp = f["path"]
+            if name and disp.startswith(name + "/"):
+                disp = disp[len(name) + 1:]
+            holders = ",".join(f"n{i}" for i in f["full_holders"]) or "-"
+            partial = " ".join(f"n{i}={pct:.0f}%" for i, pct in f["partial"])
+            extra = ("  partial: " + partial) if partial else ""
+            print(f"  {disp:<34} {human(f['size']):>9} {f['full_copies']:>5} "
+                  f"{f['recon_copies']:>6}  {holders}{extra}")
 
     if show_pieces:
         print("\nPiece -> holders:")

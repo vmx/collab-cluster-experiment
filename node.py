@@ -33,7 +33,39 @@ def collect_session_stats(values: dict) -> dict:
     return {name: value for name, value in values.items()}
 
 
-def torrent_dict(st, ti) -> dict:
+def _is_pad(fs, i: int) -> bool:
+    if hasattr(fs, "pad_file_at"):
+        try:
+            return fs.pad_file_at(i)
+        except Exception:
+            pass
+    return "/.pad/" in fs.file_path(i).replace(os.sep, "/")
+
+
+def file_list(ti) -> list:
+    """Static file -> piece-range mapping (real files only; pad files skipped).
+
+    v2 aligns each file to a piece boundary, so a real file owns the contiguous
+    range [first_piece, last_piece] exclusively. Consumers use this with a node's
+    piece bitfield to tell which files (and how many copies) a node holds.
+    """
+    fs = ti.files()
+    out = []
+    for i in range(fs.num_files()):
+        if _is_pad(fs, i):
+            continue
+        size = fs.file_size(i)
+        if size > 0:
+            first = ti.map_file(i, 0, 1).piece
+            last = ti.map_file(i, size - 1, 1).piece
+        else:
+            first, last = ti.map_file(i, 0, 0).piece, -1  # empty file: no pieces
+        out.append({"path": fs.file_path(i).replace(os.sep, "/"), "size": size,
+                    "first_piece": first, "last_piece": last})
+    return out
+
+
+def torrent_dict(st, ti, files_meta) -> dict:
     info_hash_v2 = ""
     try:
         info_hash_v2 = str(st.info_hashes.v2)
@@ -41,12 +73,15 @@ def torrent_dict(st, ti) -> dict:
         pass
     return {
         "info_hash_v2": info_hash_v2,
+        "name": ti.name(),
         "state": state_name(st.state),
         # Per-piece ownership bitfield: which pieces (=which data) THIS node holds.
         # This is the authoritative source for the swarm-wide piece map.
         "pieces": [bool(b) for b in st.pieces],
         "piece_length": ti.piece_length(),
         "total_size": ti.total_size(),
+        # Static file -> piece-range map so consumers can do per-file analysis.
+        "files": files_meta,
         "progress": st.progress,
         "download_rate": st.download_rate,
         "upload_rate": st.upload_rate,
@@ -115,16 +150,22 @@ def session_loop(args, ns: NodeState) -> None:
     }
     ses = lt.session(settings)
 
+    with open(config.META_PATH) as f:
+        meta = json.load(f)
+
     atp = lt.add_torrent_params()
-    ti = lt.torrent_info(config.TORRENT_PATH)
+    ti = lt.torrent_info(meta["torrent"])
     atp.ti = ti
     if args.role == "seed":
-        atp.save_path = config.DATA_DIR  # the seed already has payload.bin here
+        # Serve the content in place from wherever make_torrent.py found it.
+        atp.save_path = meta["seed_save_path"]
     else:
         atp.save_path = os.path.join(config.NODES_DIR, str(args.id))
     os.makedirs(atp.save_path, exist_ok=True)
+    files_meta = file_list(ti)
     handle = ses.add_torrent(atp)
-    print(f"node {args.id}: added torrent, save_path={atp.save_path}", flush=True)
+    print(f"node {args.id}: added '{meta['name']}' "
+          f"({len(files_meta)} files), save_path={atp.save_path}", flush=True)
 
     last_session_stats: dict = {}
     while True:
@@ -141,7 +182,7 @@ def session_loop(args, ns: NodeState) -> None:
             "ts": time.time(),
             "bt_port": config.bt_port(args.id),
             "session": last_session_stats,
-            "torrents": [torrent_dict(st, ti)],
+            "torrents": [torrent_dict(st, ti, files_meta)],
             "peers": [peer_dict(p) for p in peers],
         }
         with ns.lock:

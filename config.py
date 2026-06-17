@@ -12,8 +12,13 @@ STATS_DIR = os.path.join(BASE_DIR, "stats")
 SNAPSHOT_DIR = os.path.join(STATS_DIR, "snapshots")
 DB_PATH = os.path.join(STATS_DIR, "monitor.db")
 
-PAYLOAD_PATH = os.path.join(DATA_DIR, "payload.bin")
 TORRENT_PATH = os.path.join(DATA_DIR, "shared.torrent")
+# Sidecar written by make_torrent.py: records the torrent path and the seed's
+# save_path (the parent dir of the shared content) so nodes can serve arbitrary
+# local files/directories without hard-coding their location.
+META_PATH = os.path.join(DATA_DIR, "torrent_meta.json")
+# Where the built-in sample dataset is generated when no content is given.
+SAMPLE_DIR = os.path.join(DATA_DIR, "sample")
 
 # --- Network -----------------------------------------------------------------
 HOST = "127.0.0.1"
@@ -27,7 +32,6 @@ STATS_PORT_BASE = 8001   # node i serves its /stats JSON on STATS_PORT_BASE + i
 TRACKER_URL = f"http://{HOST}:{TRACKER_PORT}/announce"
 
 # --- Torrent (BitTorrent v2 only) --------------------------------------------
-PAYLOAD_SIZE = 32 * 1024 * 1024  # 32 MiB of random data
 PIECE_SIZE = 256 * 1024          # 256 KiB; power of two (v2 requires >= 16 KiB)
 
 # Per-node upload rate cap (bytes/s, 0 = unlimited). Over localhost a transfer is

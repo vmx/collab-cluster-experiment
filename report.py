@@ -63,6 +63,31 @@ def main() -> None:
             wanted):
         print(f"  {r['metric']}: {r['v']:.0f}")
 
+    print("\n=== Per-file replication over time (from file_replication) ===")
+    base = db.execute("SELECT MIN(ts) FROM file_replication").fetchone()[0]
+    nnodes = db.execute("SELECT COUNT(DISTINCT node_id) FROM torrent_status").fetchone()[0]
+    if base is None:
+        print("  (no file_replication rows yet)")
+    else:
+        print(f"  {'file':<34} {'size':>9} {'final':>7} {'peak':>5} {'t_full(s)':>10}")
+        for (path,) in db.execute(
+                "SELECT DISTINCT file_path FROM file_replication ORDER BY file_path"):
+            size, peak = db.execute(
+                "SELECT MAX(size), MAX(full_copies) FROM file_replication WHERE file_path=?",
+                (path,)).fetchone()
+            final = db.execute(
+                "SELECT full_copies FROM file_replication WHERE file_path=? "
+                "ORDER BY ts DESC LIMIT 1", (path,)).fetchone()[0]
+            t_full = db.execute(
+                "SELECT MIN(ts) FROM file_replication WHERE file_path=? AND full_copies>=?",
+                (path, nnodes)).fetchone()[0]
+            disp = path.split("/", 1)[1] if "/" in path else path
+            when = f"{t_full - base:10.1f}" if t_full is not None else "     never"
+            print(f"  {disp:<34} {size / 1e6:7.1f}MB {final:>3}/{nnodes:<3} "
+                  f"{peak:>5} {when}")
+        print(f"  (t_full = time until every one of the {nnodes} nodes held the "
+              f"whole file)")
+
     total_session_rows = db.execute(
         "SELECT COUNT(*) FROM node_session_stats").fetchone()[0]
     print(f"\n(recorded {total_session_rows} session-metric data points across "

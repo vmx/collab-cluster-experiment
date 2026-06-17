@@ -81,10 +81,12 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--until-complete", action="store_true",
                     help="stop once every leecher reaches 100%%")
+    ap.add_argument("--content", metavar="PATH",
+                    help="file or directory to share (default: built-in sample)")
     args = ap.parse_args()
 
     os.makedirs(config.STATS_DIR, exist_ok=True)
-    make_torrent.main()
+    make_torrent.main(args.content)
     here = config.BASE_DIR
 
     signal.signal(signal.SIGINT, shutdown)
