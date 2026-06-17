@@ -1,0 +1,53 @@
+"""Shared configuration for the BitTorrent v2 prototype network.
+
+Single source of truth for ports, paths, counts and timing. Everything runs on
+localhost so the experiment is deterministic and easy to restart.
+"""
+import os
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+NODES_DIR = os.path.join(BASE_DIR, "nodes")
+STATS_DIR = os.path.join(BASE_DIR, "stats")
+SNAPSHOT_DIR = os.path.join(STATS_DIR, "snapshots")
+DB_PATH = os.path.join(STATS_DIR, "monitor.db")
+
+PAYLOAD_PATH = os.path.join(DATA_DIR, "payload.bin")
+TORRENT_PATH = os.path.join(DATA_DIR, "shared.torrent")
+
+# --- Network -----------------------------------------------------------------
+HOST = "127.0.0.1"
+NUM_NODES = 5
+SEED_NODES = 1  # nodes [0 .. SEED_NODES-1] start as seeds, the rest as leechers
+
+TRACKER_PORT = 8000
+BT_PORT_BASE = 6881      # node i listens for BitTorrent on BT_PORT_BASE + i
+STATS_PORT_BASE = 8001   # node i serves its /stats JSON on STATS_PORT_BASE + i
+
+TRACKER_URL = f"http://{HOST}:{TRACKER_PORT}/announce"
+
+# --- Torrent (BitTorrent v2 only) --------------------------------------------
+PAYLOAD_SIZE = 32 * 1024 * 1024  # 32 MiB of random data
+PIECE_SIZE = 256 * 1024          # 256 KiB; power of two (v2 requires >= 16 KiB)
+
+# Per-node upload rate cap (bytes/s, 0 = unlimited). Over localhost a transfer is
+# otherwise instantaneous; capping it spreads the transfer over time so the
+# monitor captures a meaningful rate/progress time-series. 1 MiB/s => ~30s+.
+UPLOAD_RATE_LIMIT = 1 * 1024 * 1024
+
+# --- Timing (seconds) --------------------------------------------------------
+ANNOUNCE_INTERVAL = 5      # interval the tracker advertises to peers
+POLL_INTERVAL = 1.0        # how often the monitor polls every node
+NODE_LOOP_INTERVAL = 1.0   # how often a node refreshes its stats snapshot
+
+
+def bt_port(node_id: int) -> int:
+    return BT_PORT_BASE + node_id
+
+
+def stats_port(node_id: int) -> int:
+    return STATS_PORT_BASE + node_id
+
+
+def is_seed(node_id: int) -> bool:
+    return node_id < SEED_NODES
