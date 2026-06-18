@@ -1,0 +1,114 @@
+"""Drive the running swarm by hand: list the torrent catalog, inspect what each
+node holds, and tell nodes to seed or leech specific torrents.
+
+    python control.py list                         # catalog of available torrents
+    python control.py status                       # what every node holds now
+    python control.py add 0 media --role seed      # node 0 seeds 'media'
+    python control.py add 1 media --role leech     # node 1 leeches 'media'
+    python control.py remove 1 media               # node 1 drops 'media'
+
+Torrents are referred to by name (the basename of the shared file/dir), as shown
+by `list`. Build the catalog first with `python make_torrent.py [paths...]`.
+"""
+import argparse
+import json
+import sys
+import urllib.request
+
+import config
+import make_torrent
+
+
+def _node_url(node_id: int, path: str) -> str:
+    return f"http://{config.HOST}:{config.stats_port(node_id)}{path}"
+
+
+def _get(node_id: int):
+    with urllib.request.urlopen(_node_url(node_id, "/stats"), timeout=2.0) as r:
+        return json.loads(r.read().decode())
+
+
+def _post(node_id: int, path: str, payload: dict):
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(_node_url(node_id, path), data=data,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=5.0) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", "replace")
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return {"error": f"HTTP {e.code}: {raw[:200]}"}
+
+
+def cmd_list(_args) -> None:
+    catalog = make_torrent.list_catalog()
+    if not catalog:
+        print("catalog empty — build one with: python make_torrent.py [paths...]")
+        return
+    print(f"{'name':<20} {'v2 info-hash':<20} source")
+    for m in catalog:
+        print(f"{m['name']:<20} {m['info_hash'][:18]:<20} {m['source']}")
+
+
+def cmd_status(args) -> None:
+    ids = [args.node] if args.node is not None else range(config.NUM_NODES)
+    for nid in ids:
+        try:
+            snap = _get(nid)
+        except Exception:
+            print(f"node {nid}: (down)")
+            continue
+        torrents = snap.get("torrents") or []
+        if not torrents:
+            print(f"node {nid}: idle (no torrents)")
+            continue
+        parts = []
+        for t in torrents:
+            parts.append(f"{t.get('name', '?')}[{t.get('role', '?')} "
+                         f"{(t.get('progress') or 0) * 100:.0f}% p{t.get('num_peers') or 0}]")
+        print(f"node {nid}: " + "  ".join(parts))
+
+
+def cmd_add(args) -> None:
+    res = _post(args.node, "/add", {"name": args.name, "role": args.role})
+    print(f"node {args.node}: {json.dumps(res)}")
+    if res.get("error"):
+        sys.exit(1)
+
+
+def cmd_remove(args) -> None:
+    res = _post(args.node, "/remove", {"name": args.name})
+    print(f"node {args.node}: {json.dumps(res)}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("list", help="list catalog torrents").set_defaults(func=cmd_list)
+
+    p_status = sub.add_parser("status", help="show what each node holds")
+    p_status.add_argument("node", type=int, nargs="?", help="a single node id (default: all)")
+    p_status.set_defaults(func=cmd_status)
+
+    p_add = sub.add_parser("add", help="tell a node to seed/leech a torrent")
+    p_add.add_argument("node", type=int)
+    p_add.add_argument("name", help="catalog torrent name (see `list`)")
+    p_add.add_argument("--role", choices=["seed", "leech"], default="leech")
+    p_add.set_defaults(func=cmd_add)
+
+    p_rm = sub.add_parser("remove", help="tell a node to drop a torrent")
+    p_rm.add_argument("node", type=int)
+    p_rm.add_argument("name")
+    p_rm.set_defaults(func=cmd_remove)
+
+    args = ap.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

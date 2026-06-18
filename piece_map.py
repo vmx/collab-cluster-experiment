@@ -93,11 +93,18 @@ def render_avail(avail: list, num_pieces: int, cols: int) -> str:
 
 
 def report(nodes: list, source: str) -> None:
-    rows, meta = swarm_stats.collect(nodes)
-    if not rows:
-        print("No nodes responded (are the nodes running? try --snapshot).")
+    torrents = swarm_stats.collect_by_torrent(nodes)
+    if not torrents:
+        print("No torrents reported (are the nodes running and assigned torrents? "
+              "try `python control.py status`, or --snapshot).")
         return
+    for i, (meta, rows) in enumerate(torrents):
+        if i:
+            print("\n" + "=" * 78)
+        render_torrent(meta, rows, source)
 
+
+def render_torrent(meta: dict, rows: list, source: str) -> None:
     num_pieces = meta["num_pieces"]
     piece_length = meta["piece_length"]
     total_size = meta["total_size"]

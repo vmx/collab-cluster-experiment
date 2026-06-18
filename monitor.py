@@ -41,11 +41,12 @@ CREATE TABLE IF NOT EXISTS tracker_stats(
 
 -- Per-file replication over time: full_copies = nodes holding the whole file,
 -- recon_copies = reconstructable copies (replication of the file's rarest piece).
+-- Keyed by torrent (info_hash) since a swarm can host many torrents at once.
 CREATE TABLE IF NOT EXISTS file_replication(
-  ts REAL, file_path TEXT, size INTEGER, num_pieces INTEGER,
-  full_copies INTEGER, recon_copies INTEGER, holders TEXT);
+  ts REAL, info_hash TEXT, torrent_name TEXT, file_path TEXT, size INTEGER,
+  num_pieces INTEGER, full_copies INTEGER, recon_copies INTEGER, holders TEXT);
 
-CREATE INDEX IF NOT EXISTS idx_filerepl_path_ts ON file_replication(file_path, ts);
+CREATE INDEX IF NOT EXISTS idx_filerepl_path_ts ON file_replication(info_hash, file_path, ts);
 CREATE INDEX IF NOT EXISTS idx_torrent_node_ts ON torrent_status(node_id, ts);
 CREATE INDEX IF NOT EXISTS idx_session_node_ts ON node_session_stats(node_id, ts);
 CREATE INDEX IF NOT EXISTS idx_peer_node_ts ON peer_info(node_id, ts);
@@ -78,7 +79,7 @@ def record_node(db, ts, node_id, snap, summary):
              t.get("num_pieces"), t.get("distributed_copies"),
              int(bool(t.get("is_seeding"))), int(bool(t.get("is_finished")))))
         summary.append(
-            f"n{node_id}:{(t.get('progress') or 0) * 100:3.0f}% "
+            f"n{node_id}/{t.get('name')}:{(t.get('progress') or 0) * 100:3.0f}% "
             f"▲{(t.get('upload_rate') or 0) // 1024}K "
             f"▼{(t.get('download_rate') or 0) // 1024}K "
             f"p{t.get('num_peers') or 0}")
@@ -124,14 +125,14 @@ def main() -> None:
                            (ts, t.get("info_hash"), t.get("seeders"),
                             t.get("leechers"), t.get("peers"), t.get("announces")))
 
-        # Per-file replication needs all nodes' bitfields combined for this poll.
-        rows, meta = swarm_stats.collect(list(combined["nodes"].values()))
-        if rows:
+        # Per-file replication needs all nodes' bitfields combined for this poll,
+        # grouped per torrent (a node may hold several at once).
+        for meta, rows in swarm_stats.collect_by_torrent(list(combined["nodes"].values())):
             avail = swarm_stats.availability(rows, meta["num_pieces"])
             for f in swarm_stats.per_file(rows, meta["files"], avail):
-                db.execute("INSERT INTO file_replication VALUES (?,?,?,?,?,?,?)",
-                           (ts, f["path"], f["size"], f["num_pieces"],
-                            f["full_copies"], f["recon_copies"],
+                db.execute("INSERT INTO file_replication VALUES (?,?,?,?,?,?,?,?,?)",
+                           (ts, meta["info_hash"], meta["name"], f["path"], f["size"],
+                            f["num_pieces"], f["full_copies"], f["recon_copies"],
                             ",".join(map(str, f["full_holders"]))))
 
         db.commit()

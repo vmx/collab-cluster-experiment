@@ -12,18 +12,19 @@ STATS_DIR = os.path.join(BASE_DIR, "stats")
 SNAPSHOT_DIR = os.path.join(STATS_DIR, "snapshots")
 DB_PATH = os.path.join(STATS_DIR, "monitor.db")
 
-TORRENT_PATH = os.path.join(DATA_DIR, "shared.torrent")
-# Sidecar written by make_torrent.py: records the torrent path and the seed's
-# save_path (the parent dir of the shared content) so nodes can serve arbitrary
-# local files/directories without hard-coding their location.
-META_PATH = os.path.join(DATA_DIR, "torrent_meta.json")
-# Where the built-in sample dataset is generated when no content is given.
+# Catalog of created torrents. make_torrent.py writes one pair per torrent here:
+#   data/torrents/<name>.torrent  + data/torrents/<name>.json (sidecar meta).
+# The sidecar records the torrent path and the seed's save_path (the parent dir
+# of the shared content) so nodes can serve arbitrary local files/directories
+# without hard-coding their location. Nodes/control resolve a torrent by <name>.
+TORRENTS_DIR = os.path.join(DATA_DIR, "torrents")
+# Where the built-in sample datasets are generated when no content is given.
 SAMPLE_DIR = os.path.join(DATA_DIR, "sample")
 
 # --- Network -----------------------------------------------------------------
 HOST = "127.0.0.1"
-NUM_NODES = 5
-SEED_NODES = 1  # nodes [0 .. SEED_NODES-1] start as seeds, the rest as leechers
+NUM_NODES = 5  # how many node stats ports the monitor/control scan; nodes are
+               # started by hand and are roleless until told what to do.
 
 TRACKER_PORT = 8000
 BT_PORT_BASE = 6881      # node i listens for BitTorrent on BT_PORT_BASE + i
@@ -51,7 +52,3 @@ def bt_port(node_id: int) -> int:
 
 def stats_port(node_id: int) -> int:
     return STATS_PORT_BASE + node_id
-
-
-def is_seed(node_id: int) -> bool:
-    return node_id < SEED_NODES

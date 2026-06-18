@@ -1,15 +1,22 @@
-"""Create a BitTorrent v2-only .torrent from an arbitrary local file or
-directory (nested directories are included recursively).
+"""Create BitTorrent v2-only .torrent files from arbitrary local files or
+directories (nested directories are included recursively) and register them in
+a small on-disk catalog the nodes can resolve by name.
 
-    python make_torrent.py /path/to/dir-or-file
-    python make_torrent.py                # no arg: generate a nested sample dataset
+    python make_torrent.py /path/to/dir-or-file [more paths...]
+    python make_torrent.py                # no args: generate two sample torrents
 
-The seed serves the content *in place* from wherever it lives: we record the
-content's parent directory as the seed's save_path in a small JSON sidecar
-(config.META_PATH) that the nodes read. Leechers download into nodes/<id>/.
+Each torrent is written to the catalog as a pair under config.TORRENTS_DIR:
+    <name>.torrent   the torrent itself
+    <name>.json      sidecar meta: {id, torrent, seed_save_path, name, source,
+                                     info_hash}
+where <name> is the torrent's name (the basename of the shared file/dir). The
+seed serves the content *in place* from where it lives: we record the content's
+parent directory as the seed's save_path so a node can seed it without copying.
+Leechers download into nodes/<id>/<name>/.
 
 v2-only => SHA-256 merkle hashing, no v1/hybrid.
 """
+import glob
 import json
 import os
 import sys
@@ -18,31 +25,77 @@ import libtorrent as lt
 
 import config
 
-# (relative path, size in bytes) for the built-in sample dataset.
-SAMPLE_FILES = [
-    ("notes.txt", 12 * 1024),
-    ("images/photo_a.bin", 5 * 1024 * 1024),
-    ("images/photo_b.bin", 3 * 1024 * 1024),
-    ("docs/report.bin", 6 * 1024 * 1024),
-    ("docs/appendix/data.bin", 8 * 1024 * 1024),
-]
+# Built-in sample: two separate content roots => two separate torrents, so the
+# multi-torrent machinery is exercised out of the box. (relative path, size).
+SAMPLE_GROUPS = {
+    "media": [
+        ("photo_a.bin", 5 * 1024 * 1024),
+        ("photo_b.bin", 3 * 1024 * 1024),
+        ("clips/intro.bin", 4 * 1024 * 1024),
+    ],
+    "documents": [
+        ("notes.txt", 12 * 1024),
+        ("report.bin", 6 * 1024 * 1024),
+        ("appendix/data.bin", 8 * 1024 * 1024),
+    ],
+}
 
 
-def build_sample(root: str) -> None:
-    """Generate a nested sample directory tree (only if not already present)."""
-    if os.path.isdir(root) and all(
-            os.path.exists(os.path.join(root, p)) for p, _ in SAMPLE_FILES):
-        print(f"sample dataset already present: {root}")
-        return
-    print(f"generating sample dataset -> {root}")
-    for rel, size in SAMPLE_FILES:
-        path = os.path.join(root, rel)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as f:
-            f.write(os.urandom(size))
+# --- catalog helpers (used by node.py and control.py) ------------------------
+
+def catalog_torrent_path(name: str) -> str:
+    return os.path.join(config.TORRENTS_DIR, f"{name}.torrent")
 
 
-def make_torrent(source: str) -> "lt.torrent_info":
+def catalog_meta_path(name: str) -> str:
+    return os.path.join(config.TORRENTS_DIR, f"{name}.json")
+
+
+def load_meta(name: str) -> dict:
+    """Resolve a catalog torrent by name. Raises FileNotFoundError if unknown."""
+    with open(catalog_meta_path(name)) as f:
+        return json.load(f)
+
+
+def list_catalog() -> list:
+    """All registered torrents (meta dicts), sorted by name."""
+    metas = []
+    for path in sorted(glob.glob(os.path.join(config.TORRENTS_DIR, "*.json"))):
+        with open(path) as f:
+            metas.append(json.load(f))
+    return sorted(metas, key=lambda m: m["name"])
+
+
+# --- building ----------------------------------------------------------------
+
+def build_sample(root: str) -> list:
+    """Generate the nested sample content roots; return their paths."""
+    roots = []
+    for group, files in SAMPLE_GROUPS.items():
+        group_root = os.path.join(root, group)
+        roots.append(group_root)
+        if all(os.path.exists(os.path.join(group_root, p)) for p, _ in files):
+            print(f"sample group already present: {group_root}")
+            continue
+        print(f"generating sample group -> {group_root}")
+        for rel, size in files:
+            path = os.path.join(group_root, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(os.urandom(size))
+    return roots
+
+
+def _is_pad(fs, i: int) -> bool:
+    if hasattr(fs, "pad_file_at"):
+        try:
+            return fs.pad_file_at(i)
+        except Exception:
+            pass
+    return "/.pad/" in fs.file_path(i).replace(os.sep, "/")
+
+
+def make_torrent(source: str) -> dict:
     source = os.path.abspath(source)
     if not os.path.exists(source):
         sys.exit(f"error: content path does not exist: {source}")
@@ -60,48 +113,45 @@ def make_torrent(source: str) -> "lt.torrent_info":
     ct.set_comment(f"v2-only prototype content: {os.path.basename(source)}")
     lt.set_piece_hashes(ct, seed_save_path)  # hash the files as they sit on disk
 
-    os.makedirs(config.DATA_DIR, exist_ok=True)
-    with open(config.TORRENT_PATH, "wb") as f:
+    os.makedirs(config.TORRENTS_DIR, exist_ok=True)
+    torrent_path = catalog_torrent_path(fs.name())
+    with open(torrent_path, "wb") as f:
         f.write(lt.bencode(ct.generate()))
 
-    ti = lt.torrent_info(config.TORRENT_PATH)
+    ti = lt.torrent_info(torrent_path)
+    name = ti.name()
     meta = {
-        "torrent": config.TORRENT_PATH,
+        "id": name,
+        "torrent": torrent_path,
         "seed_save_path": seed_save_path,
-        "name": ti.name(),
+        "name": name,
         "source": source,
+        "info_hash": str(ti.info_hashes().v2),
     }
-    with open(config.META_PATH, "w") as f:
+    with open(catalog_meta_path(name), "w") as f:
         json.dump(meta, f, indent=2)
 
     real_files = [(fs.file_path(i), fs.file_size(i)) for i in range(fs.num_files())
                   if not _is_pad(fs, i)]
-    print(f"wrote {config.TORRENT_PATH}")
-    print(f"  name         : {ti.name()}")
-    print(f"  v2 info-hash : {ti.info_hashes().v2}")
+    print(f"wrote {torrent_path}")
+    print(f"  name         : {name}")
+    print(f"  v2 info-hash : {meta['info_hash']}")
     print(f"  files        : {len(real_files)}  (total {ti.total_size()} bytes)")
     print(f"  pieces       : {ti.num_pieces()} x {ti.piece_length()} bytes")
     print(f"  seed serves from: {seed_save_path}")
     for path, size in real_files:
         print(f"    - {path}  ({size} bytes)")
-    return ti
+    return meta
 
 
-def _is_pad(fs, i: int) -> bool:
-    if hasattr(fs, "pad_file_at"):
-        try:
-            return fs.pad_file_at(i)
-        except Exception:
-            pass
-    return "/.pad/" in fs.file_path(i).replace(os.sep, "/")
-
-
-def main(source: str | None = None) -> None:
-    if source is None:
-        build_sample(config.SAMPLE_DIR)
-        source = config.SAMPLE_DIR
-    make_torrent(source)
+def main(sources=None) -> None:
+    if not sources:
+        sources = build_sample(config.SAMPLE_DIR)
+    elif isinstance(sources, str):
+        sources = [sources]
+    for src in sources:
+        make_torrent(src)
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else None)
+    main(sys.argv[1:] or None)

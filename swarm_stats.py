@@ -1,36 +1,37 @@
 """Shared helpers to aggregate per-node /stats snapshots into swarm-wide views.
 
 Both monitor.py (for the DB time-series) and piece_map.py (for the live display)
-use these so they always compute "copies" the same way.
+use these so they always compute "copies" the same way. A node may hold several
+torrents at once, so everything is grouped per torrent (by v2 info-hash).
 """
 import math
 
 
-def collect(nodes: list):
-    """Normalise a list of node /stats snapshots.
+def collect_by_torrent(nodes: list) -> list:
+    """Group every node's torrent entries by torrent.
 
-    Returns (rows, meta) or (None, None) if no node reported a torrent.
+    Returns a list of (meta, rows), one per distinct torrent, sorted by name:
       rows: [{"id", "role", "bits": list[bool] of length num_pieces}]
-      meta: {num_pieces, piece_length, total_size, name, files, info_hash}
+      meta: {info_hash, name, num_pieces, piece_length, total_size, files}
     """
-    nodes = [n for n in nodes if n.get("torrents")]
-    if not nodes:
-        return None, None
-    t0 = nodes[0]["torrents"][0]
-    piece_length = t0["piece_length"]
-    total_size = t0["total_size"]
-    num_pieces = max(1, math.ceil(total_size / piece_length))
-
-    rows = []
-    for n in sorted(nodes, key=lambda n: n["node_id"]):
-        bits = [bool(b) for b in (n["torrents"][0].get("pieces") or [])]
-        bits = (bits + [False] * num_pieces)[:num_pieces]
-        rows.append({"id": n["node_id"], "role": n.get("role", "?"), "bits": bits})
-
-    meta = {"num_pieces": num_pieces, "piece_length": piece_length,
-            "total_size": total_size, "name": t0.get("name", ""),
-            "files": t0.get("files") or [], "info_hash": t0.get("info_hash_v2", "")}
-    return rows, meta
+    groups: dict = {}  # info_hash -> {"meta", "rows"}
+    for n in sorted(nodes, key=lambda n: n.get("node_id", 0)):
+        nid = n.get("node_id")
+        for t in n.get("torrents", []):
+            ih = t.get("info_hash_v2") or t.get("name")
+            piece_length = t["piece_length"]
+            total_size = t["total_size"]
+            num_pieces = max(1, math.ceil(total_size / piece_length))
+            bits = [bool(b) for b in (t.get("pieces") or [])]
+            bits = (bits + [False] * num_pieces)[:num_pieces]
+            g = groups.setdefault(ih, {
+                "meta": {"info_hash": ih, "name": t.get("name", ""),
+                         "num_pieces": num_pieces, "piece_length": piece_length,
+                         "total_size": total_size, "files": t.get("files") or []},
+                "rows": []})
+            g["rows"].append({"id": nid, "role": t.get("role", "?"), "bits": bits})
+    return [(g["meta"], g["rows"])
+            for g in sorted(groups.values(), key=lambda g: g["meta"]["name"])]
 
 
 def availability(rows: list, num_pieces: int) -> list:
