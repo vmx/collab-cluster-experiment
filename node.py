@@ -13,8 +13,10 @@ snapshot across all torrents the node currently holds. Control requests mutate
 the session live (libtorrent's session is thread-safe).
 """
 import argparse
+import glob
 import json
 import os
+import signal
 import threading
 import time
 import traceback
@@ -24,6 +26,16 @@ import libtorrent as lt
 
 import config
 import make_torrent
+
+# Persist torrents natively via libtorrent fast-resume. save_info_dict embeds the
+# torrent's metadata in the resume file, so a restarted node can re-add a torrent
+# from the .resume file alone (no catalog lookup needed); flush_disk_cache makes
+# the on-disk data match what we record. We rewrite a torrent's <name>.resume
+# whenever its state changes, and delete it on /remove, so restarting a node
+# restores exactly the torrents it was holding (with download progress intact).
+SAVE_FLAGS = lt.torrent_handle.save_info_dict | lt.torrent_handle.flush_disk_cache
+# How often (loops) to checkpoint resume data for torrents that changed.
+RESUME_EVERY = 5
 
 
 class NodeState:
@@ -35,6 +47,15 @@ class NodeState:
         self.torrents: dict = {}
         self.session_stats: dict = {}
         self.snapshot: dict = {"node_id": node_id, "torrents": [], "peers": []}
+        self.stop = threading.Event()
+
+
+def resume_dir(node_id: int) -> str:
+    return os.path.join(config.NODES_DIR, str(node_id), ".resume")
+
+
+def resume_path(node_id: int, name: str) -> str:
+    return os.path.join(resume_dir(node_id), f"{name}.resume")
 
 
 def state_name(state) -> str:
@@ -196,6 +217,9 @@ def add_torrent(ns: NodeState, name: str, role: str) -> dict:
              "ti": ti, "files": file_list(ti), "handle": handle}
     with ns.lock:
         ns.torrents[ih] = entry
+    # Persist the assignment immediately so a restart before any download still
+    # restores it (the loop writes the actual .resume file from the alert).
+    handle.save_resume_data(SAVE_FLAGS)
     print(f"node {ns.node_id}: +{role} '{meta['name']}' "
           f"({len(entry['files'])} files) save_path={save_path}", flush=True)
     return {"info_hash": ih, "name": meta["name"], "role": role, "added": True}
@@ -210,17 +234,87 @@ def remove_torrent(ns: NodeState, name: str = None, info_hash: str = None) -> di
     if not entry:
         return {"removed": False, "note": "not found"}
     ns.ses.remove_torrent(entry["handle"])
+    # Drop its resume file so a restart doesn't bring the torrent back.
+    try:
+        os.remove(resume_path(ns.node_id, entry["name"]))
+    except FileNotFoundError:
+        pass
     print(f"node {ns.node_id}: -{entry['name']}", flush=True)
     return {"removed": True, "info_hash": ih, "name": entry["name"]}
 
 
+def derive_role(node_id: int, save_path: str) -> str:
+    """A leecher saves under nodes/<id>/...; anything else is serving in place."""
+    leech_root = os.path.abspath(os.path.join(config.NODES_DIR, str(node_id)))
+    sp = os.path.abspath(save_path)
+    return "leech" if sp == leech_root or sp.startswith(leech_root + os.sep) else "seed"
+
+
+def _write_resume(node_id: int, alert) -> None:
+    os.makedirs(resume_dir(node_id), exist_ok=True)
+    with open(resume_path(node_id, alert.torrent_name), "wb") as f:
+        f.write(lt.write_resume_data_buf(alert.params))
+
+
+def load_resumes(ns: NodeState) -> int:
+    """Re-add every torrent saved as a .resume file (native fast-resume). The
+    resume file is self-contained (save_info_dict), so no catalog lookup needed."""
+    count = 0
+    for path in sorted(glob.glob(os.path.join(resume_dir(ns.node_id), "*.resume"))):
+        try:
+            with open(path, "rb") as f:
+                atp = lt.read_resume_data(f.read())
+        except Exception as exc:
+            print(f"node {ns.node_id}: skip {os.path.basename(path)}: {exc}", flush=True)
+            continue
+        ti = atp.ti
+        if ti is None:
+            print(f"node {ns.node_id}: skip {os.path.basename(path)}: no metadata",
+                  flush=True)
+            continue
+        ih = str(ti.info_hashes().v2)
+        role = derive_role(ns.node_id, atp.save_path)
+        handle = ns.ses.add_torrent(atp)
+        with ns.lock:
+            ns.torrents[ih] = {"name": ti.name(), "role": role,
+                               "save_path": atp.save_path, "ti": ti,
+                               "files": file_list(ti), "handle": handle}
+        count += 1
+        print(f"node {ns.node_id}: resumed {role} '{ti.name()}'", flush=True)
+    return count
+
+
+def flush_resume(ns: NodeState) -> None:
+    """Synchronously checkpoint all torrents (used on shutdown)."""
+    with ns.lock:
+        entries = list(ns.torrents.values())
+    pending = 0
+    for e in entries:
+        e["handle"].save_resume_data(SAVE_FLAGS)
+        pending += 1
+    deadline = time.time() + 5
+    while pending > 0 and time.time() < deadline:
+        for a in ns.ses.pop_alerts():
+            if isinstance(a, lt.save_resume_data_alert):
+                _write_resume(ns.node_id, a)
+                pending -= 1
+            elif isinstance(a, lt.save_resume_data_failed_alert):
+                pending -= 1
+        time.sleep(0.05)
+
+
 def session_loop(ns: NodeState) -> None:
-    while True:
+    loops = 0
+    while not ns.stop.is_set():
         ns.ses.post_session_stats()
-        time.sleep(config.NODE_LOOP_INTERVAL)
+        ns.stop.wait(config.NODE_LOOP_INTERVAL)  # sleep, but wake promptly on stop
+        loops += 1
         for a in ns.ses.pop_alerts():
             if isinstance(a, lt.session_stats_alert):
                 ns.session_stats = collect_session_stats(a.values)
+            elif isinstance(a, lt.save_resume_data_alert):
+                _write_resume(ns.node_id, a)
+            # save_resume_data_failed_alert: nothing to persist yet; ignore.
 
         with ns.lock:
             entries = list(ns.torrents.values())
@@ -242,6 +336,14 @@ def session_loop(ns: NodeState) -> None:
         }
         with ns.lock:
             ns.snapshot = snap
+
+        # Checkpoint fast-resume for any torrent whose state changed.
+        if loops % RESUME_EVERY == 0:
+            for e in entries:
+                if e["handle"].need_save_resume_data():
+                    e["handle"].save_resume_data(SAVE_FLAGS)
+
+    flush_resume(ns)
 
 
 def make_handler(ns: NodeState):
@@ -304,20 +406,36 @@ def main() -> None:
     ap.add_argument("--id", type=int, required=True)
     args = ap.parse_args()
 
+    # Treat SIGTERM like Ctrl-C (raise KeyboardInterrupt) so the node shuts down
+    # gracefully — checkpointing fast-resume — when stopped by a process manager
+    # or `kill`, not just by an interactive Ctrl-C.
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
+
     ses = make_session(args.id)
     ns = NodeState(args.id, ses)
-    threading.Thread(target=run_session, args=(ns,), daemon=True).start()
+    resumed = load_resumes(ns)  # restore torrents this node held before a restart
+    thread = threading.Thread(target=run_session, args=(ns,), daemon=True)
+    thread.start()
 
     srv = ThreadingHTTPServer((config.HOST, config.stats_port(args.id)), make_handler(ns))
+    # Handler threads must be daemonic: with HTTP/1.1 keep-alive they otherwise sit
+    # blocked reading the next request on a persistent connection, and as non-daemon
+    # threads they'd keep the process alive after Ctrl-C, hanging shutdown.
+    srv.daemon_threads = True
+    state = (f"(resumed {resumed} torrent(s))" if resumed
+             else "(empty; assign torrents with control.py)")
     print(f"node {args.id} up — bt:{config.bt_port(args.id)} "
           f"control/stats:http://{config.HOST}:{config.stats_port(args.id)}/  "
-          f"(empty; assign torrents with control.py)", flush=True)
+          f"{state}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         srv.shutdown()
+        srv.server_close()
+        ns.stop.set()              # let the session loop checkpoint and exit
+        thread.join(timeout=8)
 
 
 if __name__ == "__main__":

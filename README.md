@@ -13,6 +13,9 @@ snapshots.
   simultaneously; all stats are reported per torrent.
 - **Manually driven** — there's no catch-all orchestrator; you start each piece
   yourself and issue commands, so you can see exactly what's going on.
+- **Restart-safe** — nodes persist their torrents via libtorrent fast-resume, so
+  a node that's stopped (Ctrl-C / SIGTERM) and restarted comes back with the same
+  torrents and download progress, no re-download and no re-issuing commands.
 - **Python stdlib only**, plus the `libtorrent` python binding (tested with
   libtorrent 2.0.13 / Python 3.13). The tracker even reuses libtorrent's
   `bencode`, so there are no third-party dependencies.
@@ -71,7 +74,12 @@ Notes:
 - Ports, node count and timing all come from `config.py`. `NUM_NODES` only sets
   how many node ports the monitor and `control.py status` scan; you can start
   as few or as many nodes as you like.
-- Stop with Ctrl-C in each terminal. There's no shared shutdown.
+- Stop with Ctrl-C (or `kill`/SIGTERM) in each terminal. There's no shared
+  shutdown. A node checkpoints fast-resume on the way down and on restart
+  re-adds whatever it was holding (with progress intact) — so just relaunch
+  `python node.py --id N` and it picks up where it left off, no `control.py`
+  needed. To make a node truly forget a torrent, `control.py remove` it (that
+  deletes its resume file); deleting `nodes/<id>/.resume/` forgets everything.
 
 ## Inspect
 
@@ -123,6 +131,8 @@ sqlite3 stats/monitor.db "SELECT node_id, info_hash, MAX(progress) FROM torrent_
 - `data/torrents/` — `<name>.torrent` + `<name>.json` per catalog entry
 - `data/sample/` — the built-in sample datasets (when no content is given)
 - `nodes/<id>/<name>/` — each leecher's download directory per torrent
+- `nodes/<id>/.resume/<name>.resume` — libtorrent fast-resume per torrent (lets a
+  restarted node restore its torrents + progress)
 - `stats/monitor.db` — SQLite time-series (`node_session_stats`,
   `torrent_status`, `peer_info`, `tracker_stats`, `file_replication`)
 - `stats/snapshots/*.json` — full combined snapshot per poll

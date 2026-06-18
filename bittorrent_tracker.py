@@ -174,6 +174,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     srv = ThreadingHTTPServer((config.HOST, config.TRACKER_PORT), Handler)
+    srv.daemon_threads = True  # don't let keep-alive handler threads block Ctrl-C
     print(f"tracker on http://{config.HOST}:{config.TRACKER_PORT}/announce", flush=True)
     try:
         srv.serve_forever()
@@ -181,6 +182,7 @@ def main() -> None:
         pass
     finally:
         srv.shutdown()
+        srv.server_close()
 
 
 if __name__ == "__main__":
