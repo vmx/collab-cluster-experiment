@@ -13,14 +13,15 @@ monitor snapshot from stats/snapshots/ instead (useful after a run).
 
 Usage:
     python piece_map.py                # live, once
-    python piece_map.py --watch 2      # live, refresh every 2s
     python piece_map.py --snapshot     # read newest stats/snapshots/*.json
+
+To refresh continuously, wrap it with the `watch` CLI tool:
+    watch -n 2 python piece_map.py
 """
 import argparse
 import glob
 import json
 import os
-import time
 import urllib.request
 
 import config
@@ -164,27 +165,11 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--snapshot", action="store_true",
                     help="read newest stats/snapshots/*.json instead of polling live")
-    ap.add_argument("--watch", type=float, metavar="SECONDS",
-                    help="refresh continuously every SECONDS (Ctrl-C to stop)")
     args = ap.parse_args()
 
     fetch = fetch_snapshot if args.snapshot else fetch_live
     source = "snapshot" if args.snapshot else "live"
-
-    def once():
-        report(fetch(), source)
-
-    if args.watch:
-        try:
-            while True:
-                print("\033[2J\033[H", end="")  # clear screen
-                print(time.strftime("%H:%M:%S"))
-                once()
-                time.sleep(args.watch)
-        except KeyboardInterrupt:
-            pass
-    else:
-        once()
+    report(fetch(), source)
 
 
 if __name__ == "__main__":

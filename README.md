@@ -85,9 +85,9 @@ curl -s http://127.0.0.1:8000/stats | python -m json.tool
 python report.py
 
 # who has which pieces/files, and how many copies of each file exist
-python piece_map.py            # live snapshot, once (incl. per-file copy counts)
-python piece_map.py --watch 2  # refresh every 2s
-python piece_map.py --snapshot # read newest stats/snapshots/*.json instead of live
+python piece_map.py             # live snapshot, once (incl. per-file copy counts)
+python piece_map.py --snapshot  # read newest stats/snapshots/*.json instead of live
+watch -n 2 python piece_map.py  # refresh every 2s (use the `watch` CLI tool)
 
 # raw SQL
 sqlite3 stats/monitor.db ".tables"
