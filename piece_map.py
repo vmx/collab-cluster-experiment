@@ -14,7 +14,6 @@ monitor snapshot from stats/snapshots/ instead (useful after a run).
 Usage:
     python piece_map.py                # live, once
     python piece_map.py --watch 2      # live, refresh every 2s
-    python piece_map.py --pieces       # also list holders of every piece
     python piece_map.py --snapshot     # read newest stats/snapshots/*.json
 """
 import argparse
@@ -92,7 +91,7 @@ def render_avail(avail: list, num_pieces: int, cols: int) -> str:
                    for c in range(cols))
 
 
-def report(nodes: list, source: str, show_pieces: bool) -> None:
+def report(nodes: list, source: str) -> None:
     rows, meta = swarm_stats.collect(nodes)
     if not rows:
         print("No nodes responded (are the nodes running? try --snapshot).")
@@ -159,22 +158,12 @@ def report(nodes: list, source: str, show_pieces: bool) -> None:
             print(f"  {disp:<34} {human(f['size']):>9} {f['full_copies']:>5} "
                   f"{f['recon_copies']:>6}  {holders}{extra}")
 
-    if show_pieces:
-        print("\nPiece -> holders:")
-        for i in range(num_pieces):
-            holders = [f"n{r['id']}" for r in rows if r["bits"][i]]
-            sz = human(piece_size(i, piece_length, total_size, num_pieces))
-            print(f"  piece {i:>4} ({sz:>9}): "
-                  f"{', '.join(holders) if holders else '(none — MISSING)'}")
-
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--snapshot", action="store_true",
                     help="read newest stats/snapshots/*.json instead of polling live")
-    ap.add_argument("--pieces", action="store_true",
-                    help="also list the holders of every individual piece")
     ap.add_argument("--watch", type=float, metavar="SECONDS",
                     help="refresh continuously every SECONDS (Ctrl-C to stop)")
     args = ap.parse_args()
@@ -183,7 +172,7 @@ def main() -> None:
     source = "snapshot" if args.snapshot else "live"
 
     def once():
-        report(fetch(), source, args.pieces)
+        report(fetch(), source)
 
     if args.watch:
         try:
