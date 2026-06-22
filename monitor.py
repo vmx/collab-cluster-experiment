@@ -1,5 +1,9 @@
-"""Monitoring service: poll every node's /stats and the tracker, persist all of
-it to SQLite time-series tables plus per-poll JSON snapshots.
+"""Monitoring service: poll every node's /stats, persist all of it to SQLite
+time-series tables plus per-poll JSON snapshots.
+
+There is no tracker to poll — discovery is trackerless (introducer + PEX), so
+the swarm's makeup is reconstructed purely from each node's peer list, and the
+summary shows how many peers each node found via PEX.
 
 Runs as its own process. Prints a one-line per-node summary each poll so the
 swarm's progress is visible live.
@@ -35,10 +39,6 @@ CREATE TABLE IF NOT EXISTS peer_info(
   progress REAL, total_download INTEGER, total_upload INTEGER,
   flags INTEGER, source INTEGER, rtt INTEGER);
 
-CREATE TABLE IF NOT EXISTS tracker_stats(
-  ts REAL, info_hash TEXT, seeders INTEGER, leechers INTEGER,
-  peers INTEGER, announces INTEGER);
-
 -- Per-file replication over time: full_copies = nodes holding the whole file,
 -- recon_copies = reconstructable copies (replication of the file's rarest piece).
 -- Keyed by torrent (info_hash) since a swarm can host many torrents at once.
@@ -65,6 +65,13 @@ def record_node(db, ts, node_id, snap, summary):
     for metric, value in snap.get("session", {}).items():
         db.execute("INSERT INTO node_session_stats VALUES (?,?,?,?)",
                    (ts, node_id, metric, value))
+    # Count peers discovered via PEX, per torrent, for the live summary (the
+    # trackerless discovery signal). The raw source bits are stored per peer below.
+    pex_by_torrent = {}
+    for p in snap.get("peers", []):
+        if "pex" in (p.get("source_flags") or []):
+            name = p.get("torrent")
+            pex_by_torrent[name] = pex_by_torrent.get(name, 0) + 1
     for t in snap.get("torrents", []):
         db.execute(
             "INSERT INTO torrent_status VALUES "
@@ -78,11 +85,12 @@ def record_node(db, ts, node_id, snap, summary):
              t.get("num_peers"), t.get("num_seeds"), t.get("num_connections"),
              t.get("num_pieces"), t.get("distributed_copies"),
              int(bool(t.get("is_seeding"))), int(bool(t.get("is_finished")))))
+        pex = pex_by_torrent.get(t.get("name"), 0)
         summary.append(
             f"n{node_id}/{t.get('name')}:{(t.get('progress') or 0) * 100:3.0f}% "
             f"▲{(t.get('upload_rate') or 0) // 1024}K "
             f"▼{(t.get('download_rate') or 0) // 1024}K "
-            f"p{t.get('num_peers') or 0}")
+            f"p{t.get('num_peers') or 0}" + (f"·pex{pex}" if pex else ""))
     for p in snap.get("peers", []):
         db.execute(
             "INSERT INTO peer_info VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -100,13 +108,12 @@ def main() -> None:
 
     node_urls = {i: f"http://{config.HOST}:{config.stats_port(i)}/stats"
                  for i in range(config.NUM_NODES)}
-    tracker_url = f"http://{config.HOST}:{config.TRACKER_PORT}/stats"
     print(f"monitor: polling {config.NUM_NODES} nodes every "
           f"{config.POLL_INTERVAL}s -> {config.DB_PATH}", flush=True)
 
     while True:
         ts = time.time()
-        combined = {"ts": ts, "nodes": {}, "tracker": None}
+        combined = {"ts": ts, "nodes": {}}
         summary = []
 
         for node_id, url in node_urls.items():
@@ -116,14 +123,6 @@ def main() -> None:
                 continue
             combined["nodes"][node_id] = snap
             record_node(db, ts, node_id, snap, summary)
-
-        tr = fetch(tracker_url)
-        if tr:
-            combined["tracker"] = tr
-            for t in tr.get("torrents", []):
-                db.execute("INSERT INTO tracker_stats VALUES (?,?,?,?,?,?)",
-                           (ts, t.get("info_hash"), t.get("seeders"),
-                            t.get("leechers"), t.get("peers"), t.get("announces")))
 
         # Per-file replication needs all nodes' bitfields combined for this poll,
         # grouped per torrent (a node may hold several at once).

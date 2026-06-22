@@ -108,7 +108,9 @@ def make_torrent(source: str) -> dict:
         sys.exit(f"error: no data found under {source}")
 
     ct = lt.create_torrent(fs, config.PIECE_SIZE, flags=lt.create_torrent.v2_only)
-    ct.add_tracker(config.TRACKER_URL)
+    # Trackerless: no announce URL. Peers find each other via an introducer peer
+    # (config.INTRODUCERS) plus PEX. Leaving the torrent non-private keeps PEX
+    # allowed (private torrents disable peer exchange).
     ct.set_creator("bittorrent-prototype")
     ct.set_comment(f"v2-only prototype content: {os.path.basename(source)}")
     lt.set_piece_hashes(ct, seed_save_path)  # hash the files as they sit on disk

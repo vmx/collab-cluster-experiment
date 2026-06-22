@@ -1,12 +1,14 @@
 """Summarize a finished (or running) experiment from stats/monitor.db.
 
 Run after (or during) a session to sanity-check the captured metrics: transfer
-rates, time-to-complete, bytes moved, tracker activity and per-file replication.
-Everything is broken out per torrent, since a swarm can host several at once.
+rates, time-to-complete, bytes moved, how peers were discovered (PEX, etc.) and
+per-file replication. Everything is broken out per torrent, since a swarm can
+host several at once.
 """
 import sqlite3
 
 import config
+import swarm_stats
 
 
 def torrent_names(db) -> dict:
@@ -91,13 +93,13 @@ def main() -> None:
                       f"{peak:>5} {when}")
             print(f"  (t_full = time until all {nnodes} holders had the whole file)")
 
-    print("\n=== Tracker (max observed, per announced info_hash) ===")
-    for r in db.execute("""
-            SELECT info_hash, MAX(seeders) AS s, MAX(leechers) AS l,
-                   MAX(peers) AS p, MAX(announces) AS a
-            FROM tracker_stats GROUP BY info_hash"""):
-        print(f" {r['info_hash'][:16]}...  seeders {r['s']}  leechers {r['l']}  "
-              f"peers {r['p']}  announces {r['a']}")
+    print("\n=== Peer discovery (distinct peer endpoints by source) ===")
+    print("(trackerless: peers come in via an introducer dial then spread via PEX)")
+    for bit, label in swarm_stats.PEER_SOURCE_FLAGS:
+        n = db.execute("SELECT COUNT(DISTINCT peer_ip) FROM peer_info "
+                       "WHERE source & ?", (bit,)).fetchone()[0]
+        if n:
+            print(f"  {label:<9} {n}")
 
     total_session_rows = db.execute(
         "SELECT COUNT(*) FROM node_session_stats").fetchone()[0]

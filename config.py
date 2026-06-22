@@ -26,11 +26,22 @@ HOST = "127.0.0.1"
 NUM_NODES = 5  # how many node stats ports the monitor/control scan; nodes are
                # started by hand and are roleless until told what to do.
 
-TRACKER_PORT = 8000
 BT_PORT_BASE = 6881      # node i listens for BitTorrent on BT_PORT_BASE + i
 STATS_PORT_BASE = 8001   # node i serves its /stats JSON on STATS_PORT_BASE + i
 
-TRACKER_URL = f"http://{HOST}:{TRACKER_PORT}/announce"
+# --- Trackerless discovery (introducer bootstrap + PEX) ----------------------
+# There is no central tracker. A newly joining torrent dials these "introducer"
+# peers to enter the swarm; once connected, PEX (peer exchange) gossips the rest
+# of the peers between them. Nothing here is a special node — every peer is a
+# valid introducer — so list a few for resilience: any one that's reachable is
+# enough to bootstrap, and a down introducer is simply swapped for the next.
+# Once a node has joined even once, fast-resume + PEX mean it no longer needs an
+# introducer; they only matter for a cold, from-zero join.
+#
+# Each entry is either a node id (localhost: the address is derived from its
+# bt_port) or an explicit "host:port" string (cross-machine / VPN, where an id
+# can't map to an address — e.g. "10.0.0.5:6881").
+INTRODUCERS = [0]
 
 # --- Torrent (BitTorrent v2 only) --------------------------------------------
 PIECE_SIZE = 256 * 1024          # 256 KiB; power of two (v2 requires >= 16 KiB)
@@ -41,7 +52,6 @@ PIECE_SIZE = 256 * 1024          # 256 KiB; power of two (v2 requires >= 16 KiB)
 UPLOAD_RATE_LIMIT = 1 * 1024 * 1024
 
 # --- Timing (seconds) --------------------------------------------------------
-ANNOUNCE_INTERVAL = 5      # interval the tracker advertises to peers
 POLL_INTERVAL = 1.0        # how often the monitor polls every node
 NODE_LOOP_INTERVAL = 1.0   # how often a node refreshes its stats snapshot
 
@@ -52,3 +62,21 @@ def bt_port(node_id: int) -> int:
 
 def stats_port(node_id: int) -> int:
     return STATS_PORT_BASE + node_id
+
+
+def introducer_addrs(self_id: int = None) -> list:
+    """Resolve INTRODUCERS to (host, port) tuples, skipping this node itself.
+
+    Int entries are localhost node ids (address derived from bt_port); string
+    entries are explicit "host:port" for cross-machine/VPN setups.
+    """
+    addrs = []
+    for entry in INTRODUCERS:
+        if isinstance(entry, int):
+            if entry == self_id:
+                continue
+            addrs.append((HOST, bt_port(entry)))
+        else:
+            host, _, port = entry.rpartition(":")
+            addrs.append((host, int(port)))
+    return addrs

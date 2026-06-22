@@ -6,6 +6,24 @@ torrents at once, so everything is grouped per torrent (by v2 info-hash).
 """
 import math
 
+# libtorrent peer_info.source bit flags -> label. These are stable library
+# values; we keep them here (plain ints) so modules without a libtorrent import
+# (monitor, report) can decode the `source` we record. With no tracker/DHT/LSD,
+# "pex" and "incoming" are how peers are expected to be discovered.
+PEER_SOURCE_FLAGS = [
+    (0x1, "tracker"),
+    (0x2, "dht"),
+    (0x4, "pex"),
+    (0x8, "lsd"),
+    (0x10, "resume"),
+    (0x20, "incoming"),
+]
+
+
+def source_labels(source: int) -> list:
+    """Decode a peer_info.source bitmask into its source labels."""
+    return [label for bit, label in PEER_SOURCE_FLAGS if source & bit]
+
 
 def collect_by_torrent(nodes: list) -> list:
     """Group every node's torrent entries by torrent.
