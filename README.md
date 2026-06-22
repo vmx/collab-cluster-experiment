@@ -97,6 +97,11 @@ curl -s http://127.0.0.1:8001/stats | python -m json.tool
 # what each node is doing right now
 python control.py status
 
+# how the nodes are connected to each other right now (who dialed whom, per
+# torrent) — watch it go from introducer-only to a full mesh as PEX kicks in
+python topology.py
+watch -n 1 python topology.py
+
 # summary report from the recorded time-series (broken out per torrent)
 python report.py
 
@@ -121,6 +126,7 @@ sqlite3 stats/monitor.db "SELECT node_id, info_hash, MAX(progress) FROM torrent_
 | `monitor.py` | Polls all nodes → SQLite + JSON snapshots (per torrent); surfaces PEX-discovered peer counts. |
 | `report.py` | Prints a per-torrent summary from `stats/monitor.db`. |
 | `piece_map.py` | Per torrent: which peer holds which pieces/files + how many copies of each file exist. |
+| `topology.py` | Per torrent: the live peer-connection graph (who dialed whom), so you can watch PEX grow the mesh from the introducer. |
 | `swarm_stats.py` | Shared helpers that group node snapshots by torrent and aggregate per-piece/per-file copy stats (used by `monitor.py` + `piece_map.py`). |
 
 ## Ports
