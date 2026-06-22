@@ -37,6 +37,11 @@ import swarm_stats
 SAVE_FLAGS = lt.torrent_handle.save_info_dict | lt.torrent_handle.flush_disk_cache
 # How often (loops) to checkpoint resume data for torrents that changed.
 RESUME_EVERY = 5
+# How often (loops) to re-dial introducers for any torrent that still has no
+# peers. Makes discovery self-healing and order-independent: a torrent added
+# before its introducer joined that swarm (or before any seed appeared) meshes
+# on a later retry without re-issuing control commands.
+BOOTSTRAP_EVERY = 5
 
 
 class NodeState:
@@ -336,12 +341,18 @@ def session_loop(ns: NodeState) -> None:
         with ns.lock:
             entries = list(ns.torrents.values())
 
+        retry_bootstrap = loops % BOOTSTRAP_EVERY == 0
         torrents, peers = [], []
         for e in entries:
             st = e["handle"].status()
             torrents.append(torrent_dict(st, e["ti"], e["files"], e["role"]))
             for p in e["handle"].get_peer_info():
                 peers.append(peer_dict(p, e["name"]))
+            # Self-heal discovery: a torrent with no peers re-dials its introducers
+            # (e.g. it was added before its introducer joined that swarm). PEX
+            # takes over once a single connection lands.
+            if retry_bootstrap and st.num_peers == 0:
+                bootstrap(ns, e["handle"])
 
         snap = {
             "node_id": ns.node_id,

@@ -38,6 +38,14 @@ STATS_PORT_BASE = 8001   # node i serves its /stats JSON on STATS_PORT_BASE + i
 # Once a node has joined even once, fast-resume + PEX mean it no longer needs an
 # introducer; they only matter for a cold, from-zero join.
 #
+# IMPORTANT (multi-torrent): PEX is per-torrent, so each torrent needs at least
+# one introducer that is itself a member of THAT torrent's swarm. A single
+# introducer that doesn't hold a given torrent cannot bootstrap it. The simplest
+# setup is to treat one node as a rendezvous and add every torrent to it (the
+# role the tracker used to play). Order doesn't matter: a torrent with no peers
+# re-dials its introducers periodically (node.py BOOTSTRAP_EVERY), so it meshes
+# as soon as an introducer joins that swarm.
+#
 # Each entry is either a node id (localhost: the address is derived from its
 # bt_port) or an explicit "host:port" string (cross-machine / VPN, where an id
 # can't map to an address — e.g. "10.0.0.5:6881").
