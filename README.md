@@ -8,11 +8,12 @@ torrents via a small control API. A separate **monitoring service** captures as
 many stats as possible into SQLite + JSON snapshots.
 
 - **Tracker-based discovery** — peers find each other by announcing to a central
-  tracker. We don't ship one; you run the installed **opentracker**. Torrents are
-  built **private** (announce URL baked in), which makes libtorrent disable
-  PEX/DHT/LSD, so discovery is purely tracker-driven. opentracker runs in
-  whitelist mode here, so `make_torrent.py` also writes `data/tracker.whitelist`
-  (the catalog's info-hashes) for you to start the tracker with.
+  tracker (`bittorrent_tracker.py`, a tiny stdlib script; no whitelist). Torrents
+  are built **private** (announce URL baked in), which makes libtorrent disable
+  PEX/DHT/LSD, so discovery is purely tracker-driven.
+- **Torrents live on the tracker** — the same tracker also hosts the torrent
+  catalog over HTTP (`/catalog`), so a node needs only the tracker URL to obtain
+  both peers and the `.torrent` itself; there's no shared catalog directory.
 - **BitTorrent v2 only** (SHA-256 merkle, no v1/hybrid).
 - **Multiple torrents at once** — a node can seed some and leech others
   simultaneously; all stats are reported per torrent.
@@ -33,14 +34,13 @@ start **empty**; you assign torrents to them at runtime with `control.py`.
 # 1. Build the torrent catalog (writes data/torrents/<name>.torrent + <name>.json).
 #    No args = built-in sample (two torrents: "media" and "documents").
 #    Or pass any number of files/directories — each becomes its own torrent.
-#    Torrents are private + tracker-based; this also (re)writes the tracker
-#    whitelist (data/tracker.whitelist) and prints the exact opentracker command.
+#    Torrents are private + tracker-based (announce URL baked in).
 python make_torrent.py                       # built-in sample (two torrents)
 python make_torrent.py ~/photos ~/some/file  # or build your own catalog
 
-# 2. Start the tracker (opentracker) with the whitelist make_torrent wrote.
-#    Must be up before nodes announce. Re-run make_torrent if you add torrents.
-opentracker -i 127.0.0.1 -p 6969 -P 6969 -w data/tracker.whitelist
+# 2. Start the tracker. It serves announces AND hosts the torrent catalog, so it
+#    should be up before nodes/control run. Listens on :8000.
+python bittorrent_tracker.py
 
 # 3. Start some node daemons — one process each, identified only by --id.
 #    BitTorrent port = 6881+id, control/stats HTTP port = 8001+id. No role yet.
@@ -96,6 +96,10 @@ Notes:
 # incl. each peer's discovery source — "tracker", "incoming", ...)
 curl -s http://127.0.0.1:8001/stats | python -m json.tool
 
+# the tracker's view of the swarm, and the catalog it hosts
+curl -s http://127.0.0.1:8000/stats | python -m json.tool
+curl -s http://127.0.0.1:8000/catalog | python -m json.tool
+
 # what each node is doing right now
 python control.py status
 
@@ -121,29 +125,28 @@ sqlite3 stats/monitor.db "SELECT node_id, info_hash, MAX(progress) FROM torrent_
 
 | File | Role |
 |---|---|
-| `config.py` | Ports, counts, paths, timing, tracker URL/whitelist — the single source of truth. |
-| `make_torrent.py` | Build v2-only, private, tracker-based `.torrent`s from any files/dirs into the catalog (`data/torrents/`); generates a two-torrent sample if no args, and (re)writes `data/tracker.whitelist`. Also the catalog-lookup helpers used by the node/control. |
-| `node.py` | One roleless node daemon: libtorrent session (announces to the tracker) + HTTP `/stats` (GET) and `/add` `/remove` (POST) control endpoints. |
-| `control.py` | CLI to list the catalog, inspect nodes, and tell nodes to seed/leech torrents. |
+| `config.py` | Ports, counts, paths, timing, tracker URL — the single source of truth. |
+| `make_torrent.py` | Build v2-only, private, tracker-based `.torrent`s from any files/dirs into the catalog (`data/torrents/`, the tracker's store); generates a two-torrent sample if no args. Also the local catalog-lookup helpers the tracker uses to serve `/catalog`. |
+| `bittorrent_tracker.py` | The tiny stdlib tracker: `/announce` + `/scrape` + `/stats`, keyed by info-hash (no whitelist), and `/catalog` endpoints that host the torrents. |
+| `catalog.py` | Stdlib client the node/control use to fetch the catalog (list, meta, `.torrent`) from the tracker over HTTP. |
+| `node.py` | One roleless node daemon: libtorrent session (announces to the tracker; fetches torrents from its `/catalog`) + HTTP `/stats` (GET) and `/add` `/remove` (POST) control endpoints. |
+| `control.py` | CLI to list the catalog (from the tracker), inspect nodes, and tell nodes to seed/leech torrents. |
 | `monitor.py` | Polls all nodes → SQLite + JSON snapshots (per torrent). |
 | `report.py` | Prints a per-torrent summary from `stats/monitor.db`. |
 | `piece_map.py` | Per torrent: which peer holds which pieces/files + how many copies of each file exist. |
 | `topology.py` | Per torrent: the live peer-connection graph (who dialed whom, and that peers came from the tracker). |
 | `swarm_stats.py` | Shared helpers that group node snapshots by torrent and aggregate per-piece/per-file copy stats (used by `monitor.py` + `piece_map.py`). |
 
-You bring the tracker: the installed **opentracker** (not part of this repo).
-
 ## Ports
 
-- Tracker (opentracker): `6969` (tcp + udp)
+- Tracker (`bittorrent_tracker.py`): `8000`
 - Node *i* BitTorrent: `6881 + i`
 - Node *i* control/stats HTTP: `8001 + i`
 
 ## Outputs (generated, safe to delete)
 
-- `data/torrents/` — `<name>.torrent` + `<name>.json` per catalog entry
-- `data/tracker.whitelist` — info-hashes for opentracker's whitelist (regenerated
-  by `make_torrent.py`)
+- `data/torrents/` — `<name>.torrent` + `<name>.json` per catalog entry (the
+  tracker's store, served via `/catalog`)
 - `data/sample/` — the built-in sample datasets (when no content is given)
 - `nodes/<id>/<name>/` — each leecher's download directory per torrent
 - `nodes/<id>/.resume/<name>.resume` — libtorrent fast-resume per torrent (lets a

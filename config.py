@@ -29,18 +29,16 @@ NUM_NODES = 5  # how many node stats ports the monitor/control scan; nodes are
 BT_PORT_BASE = 6881      # node i listens for BitTorrent on BT_PORT_BASE + i
 STATS_PORT_BASE = 8001   # node i serves its /stats JSON on STATS_PORT_BASE + i
 
-# --- Tracker-based discovery (opentracker) -----------------------------------
-# Discovery is tracker-driven: torrents are built with this announce URL baked
-# in and marked private (which disables PEX/DHT/LSD), so peers find each other
-# purely by announcing to the tracker. We don't ship a tracker — run the
-# installed opentracker on this address:
-#     opentracker -i 127.0.0.1 -p 6969 -P 6969
-TRACKER_PORT = 6969      # opentracker's default tcp/udp port
+# --- Tracker-based discovery (our own tracker) -------------------------------
+# Discovery is tracker-driven: torrents are built with this announce URL baked in
+# and marked private (which disables PEX/DHT/LSD), so peers find each other purely
+# by announcing to the tracker. The tracker is our own tiny stdlib script
+# (bittorrent_tracker.py) — it accepts any info-hash (no whitelist) and also
+# serves the torrent catalog, so a node needs only this URL to obtain both peers
+# and the .torrent itself.
+TRACKER_PORT = 8000
 TRACKER_URL = f"http://{HOST}:{TRACKER_PORT}/announce"
-# opentracker (as installed here) runs in whitelist mode: it only serves torrents
-# whose info-hash is listed in this file. make_torrent.py regenerates it from the
-# catalog, so start the tracker with:  opentracker ... -w data/tracker.whitelist
-WHITELIST_PATH = os.path.join(DATA_DIR, "tracker.whitelist")
+TRACKER_BASE = f"http://{HOST}:{TRACKER_PORT}"
 
 # --- Torrent (BitTorrent v2 only) --------------------------------------------
 PIECE_SIZE = 256 * 1024          # 256 KiB; power of two (v2 requires >= 16 KiB)

@@ -15,8 +15,8 @@ import json
 import sys
 import urllib.request
 
+import catalog
 import config
-import make_torrent
 
 
 def _node_url(node_id: int, path: str) -> str:
@@ -44,12 +44,16 @@ def _post(node_id: int, path: str, payload: dict):
 
 
 def cmd_list(_args) -> None:
-    catalog = make_torrent.list_catalog()
-    if not catalog:
+    try:
+        metas = catalog.fetch_list()
+    except Exception:
+        print("can't reach the tracker catalog — is bittorrent_tracker.py running?")
+        sys.exit(1)
+    if not metas:
         print("catalog empty — build one with: python make_torrent.py [paths...]")
         return
     print(f"{'name':<20} {'v2 info-hash':<20} source")
-    for m in catalog:
+    for m in metas:
         print(f"{m['name']:<20} {m['info_hash'][:18]:<20} {m['source']}")
 
 

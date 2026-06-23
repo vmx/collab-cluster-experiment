@@ -66,22 +66,6 @@ def list_catalog() -> list:
     return sorted(metas, key=lambda m: m["name"])
 
 
-def write_whitelist() -> str:
-    """(Re)write the opentracker whitelist covering the whole catalog.
-
-    opentracker keys on the 20-byte info-hash. A v2 torrent announces using the
-    first 20 bytes of its SHA-256 v2 hash, i.e. the first 40 hex chars of the
-    sidecar's `info_hash`. Run the tracker with `-w config.WHITELIST_PATH`.
-    """
-    lines = [m["info_hash"][:40] for m in list_catalog()]
-    with open(config.WHITELIST_PATH, "w") as f:
-        f.write("\n".join(lines) + ("\n" if lines else ""))
-    print(f"wrote {config.WHITELIST_PATH} ({len(lines)} torrent(s)) — "
-          f"run: opentracker -i {config.HOST} -p {config.TRACKER_PORT} "
-          f"-P {config.TRACKER_PORT} -w {config.WHITELIST_PATH}")
-    return config.WHITELIST_PATH
-
-
 # --- building ----------------------------------------------------------------
 
 def build_sample(root: str) -> list:
@@ -172,8 +156,6 @@ def main(sources=None) -> None:
         sources = [sources]
     for src in sources:
         make_torrent(src)
-    # Keep the tracker whitelist in sync with the full catalog.
-    write_whitelist()
 
 
 if __name__ == "__main__":

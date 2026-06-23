@@ -24,8 +24,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import libtorrent as lt
 
+import catalog
 import config
-import make_torrent
 import swarm_stats
 
 # Persist torrents natively via libtorrent fast-resume. save_info_dict embeds the
@@ -199,8 +199,10 @@ def add_torrent(ns: NodeState, name: str, role: str) -> dict:
     """Add a catalog torrent to the running session. Returns a small status dict."""
     if role not in ("seed", "leech"):
         raise ValueError(f"role must be 'seed' or 'leech', got {role!r}")
-    meta = make_torrent.load_meta(name)  # raises FileNotFoundError if unknown
-    ti = lt.torrent_info(meta["torrent"])
+    # The catalog lives on the tracker: fetch the meta + .torrent over HTTP rather
+    # than reading a shared directory. (raises FileNotFoundError if unknown)
+    meta = catalog.fetch_meta(name)
+    ti = lt.torrent_info(lt.bdecode(catalog.fetch_torrent_bytes(name)))
     ih = str(ti.info_hashes().v2)
 
     with ns.lock:

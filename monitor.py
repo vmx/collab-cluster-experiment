@@ -1,10 +1,10 @@
 """Monitoring service: poll every node's /stats, persist all of it to SQLite
 time-series tables plus per-poll JSON snapshots.
 
-Discovery is tracker-driven (opentracker), but the monitor reconstructs the
-swarm's makeup from each node's own peer list rather than scraping the tracker,
-so it needs no tracker-specific stats endpoint. Each peer's `source` still
-records how it was learned (here, dominated by `tracker`/`incoming`).
+Discovery is tracker-driven, but the monitor reconstructs the swarm's makeup from
+each node's own peer list rather than scraping the tracker, so it needs no
+tracker-specific stats endpoint (the tracker does expose /stats for manual use).
+Each peer's `source` still records how it was learned (here, `tracker`/`incoming`).
 
 Runs as its own process. Prints a one-line per-node summary each poll so the
 swarm's progress is visible live.
