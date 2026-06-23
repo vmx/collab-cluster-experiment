@@ -1,8 +1,8 @@
 """Shared helpers to aggregate per-node /stats snapshots into swarm-wide views.
 
-Both monitor.py (for the DB time-series) and piece_map.py (for the live display)
-use these so they always compute "copies" the same way. A node may hold several
-torrents at once, so everything is grouped per torrent (by v2 info-hash).
+Both collector.py (for the DB time-series) and piece_map.py (for the live
+display) use these so they always compute "copies" the same way. A node may hold
+several torrents at once, so everything is grouped per torrent (by v2 info-hash).
 """
 import math
 
@@ -29,12 +29,15 @@ def collect_by_torrent(nodes: list) -> list:
     """Group every node's torrent entries by torrent.
 
     Returns a list of (meta, rows), one per distinct torrent, sorted by name:
-      rows: [{"id", "role", "bits": list[bool] of length num_pieces}]
+      rows: [{"id", "label", "role", "bits": list[bool] of length num_pieces}]
+            id = node_key (stable swarm-wide identity, used for the DB / holders);
+            label = short human name for display.
       meta: {info_hash, name, num_pieces, piece_length, total_size, files}
     """
     groups: dict = {}  # info_hash -> {"meta", "rows"}
-    for n in sorted(nodes, key=lambda n: n.get("node_id", 0)):
-        nid = n.get("node_id")
+    for n in sorted(nodes, key=lambda n: n.get("label", "")):
+        key = n.get("node_key")
+        label = n.get("label", key)
         for t in n.get("torrents", []):
             ih = t.get("info_hash_v2") or t.get("name")
             piece_length = t["piece_length"]
@@ -47,7 +50,8 @@ def collect_by_torrent(nodes: list) -> list:
                          "num_pieces": num_pieces, "piece_length": piece_length,
                          "total_size": total_size, "files": t.get("files") or []},
                 "rows": []})
-            g["rows"].append({"id": nid, "role": t.get("role", "?"), "bits": bits})
+            g["rows"].append({"id": key, "label": label,
+                              "role": t.get("role", "?"), "bits": bits})
     return [(g["meta"], g["rows"])
             for g in sorted(groups.values(), key=lambda g: g["meta"]["name"])]
 
@@ -60,9 +64,10 @@ def availability(rows: list, num_pieces: int) -> list:
 def per_file(rows: list, files: list, avail: list) -> list:
     """Per-file replication. For each file returns:
       path, size, num_pieces,
-      full_copies / full_holders : nodes holding the entire file,
+      full_copies / full_holders : nodes holding the entire file (row "id"s, i.e.
+                                   node_keys; viewers map them to labels),
       recon_copies               : reconstructable copies (rarest piece in range),
-      partial                    : [(node_id, percent_have)] for incomplete holders.
+      partial                    : [(id, percent_have)] for incomplete holders.
     """
     out = []
     for f in files:

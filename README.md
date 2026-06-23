@@ -1,11 +1,19 @@
-# BitTorrent v2 prototype + stats monitoring
+# BitTorrent v2 prototype + stats collection
 
-A small local BitTorrent swarm for experimenting with how well the protocol's
-metrics/stats work. You build a **catalog** of one or more torrents (each from
-any file or directory tree), start a handful of **roleless node daemons**, then
-drive the swarm by hand: tell each node to **seed** or **leech** specific
-torrents via a small control API. A separate **monitoring service** captures as
-many stats as possible into SQLite + JSON snapshots.
+A BitTorrent swarm for experimenting with how well the protocol's metrics/stats
+work — built to run as independent nodes that may be spread across separate
+hosts/data centers, not just on one box. You build a **catalog** of one or more
+torrents (each from any file or directory tree), start a handful of **roleless
+node daemons**, then drive the swarm by hand: tell each node to **seed** or
+**leech** specific torrents via a small control API. Each node **pushes** its
+stats to a central **collector**, which captures as many as possible into SQLite
++ JSON snapshots and serves a live view.
+
+- **Push-based collection** — nodes POST their `/stats` snapshot to the collector
+  (`collector.py`); the collector is the one service that takes inbound
+  connections, so nodes only ever dial out (NAT/firewall-friendly). Nodes are
+  independent, each identified by a persisted UUID (`node_key`); there's no node
+  enumeration — the collector learns nodes as they report.
 
 - **Tracker-based discovery** — peers find each other by announcing to a central
   tracker (`bittorrent_tracker.py`, a tiny stdlib script; no whitelist). Torrents
@@ -42,46 +50,51 @@ python make_torrent.py ~/photos ~/some/file  # or build your own catalog
 #    should be up before nodes/control run. Listens on :8000.
 python bittorrent_tracker.py
 
-# 3. Start some node daemons — one process each, identified only by --id.
+# 3. Start the collector (start any time; nodes buffer nothing, they just push
+#    on their next tick). Receives node snapshots, serves /live, writes SQLite +
+#    JSON snapshots. Listens on :8100.
+python collector.py
+
+# 4. Start some node daemons — one process each, identified only by --id.
 #    BitTorrent port = 6881+id, control/stats HTTP port = 8001+id. No role yet.
+#    Each node pushes its stats to the collector (--collector, defaults from
+#    config.py; pass --collector '' to run a node without reporting).
 python node.py --id 0
 python node.py --id 1
 python node.py --id 2
 python node.py --id 3
 python node.py --id 4
 
-# 4. Drive the swarm with control.py (see `list` for available torrent names).
+# 5. Drive the swarm with control.py (see `list` for available torrent names).
+#    control is operator-local: you run it on the same host as the node and
+#    target it by id. Swarm-wide views come from the collector (see Inspect).
 python control.py list                    # what's in the catalog
 python control.py add 0 media --role seed     # node 0 seeds "media"
 python control.py add 0 documents --role seed # ...and "documents"
 python control.py add 1 media --role leech    # node 1 leeches "media"
 python control.py add 2 media --role leech
 python control.py add 3 documents --role leech
-python control.py status                  # what every node currently holds
+python control.py status 1                 # what node 1 currently holds
 python control.py remove 3 documents      # tell a node to drop a torrent
-
-# 5. The monitor (start any time; it prints the live per-poll summary).
-python monitor.py
 ```
 
 The seed serves its content **in place** from where `make_torrent.py` found it
 (recorded in the catalog sidecar) — nothing is copied. Leechers reconstruct each
-torrent's tree under `nodes/<id>/<name>/`. The monitor prints a live summary:
+torrent's tree under `nodes/<id>/<name>/`. For a live swarm-wide view, watch the
+piece map (it reads the collector):
 
 ```
-n0/media:100% ▲127K ▼3K p1  n1/media: 47% ▲ 64K ▼256K p2  n2/documents: 31% ...
+watch -n 2 python piece_map.py
 ```
-
-(`nN/<torrent>`, `▲` upload KiB/s, `▼` download KiB/s, `pN` connected peers.)
 
 Notes:
-- Order matters only loosely: nodes and the monitor tolerate each other starting
-  in any order (the monitor shows `nN:--` for nodes that aren't answering yet).
-  The tracker should be up before nodes announce, but a node that announces while
-  the tracker is down just retries on the next announce (`ANNOUNCE_INTERVAL`).
-- Ports, node count and timing all come from `config.py`. `NUM_NODES` only sets
-  how many node ports the monitor and `control.py status` scan; you can start
-  as few or as many nodes as you like.
+- Order matters only loosely: collector, tracker and nodes tolerate each other
+  starting in any order. A node that can't reach the collector just drops that
+  push and tries again next tick; one that announces while the tracker is down
+  retries on the next announce (`ANNOUNCE_INTERVAL`). A node silent past
+  `NODE_STALE_AFTER` falls out of the collector's live view until it reports again.
+- Ports and timing come from `config.py`. There is no fixed node count — start as
+  few or as many nodes as you like; the collector learns each by its `node_key`.
 - Stop with Ctrl-C (or `kill`/SIGTERM) in each terminal. There's no shared
   shutdown. A node checkpoints fast-resume on the way down and on restart
   re-adds whatever it was holding (with progress intact) — so just relaunch
@@ -96,29 +109,29 @@ Notes:
 # incl. each peer's discovery source — "tracker", "incoming", ...)
 curl -s http://127.0.0.1:8001/stats | python -m json.tool
 
+# the collector's view: live swarm state (latest snapshot per fresh node) and
+# its own health (which nodes are reporting, last-seen age)
+curl -s http://127.0.0.1:8100/live  | python -m json.tool
+curl -s http://127.0.0.1:8100/stats | python -m json.tool
+
 # the tracker's view of the swarm, and the catalog it hosts
 curl -s http://127.0.0.1:8000/stats | python -m json.tool
 curl -s http://127.0.0.1:8000/catalog | python -m json.tool
 
-# what each node is doing right now
-python control.py status
-
-# how the nodes are connected to each other right now (who dialed whom, per
-# torrent), and that peers were learned from the tracker (src:tracker)
-python topology.py
-watch -n 1 python topology.py
+# what one (local) node is doing right now
+python control.py status 0
 
 # summary report from the recorded time-series (broken out per torrent)
 python report.py
 
 # who has which pieces/files, and how many copies of each file exist (per torrent)
-python piece_map.py             # live snapshot, once (incl. per-file copy counts)
-python piece_map.py --snapshot  # read newest stats/snapshots/*.json instead of live
+python piece_map.py             # live from the collector, once (incl. copy counts)
+python piece_map.py --snapshot  # read newest stats/snapshots/*.json (post-mortem)
 watch -n 2 python piece_map.py  # refresh every 2s (use the `watch` CLI tool)
 
 # raw SQL
-sqlite3 stats/monitor.db ".tables"
-sqlite3 stats/monitor.db "SELECT node_id, info_hash, MAX(progress) FROM torrent_status GROUP BY node_id, info_hash;"
+sqlite3 stats/collector.db ".tables"
+sqlite3 stats/collector.db "SELECT node_key, info_hash, MAX(progress) FROM torrent_status GROUP BY node_key, info_hash;"
 ```
 
 ## Layout
@@ -129,17 +142,17 @@ sqlite3 stats/monitor.db "SELECT node_id, info_hash, MAX(progress) FROM torrent_
 | `make_torrent.py` | Build v2-only, private, tracker-based `.torrent`s from any files/dirs into the catalog (`data/torrents/`, the tracker's store); generates a two-torrent sample if no args. Also the local catalog-lookup helpers the tracker uses to serve `/catalog`. |
 | `bittorrent_tracker.py` | The tiny stdlib tracker: `/announce` + `/scrape` + `/stats`, keyed by info-hash (no whitelist), and `/catalog` endpoints that host the torrents. |
 | `catalog.py` | Stdlib client the node/control use to fetch the catalog (list, meta, `.torrent`) from the tracker over HTTP. |
-| `node.py` | One roleless node daemon: libtorrent session (announces to the tracker; fetches torrents from its `/catalog`) + HTTP `/stats` (GET) and `/add` `/remove` (POST) control endpoints. |
-| `control.py` | CLI to list the catalog (from the tracker), inspect nodes, and tell nodes to seed/leech torrents. |
-| `monitor.py` | Polls all nodes → SQLite + JSON snapshots (per torrent). |
-| `report.py` | Prints a per-torrent summary from `stats/monitor.db`. |
-| `piece_map.py` | Per torrent: which peer holds which pieces/files + how many copies of each file exist. |
-| `topology.py` | Per torrent: the live peer-connection graph (who dialed whom, and that peers came from the tracker). |
-| `swarm_stats.py` | Shared helpers that group node snapshots by torrent and aggregate per-piece/per-file copy stats (used by `monitor.py` + `piece_map.py`). |
+| `node.py` | One roleless node daemon: libtorrent session (announces to the tracker; fetches torrents from its `/catalog`) + HTTP `/stats` (GET) and `/add` `/remove` (POST) control endpoints; pushes its snapshot to the collector (`--collector`). Has a persisted `node_key`. |
+| `control.py` | Operator-local CLI to list the catalog (from the tracker), inspect a local node, and tell nodes to seed/leech torrents. |
+| `collector.py` | Central push endpoint: ingests node snapshots → SQLite + JSON snapshots (per torrent), serves `/live` (live swarm state) and `/stats` (collector health). |
+| `report.py` | Prints a per-torrent summary from the collector's `stats/collector.db`. |
+| `piece_map.py` | Per torrent: which peer holds which pieces/files + how many copies of each file exist (reads the collector's `/live`, or `--snapshot`). |
+| `swarm_stats.py` | Shared helpers that group node snapshots by torrent and aggregate per-piece/per-file copy stats (used by `collector.py` + `piece_map.py`). |
 
 ## Ports
 
 - Tracker (`bittorrent_tracker.py`): `8000`
+- Collector (`collector.py`): `8100`
 - Node *i* BitTorrent: `6881 + i`
 - Node *i* control/stats HTTP: `8001 + i`
 
@@ -151,9 +164,9 @@ sqlite3 stats/monitor.db "SELECT node_id, info_hash, MAX(progress) FROM torrent_
 - `nodes/<id>/<name>/` — each leecher's download directory per torrent
 - `nodes/<id>/.resume/<name>.resume` — libtorrent fast-resume per torrent (lets a
   restarted node restore its torrents + progress)
-- `stats/monitor.db` — SQLite time-series (`node_session_stats`,
+- `stats/collector.db` — SQLite time-series (`node_session_stats`,
   `torrent_status`, `peer_info`, `file_replication`)
-- `stats/snapshots/*.json` — full combined snapshot per poll
+- `stats/snapshots/*.json` — full combined snapshot per aggregation tick (keyed by `node_key`)
 - `stats/*.log` — per-process logs (if you redirect them there)
 
 ## Captured stats
@@ -176,5 +189,5 @@ sqlite3 stats/monitor.db "SELECT node_id, info_hash, MAX(progress) FROM torrent_
 - **Per-file replication time-series** (`file_replication`, keyed by `info_hash`
   + `torrent_name`): every poll, for each file, `full_copies` (nodes holding the
   whole file), `recon_copies` (reconstructable copies = replication of the file's
-  rarest piece) and the holder node-ids — so you can chart how copies grow over
+  rarest piece) and the holder `node_key`s — so you can chart how copies grow over
   time. `report.py` summarises it per torrent (final/peak copies, time-to-full).

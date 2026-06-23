@@ -1,9 +1,10 @@
-"""Summarize a finished (or running) experiment from stats/monitor.db.
+"""Summarize a finished (or running) experiment from the collector's SQLite DB.
 
 Run after (or during) a session to sanity-check the captured metrics: transfer
 rates, time-to-complete, bytes moved, how peers were discovered (tracker, etc.)
 and per-file replication. Everything is broken out per torrent, since a swarm can
-host several at once.
+host several at once. Nodes are identified by their stable node_key; their short
+label (from the `nodes` table) is shown for readability.
 """
 import sqlite3
 
@@ -17,15 +18,24 @@ def torrent_names(db) -> dict:
         "SELECT DISTINCT info_hash, torrent_name FROM file_replication")}
 
 
+def node_labels(db) -> dict:
+    """node_key -> short display label, from the nodes table."""
+    return {k: (label or k[:8]) for k, label in db.execute(
+        "SELECT node_key, label FROM nodes")}
+
+
 def main() -> None:
     db = sqlite3.connect(config.DB_PATH)
     db.row_factory = sqlite3.Row
     names = torrent_names(db)
+    labels = node_labels(db)
+    lbl = lambda key: labels.get(key, key[:8])
 
     hashes = [r[0] for r in db.execute(
         "SELECT DISTINCT info_hash FROM torrent_status ORDER BY info_hash")]
     if not hashes:
-        print("no torrent_status rows yet — has the monitor run with assigned torrents?")
+        print("no torrent_status rows yet — has the collector run with nodes pushing "
+              "assigned torrents?")
         return
 
     for ih in hashes:
@@ -34,7 +44,7 @@ def main() -> None:
 
         print("=== Per-node summary ===")
         for r in db.execute("""
-                SELECT node_id,
+                SELECT node_key,
                        MAX(progress)        AS max_progress,
                        MAX(download_rate)   AS peak_dl,
                        AVG(download_rate)   AS avg_dl,
@@ -42,9 +52,9 @@ def main() -> None:
                        MAX(total_download)  AS bytes_dl,
                        MAX(total_upload)    AS bytes_ul,
                        MAX(num_peers)       AS max_peers
-                FROM torrent_status WHERE info_hash=? GROUP BY node_id ORDER BY node_id
+                FROM torrent_status WHERE info_hash=? GROUP BY node_key
                 """, (ih,)):
-            print(f" node {r['node_id']}: {r['max_progress'] * 100:5.1f}%  "
+            print(f" node {lbl(r['node_key']):<6}: {r['max_progress'] * 100:5.1f}%  "
                   f"peakDL {r['peak_dl'] / 1024:8.0f}K  avgDL {r['avg_dl'] / 1024:8.0f}K  "
                   f"peakUL {r['peak_ul'] / 1024:8.0f}K  "
                   f"dl {r['bytes_dl'] / 1e6:6.1f}MB ul {r['bytes_ul'] / 1e6:6.1f}MB  "
@@ -53,19 +63,18 @@ def main() -> None:
         print("--- Time to complete (since this torrent's first sample) ---")
         base = db.execute("SELECT MIN(ts) FROM torrent_status WHERE info_hash=?",
                           (ih,)).fetchone()[0]
-        for (nid,) in db.execute(
-                "SELECT DISTINCT node_id FROM torrent_status WHERE info_hash=? "
-                "ORDER BY node_id", (ih,)):
+        for (key,) in db.execute(
+                "SELECT DISTINCT node_key FROM torrent_status WHERE info_hash=?", (ih,)):
             done = db.execute(
                 "SELECT MIN(ts) FROM torrent_status "
-                "WHERE info_hash=? AND node_id=? AND progress>=1.0",
-                (ih, nid)).fetchone()[0]
-            print(f" node {nid}: {done - base:6.1f}s" if done else
-                  f" node {nid}: never completed")
+                "WHERE info_hash=? AND node_key=? AND progress>=1.0",
+                (ih, key)).fetchone()[0]
+            print(f" node {lbl(key):<6}: {done - base:6.1f}s" if done else
+                  f" node {lbl(key):<6}: never completed")
 
         print("--- Per-file replication ---")
         nnodes = db.execute(
-            "SELECT COUNT(DISTINCT node_id) FROM torrent_status WHERE info_hash=?",
+            "SELECT COUNT(DISTINCT node_key) FROM torrent_status WHERE info_hash=?",
             (ih,)).fetchone()[0]
         frbase = db.execute("SELECT MIN(ts) FROM file_replication WHERE info_hash=?",
                             (ih,)).fetchone()[0]
@@ -103,8 +112,9 @@ def main() -> None:
 
     total_session_rows = db.execute(
         "SELECT COUNT(*) FROM node_session_stats").fetchone()[0]
+    nnodes = db.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
     print(f"\n(recorded {total_session_rows} session-metric data points across "
-          f"{config.NUM_NODES} nodes)")
+          f"{nnodes} node(s))")
 
 
 if __name__ == "__main__":

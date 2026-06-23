@@ -2,18 +2,21 @@
 peers each piece is stored on. Works on partial downloads, so you can see how
 many copies of the file currently exist across the swarm.
 
-Each node reports its own piece-ownership bitfield in /stats; this script polls
-every node, aggregates those bitfields and renders:
+Each node reports its own piece-ownership bitfield, which it pushes to the
+collector; this script reads the collector's live view, aggregates those
+bitfields and renders:
   * a per-node ownership map  (peer -> pieces)
   * a per-piece availability row + histogram  (piece -> peers)
   * a "copies of the file" summary
 
-By default it polls the live nodes. With --snapshot it reads the most recent
-monitor snapshot from stats/snapshots/ instead (useful after a run).
+By default it reads the collector's /live (the latest snapshot of every node
+still reporting). With --snapshot it reads the most recent combined snapshot
+from stats/snapshots/ instead (post-mortem: analyse a finished run offline).
 
 Usage:
-    python piece_map.py                # live, once
-    python piece_map.py --snapshot     # read newest stats/snapshots/*.json
+    python piece_map.py                  # live, from the collector, once
+    python piece_map.py --collector URL  # a non-default collector
+    python piece_map.py --snapshot       # newest stats/snapshots/*.json
 
 To refresh continuously, wrap it with the `watch` CLI tool:
     watch -n 2 python piece_map.py
@@ -39,16 +42,10 @@ def human(n: float) -> str:
         n /= 1024
 
 
-def fetch_live() -> list:
-    nodes = []
-    for nid in range(config.NUM_NODES):
-        url = f"http://{config.HOST}:{config.stats_port(nid)}/stats"
-        try:
-            with urllib.request.urlopen(url, timeout=1.5) as r:
-                nodes.append(json.loads(r.read().decode()))
-        except Exception:
-            pass
-    return nodes
+def fetch_collector(base: str) -> list:
+    """The collector's live view: latest snapshot of every node still reporting."""
+    with urllib.request.urlopen(f"{base}/live", timeout=2.0) as r:
+        return json.loads(r.read().decode()).get("nodes", [])
 
 
 def fetch_snapshot() -> list:
@@ -95,8 +92,8 @@ def render_avail(avail: list, num_pieces: int, cols: int) -> str:
 def report(nodes: list, source: str) -> None:
     torrents = swarm_stats.collect_by_torrent(nodes)
     if not torrents:
-        print("No torrents reported (are the nodes running and assigned torrents? "
-              "try `python control.py status`, or --snapshot).")
+        print("No torrents reported (is the collector running and are nodes pushing "
+              "with torrents assigned? check the collector's /stats, or try --snapshot).")
         return
     for i, (meta, rows) in enumerate(torrents):
         if i:
@@ -115,7 +112,8 @@ def render_torrent(meta: dict, rows: list, source: str) -> None:
     avail = swarm_stats.availability(rows, num_pieces)
     min_avail = min(avail)
     total_have = sum(avail)
-    full_copies = [r["id"] for r in rows if all(r["bits"])]
+    labels = {r["id"]: r["label"] for r in rows}  # node_key -> short display name
+    full_copies = [r["label"] for r in rows if all(r["bits"])]
     cols = min(num_pieces, MAX_COLS)
 
     print(f"Swarm piece map  —  '{name}'  {human(total_size)} in {len(files)} file(s), "
@@ -140,7 +138,7 @@ def render_torrent(meta: dict, rows: list, source: str) -> None:
         pct = 100 * have / num_pieces
         stored = sum(piece_size(i, piece_length, total_size, num_pieces)
                      for i, b in enumerate(r["bits"]) if b)
-        label = f"  n{r['id']} {r['role']:<5} {pct:5.1f}% {have:>4}/{num_pieces:<4}"
+        label = f"  n{r['label']} {r['role']:<5} {pct:5.1f}% {have:>4}/{num_pieces:<4}"
         print(f"{label:<{label_w}} {render_bits(r['bits'], num_pieces, cols)}  {human(stored)}")
     print(f"{'  availability  (#holders)':<{label_w}} {render_avail(avail, num_pieces, cols)}")
 
@@ -160,8 +158,8 @@ def render_torrent(meta: dict, rows: list, source: str) -> None:
             disp = f["path"]
             if name and disp.startswith(name + "/"):
                 disp = disp[len(name) + 1:]
-            holders = ",".join(f"n{i}" for i in f["full_holders"]) or "-"
-            partial = " ".join(f"n{i}={pct:.0f}%" for i, pct in f["partial"])
+            holders = ",".join(f"n{labels.get(i, i)}" for i in f["full_holders"]) or "-"
+            partial = " ".join(f"n{labels.get(i, i)}={pct:.0f}%" for i, pct in f["partial"])
             extra = ("  partial: " + partial) if partial else ""
             print(f"  {disp:<34} {human(f['size']):>9} {f['full_copies']:>5} "
                   f"{f['recon_copies']:>6}  {holders}{extra}")
@@ -170,13 +168,16 @@ def render_torrent(meta: dict, rows: list, source: str) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--collector", default=config.COLLECTOR_BASE, metavar="URL",
+                    help="collector base URL to read /live from (default: %(default)s)")
     ap.add_argument("--snapshot", action="store_true",
-                    help="read newest stats/snapshots/*.json instead of polling live")
+                    help="read newest stats/snapshots/*.json instead (post-mortem)")
     args = ap.parse_args()
 
-    fetch = fetch_snapshot if args.snapshot else fetch_live
-    source = "snapshot" if args.snapshot else "live"
-    report(fetch(), source)
+    if args.snapshot:
+        report(fetch_snapshot(), "snapshot")
+    else:
+        report(fetch_collector(args.collector), "live")
 
 
 if __name__ == "__main__":

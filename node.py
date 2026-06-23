@@ -20,6 +20,8 @@ import signal
 import threading
 import time
 import traceback
+import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import libtorrent as lt
@@ -40,15 +42,40 @@ RESUME_EVERY = 5
 
 
 class NodeState:
-    def __init__(self, node_id: int, ses: "lt.session"):
+    def __init__(self, node_id: int, node_key: str, ses: "lt.session"):
         self.node_id = node_id
+        # Stable swarm-wide identity (a persisted UUID). The integer node_id is a
+        # local convenience (ports, resume dir, the human label); node_key is what
+        # the collector keys every metric by, so a restart keeps the same series.
+        self.node_key = node_key
         self.ses = ses
         self.lock = threading.Lock()
         # info_hash(v2 str) -> {name, role, save_path, ti, files, handle}
         self.torrents: dict = {}
         self.session_stats: dict = {}
-        self.snapshot: dict = {"node_id": node_id, "torrents": [], "peers": []}
+        self.snapshot: dict = {"node_key": node_key, "label": str(node_id),
+                               "torrents": [], "peers": []}
         self.stop = threading.Event()
+
+
+def node_key_path(node_id: int) -> str:
+    return os.path.join(config.NODES_DIR, str(node_id), "node_key")
+
+
+def load_or_create_node_key(node_id: int) -> str:
+    """The node's stable UUID identity, generated once and persisted (like
+    fast-resume). Integer ids collide across hosts; this doesn't."""
+    path = node_key_path(node_id)
+    if os.path.exists(path):
+        with open(path) as f:
+            key = f.read().strip()
+        if key:
+            return key
+    key = uuid.uuid4().hex
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(key)
+    return key
 
 
 def resume_dir(node_id: int) -> str:
@@ -336,7 +363,8 @@ def session_loop(ns: NodeState) -> None:
                 peers.append(peer_dict(p, e["name"]))
 
         snap = {
-            "node_id": ns.node_id,
+            "node_key": ns.node_key,    # stable swarm-wide identity
+            "label": str(ns.node_id),   # short, human (used for display)
             "ts": time.time(),
             "bt_port": config.bt_port(ns.node_id),
             "session": ns.session_stats,
@@ -410,9 +438,31 @@ def run_session(ns):
         traceback.print_exc()
 
 
+def push_loop(ns: NodeState, collector_url: str) -> None:
+    """Best-effort: POST the node's latest snapshot to the collector every
+    PUSH_INTERVAL. Like a tracker announce, a failed POST is ignored — it just
+    shows up as this node briefly going stale in the collector's view. The node
+    dials out, so it needs no inbound reachability of its own."""
+    while not ns.stop.wait(config.PUSH_INTERVAL):
+        with ns.lock:
+            snap = ns.snapshot
+        if not snap.get("torrents") and not snap.get("session"):
+            continue  # nothing meaningful to report yet
+        try:
+            req = urllib.request.Request(
+                collector_url, data=json.dumps(snap).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(req, timeout=3).close()
+        except Exception:
+            pass
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="BitTorrent v2 prototype node daemon")
     ap.add_argument("--id", type=int, required=True)
+    ap.add_argument("--collector", default=config.COLLECTOR_URL,
+                    help="collector ingest URL to push stats to "
+                         "(default: %(default)s; pass '' to run without reporting)")
     args = ap.parse_args()
 
     # Treat SIGTERM like Ctrl-C (raise KeyboardInterrupt) so the node shuts down
@@ -420,11 +470,16 @@ def main() -> None:
     # or `kill`, not just by an interactive Ctrl-C.
     signal.signal(signal.SIGTERM, signal.default_int_handler)
 
+    node_key = load_or_create_node_key(args.id)
     ses = make_session(args.id)
-    ns = NodeState(args.id, ses)
+    ns = NodeState(args.id, node_key, ses)
     resumed = load_resumes(ns)  # restore torrents this node held before a restart
     thread = threading.Thread(target=run_session, args=(ns,), daemon=True)
     thread.start()
+
+    if args.collector:
+        threading.Thread(target=push_loop, args=(ns, args.collector),
+                         daemon=True).start()
 
     srv = ThreadingHTTPServer((config.HOST, config.stats_port(args.id)), make_handler(ns))
     # Handler threads must be daemonic: with HTTP/1.1 keep-alive they otherwise sit
@@ -433,9 +488,10 @@ def main() -> None:
     srv.daemon_threads = True
     state = (f"(resumed {resumed} torrent(s))" if resumed
              else "(empty; assign torrents with control.py)")
-    print(f"node {args.id} up — bt:{config.bt_port(args.id)} "
+    reporting = f"-> collector {args.collector}" if args.collector else "(not reporting)"
+    print(f"node {args.id} up [{node_key[:8]}] — bt:{config.bt_port(args.id)} "
           f"control/stats:http://{config.HOST}:{config.stats_port(args.id)}/  "
-          f"{state}", flush=True)
+          f"{reporting}  {state}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

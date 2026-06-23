@@ -58,22 +58,24 @@ def cmd_list(_args) -> None:
 
 
 def cmd_status(args) -> None:
-    ids = [args.node] if args.node is not None else range(config.NUM_NODES)
-    for nid in ids:
-        try:
-            snap = _get(nid)
-        except Exception:
-            print(f"node {nid}: (down)")
-            continue
-        torrents = snap.get("torrents") or []
-        if not torrents:
-            print(f"node {nid}: idle (no torrents)")
-            continue
-        parts = []
-        for t in torrents:
-            parts.append(f"{t.get('name', '?')}[{t.get('role', '?')} "
-                         f"{(t.get('progress') or 0) * 100:.0f}% p{t.get('num_peers') or 0}]")
-        print(f"node {nid}: " + "  ".join(parts))
+    # Control is operator-local: you ask the node you run (on this host) what it
+    # holds. Swarm-wide status across all nodes comes from the collector
+    # (piece_map / report), not by scanning every node.
+    nid = args.node
+    try:
+        snap = _get(nid)
+    except Exception:
+        print(f"node {nid}: (down)")
+        return
+    torrents = snap.get("torrents") or []
+    if not torrents:
+        print(f"node {nid}: idle (no torrents)")
+        return
+    parts = []
+    for t in torrents:
+        parts.append(f"{t.get('name', '?')}[{t.get('role', '?')} "
+                     f"{(t.get('progress') or 0) * 100:.0f}% p{t.get('num_peers') or 0}]")
+    print(f"node {nid}: " + "  ".join(parts))
 
 
 def cmd_add(args) -> None:
@@ -95,8 +97,8 @@ def main() -> None:
 
     sub.add_parser("list", help="list catalog torrents").set_defaults(func=cmd_list)
 
-    p_status = sub.add_parser("status", help="show what each node holds")
-    p_status.add_argument("node", type=int, nargs="?", help="a single node id (default: all)")
+    p_status = sub.add_parser("status", help="show what one (local) node holds")
+    p_status.add_argument("node", type=int, help="node id to query on this host")
     p_status.set_defaults(func=cmd_status)
 
     p_add = sub.add_parser("add", help="tell a node to seed/leech a torrent")

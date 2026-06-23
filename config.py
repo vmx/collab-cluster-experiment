@@ -10,7 +10,7 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 NODES_DIR = os.path.join(BASE_DIR, "nodes")
 STATS_DIR = os.path.join(BASE_DIR, "stats")
 SNAPSHOT_DIR = os.path.join(STATS_DIR, "snapshots")
-DB_PATH = os.path.join(STATS_DIR, "monitor.db")
+DB_PATH = os.path.join(STATS_DIR, "collector.db")
 
 # Catalog of created torrents. make_torrent.py writes one pair per torrent here:
 #   data/torrents/<name>.torrent  + data/torrents/<name>.json (sidecar meta).
@@ -23,11 +23,20 @@ SAMPLE_DIR = os.path.join(DATA_DIR, "sample")
 
 # --- Network -----------------------------------------------------------------
 HOST = "127.0.0.1"
-NUM_NODES = 5  # how many node stats ports the monitor/control scan; nodes are
-               # started by hand and are roleless until told what to do.
 
 BT_PORT_BASE = 6881      # node i listens for BitTorrent on BT_PORT_BASE + i
 STATS_PORT_BASE = 8001   # node i serves its /stats JSON on STATS_PORT_BASE + i
+
+# --- Metrics collector (push model) ------------------------------------------
+# Nodes POST their /stats snapshot to a central collector rather than being
+# polled. The collector is the one service that accepts inbound connections;
+# nodes only ever dial out (NAT/firewall-friendly), so this scales to nodes
+# spread across separate data centers. Identity is a per-node UUID (node_key);
+# there is no node enumeration, the collector learns nodes as they push.
+COLLECTOR_HOST = "0.0.0.0"               # bind address (accept remote nodes)
+COLLECTOR_PORT = 8100
+COLLECTOR_BASE = f"http://{HOST}:{COLLECTOR_PORT}"   # where nodes/viewers reach it
+COLLECTOR_URL = f"{COLLECTOR_BASE}/ingest"           # node push target (--collector default)
 
 # --- Tracker-based discovery (our own tracker) -------------------------------
 # Discovery is tracker-driven: torrents are built with this announce URL baked in
@@ -54,8 +63,12 @@ UPLOAD_RATE_LIMIT = 1 * 1024 * 1024
 # would wait ~5 min before the tracker pairs it with the others. Keep it short so
 # the localhost swarm meshes quickly regardless of start order.
 ANNOUNCE_INTERVAL = 5
-POLL_INTERVAL = 1.0        # how often the monitor polls every node
 NODE_LOOP_INTERVAL = 1.0   # how often a node refreshes its stats snapshot
+PUSH_INTERVAL = 1.0        # how often a node POSTs its snapshot to the collector
+POLL_INTERVAL = 1.0        # collector's cross-node aggregation tick (file_replication)
+# Drop a node from the live view / aggregation after this much silence (it stopped
+# pushing). Mirrors the tracker's reap window: comfortably more than PUSH_INTERVAL.
+NODE_STALE_AFTER = 3 * PUSH_INTERVAL
 
 
 def bt_port(node_id: int) -> int:
