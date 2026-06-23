@@ -29,27 +29,18 @@ NUM_NODES = 5  # how many node stats ports the monitor/control scan; nodes are
 BT_PORT_BASE = 6881      # node i listens for BitTorrent on BT_PORT_BASE + i
 STATS_PORT_BASE = 8001   # node i serves its /stats JSON on STATS_PORT_BASE + i
 
-# --- Trackerless discovery (introducer bootstrap + PEX) ----------------------
-# There is no central tracker. A newly joining torrent dials these "introducer"
-# peers to enter the swarm; once connected, PEX (peer exchange) gossips the rest
-# of the peers between them. Nothing here is a special node — every peer is a
-# valid introducer — so list a few for resilience: any one that's reachable is
-# enough to bootstrap, and a down introducer is simply swapped for the next.
-# Once a node has joined even once, fast-resume + PEX mean it no longer needs an
-# introducer; they only matter for a cold, from-zero join.
-#
-# IMPORTANT (multi-torrent): PEX is per-torrent, so each torrent needs at least
-# one introducer that is itself a member of THAT torrent's swarm. A single
-# introducer that doesn't hold a given torrent cannot bootstrap it. The simplest
-# setup is to treat one node as a rendezvous and add every torrent to it (the
-# role the tracker used to play). Order doesn't matter: a torrent with no peers
-# re-dials its introducers periodically (node.py BOOTSTRAP_EVERY), so it meshes
-# as soon as an introducer joins that swarm.
-#
-# Each entry is either a node id (localhost: the address is derived from its
-# bt_port) or an explicit "host:port" string (cross-machine / VPN, where an id
-# can't map to an address — e.g. "10.0.0.5:6881").
-INTRODUCERS = [0]
+# --- Tracker-based discovery (opentracker) -----------------------------------
+# Discovery is tracker-driven: torrents are built with this announce URL baked
+# in and marked private (which disables PEX/DHT/LSD), so peers find each other
+# purely by announcing to the tracker. We don't ship a tracker — run the
+# installed opentracker on this address:
+#     opentracker -i 127.0.0.1 -p 6969 -P 6969
+TRACKER_PORT = 6969      # opentracker's default tcp/udp port
+TRACKER_URL = f"http://{HOST}:{TRACKER_PORT}/announce"
+# opentracker (as installed here) runs in whitelist mode: it only serves torrents
+# whose info-hash is listed in this file. make_torrent.py regenerates it from the
+# catalog, so start the tracker with:  opentracker ... -w data/tracker.whitelist
+WHITELIST_PATH = os.path.join(DATA_DIR, "tracker.whitelist")
 
 # --- Torrent (BitTorrent v2 only) --------------------------------------------
 PIECE_SIZE = 256 * 1024          # 256 KiB; power of two (v2 requires >= 16 KiB)
@@ -60,6 +51,11 @@ PIECE_SIZE = 256 * 1024          # 256 KiB; power of two (v2 requires >= 16 KiB)
 UPLOAD_RATE_LIMIT = 1 * 1024 * 1024
 
 # --- Timing (seconds) --------------------------------------------------------
+# Tracker announce interval. libtorrent enforces a 300s floor on re-announce by
+# default (min_announce_interval), so without lowering it a node started later
+# would wait ~5 min before the tracker pairs it with the others. Keep it short so
+# the localhost swarm meshes quickly regardless of start order.
+ANNOUNCE_INTERVAL = 5
 POLL_INTERVAL = 1.0        # how often the monitor polls every node
 NODE_LOOP_INTERVAL = 1.0   # how often a node refreshes its stats snapshot
 
@@ -70,21 +66,3 @@ def bt_port(node_id: int) -> int:
 
 def stats_port(node_id: int) -> int:
     return STATS_PORT_BASE + node_id
-
-
-def introducer_addrs(self_id: int = None) -> list:
-    """Resolve INTRODUCERS to (host, port) tuples, skipping this node itself.
-
-    Int entries are localhost node ids (address derived from bt_port); string
-    entries are explicit "host:port" for cross-machine/VPN setups.
-    """
-    addrs = []
-    for entry in INTRODUCERS:
-        if isinstance(entry, int):
-            if entry == self_id:
-                continue
-            addrs.append((HOST, bt_port(entry)))
-        else:
-            host, _, port = entry.rpartition(":")
-            addrs.append((host, int(port)))
-    return addrs

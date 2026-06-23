@@ -1,9 +1,10 @@
 """Monitoring service: poll every node's /stats, persist all of it to SQLite
 time-series tables plus per-poll JSON snapshots.
 
-There is no tracker to poll — discovery is trackerless (introducer + PEX), so
-the swarm's makeup is reconstructed purely from each node's peer list, and the
-summary shows how many peers each node found via PEX.
+Discovery is tracker-driven (opentracker), but the monitor reconstructs the
+swarm's makeup from each node's own peer list rather than scraping the tracker,
+so it needs no tracker-specific stats endpoint. Each peer's `source` still
+records how it was learned (here, dominated by `tracker`/`incoming`).
 
 Runs as its own process. Prints a one-line per-node summary each poll so the
 swarm's progress is visible live.
@@ -65,13 +66,6 @@ def record_node(db, ts, node_id, snap, summary):
     for metric, value in snap.get("session", {}).items():
         db.execute("INSERT INTO node_session_stats VALUES (?,?,?,?)",
                    (ts, node_id, metric, value))
-    # Count peers discovered via PEX, per torrent, for the live summary (the
-    # trackerless discovery signal). The raw source bits are stored per peer below.
-    pex_by_torrent = {}
-    for p in snap.get("peers", []):
-        if "pex" in (p.get("source_flags") or []):
-            name = p.get("torrent")
-            pex_by_torrent[name] = pex_by_torrent.get(name, 0) + 1
     for t in snap.get("torrents", []):
         db.execute(
             "INSERT INTO torrent_status VALUES "
@@ -85,12 +79,11 @@ def record_node(db, ts, node_id, snap, summary):
              t.get("num_peers"), t.get("num_seeds"), t.get("num_connections"),
              t.get("num_pieces"), t.get("distributed_copies"),
              int(bool(t.get("is_seeding"))), int(bool(t.get("is_finished")))))
-        pex = pex_by_torrent.get(t.get("name"), 0)
         summary.append(
             f"n{node_id}/{t.get('name')}:{(t.get('progress') or 0) * 100:3.0f}% "
             f"▲{(t.get('upload_rate') or 0) // 1024}K "
             f"▼{(t.get('download_rate') or 0) // 1024}K "
-            f"p{t.get('num_peers') or 0}" + (f"·pex{pex}" if pex else ""))
+            f"p{t.get('num_peers') or 0}")
     for p in snap.get("peers", []):
         db.execute(
             "INSERT INTO peer_info VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",

@@ -1,8 +1,8 @@
 """Summarize a finished (or running) experiment from stats/monitor.db.
 
 Run after (or during) a session to sanity-check the captured metrics: transfer
-rates, time-to-complete, bytes moved, how peers were discovered (PEX, etc.) and
-per-file replication. Everything is broken out per torrent, since a swarm can
+rates, time-to-complete, bytes moved, how peers were discovered (tracker, etc.)
+and per-file replication. Everything is broken out per torrent, since a swarm can
 host several at once.
 """
 import sqlite3
@@ -94,7 +94,7 @@ def main() -> None:
             print(f"  (t_full = time until all {nnodes} holders had the whole file)")
 
     print("\n=== Peer discovery (distinct peer endpoints by source) ===")
-    print("(trackerless: peers come in via an introducer dial then spread via PEX)")
+    print("(tracker-only: peers are learned by announcing to the tracker)")
     for bit, label in swarm_stats.PEER_SOURCE_FLAGS:
         n = db.execute("SELECT COUNT(DISTINCT peer_ip) FROM peer_info "
                        "WHERE source & ?", (bit,)).fetchone()[0]

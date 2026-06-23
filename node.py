@@ -37,11 +37,6 @@ import swarm_stats
 SAVE_FLAGS = lt.torrent_handle.save_info_dict | lt.torrent_handle.flush_disk_cache
 # How often (loops) to checkpoint resume data for torrents that changed.
 RESUME_EVERY = 5
-# How often (loops) to re-dial introducers for any torrent that still has no
-# peers. Makes discovery self-healing and order-independent: a torrent added
-# before its introducer joined that swarm (or before any seed appeared) meshes
-# on a later retry without re-issuing control commands.
-BOOTSTRAP_EVERY = 5
 
 
 class NodeState:
@@ -163,8 +158,8 @@ def peer_dict(p, torrent_name) -> dict:
         "total_upload": p.total_upload,
         "flags": int(p.flags),
         "source": int(p.source),
-        # Decoded source bits (e.g. ["pex"], ["incoming"]) — with no tracker,
-        # this is how you see PEX actually doing the peer discovery.
+        # Decoded source bits (e.g. ["tracker"], ["incoming"]) — shows how this
+        # peer was discovered; tracker-only here, so expect tracker/incoming.
         "source_flags": swarm_stats.source_labels(int(p.source)),
         "rtt": p.rtt,
     }
@@ -173,12 +168,10 @@ def peer_dict(p, torrent_name) -> dict:
 def make_session(node_id: int) -> "lt.session":
     settings = {
         "listen_interfaces": f"{config.HOST}:{config.bt_port(node_id)}",
-        # No central tracker: peers are discovered by dialing an introducer peer
-        # (see bootstrap()) and then PEX gossiping the rest. PEX rides on the
-        # default session plugins (ut_pex), which are loaded unless we disable
-        # them, so there's nothing to switch on here. We keep DHT/LSD/UPnP/NAT-PMP
-        # off so discovery stays confined to our swarm (and so LSD multicast,
-        # which a routed VPN wouldn't carry anyway, isn't relied upon).
+        # Discovery is tracker-only: each node announces to the tracker baked into
+        # the (private) torrent and gets back the peer list. The torrents are
+        # private, so libtorrent disables PEX/DHT/LSD anyway; we also keep these
+        # off explicitly so nothing pulls in peers from outside our swarm.
         "enable_dht": False,
         "enable_lsd": False,
         "enable_upnp": False,
@@ -187,6 +180,12 @@ def make_session(node_id: int) -> "lt.session":
         # peer connection per IP per torrent, so the localhost swarm can't mesh.
         "allow_multiple_connections_per_ip": True,
         "alert_mask": lt.alert.category_t.all_categories,
+        # The tracker only ever sees 127.0.0.1; announce our real listen address
+        # so peers it hands back are dialable.
+        "announce_ip": config.HOST,
+        # Honour our short announce interval instead of libtorrent's 300s floor,
+        # so nodes started at different times still get paired promptly.
+        "min_announce_interval": config.ANNOUNCE_INTERVAL,
         # Pace the transfer so the monitor sees a real time-series (see config).
         # By default libtorrent exempts loopback/LAN peers from rate limits, so
         # we must turn that off for the cap to apply to our localhost swarm.
@@ -194,18 +193,6 @@ def make_session(node_id: int) -> "lt.session":
         "ignore_limits_on_local_network": False,
     }
     return lt.session(settings)
-
-
-def bootstrap(ns: "NodeState", handle) -> None:
-    """Enter the swarm without a tracker: dial the configured introducer peers.
-    Once any one connects, PEX propagates the remaining peers. Introducers that
-    are down (or this node itself) just fail silently — any reachable one does.
-    """
-    for addr in config.introducer_addrs(ns.node_id):
-        try:
-            handle.connect_peer(addr)
-        except Exception:
-            pass
 
 
 def add_torrent(ns: NodeState, name: str, role: str) -> dict:
@@ -232,7 +219,6 @@ def add_torrent(ns: NodeState, name: str, role: str) -> dict:
     atp.ti = ti
     atp.save_path = save_path
     handle = ns.ses.add_torrent(atp)
-    bootstrap(ns, handle)  # trackerless: dial introducers, then PEX takes over
 
     entry = {"name": meta["name"], "role": role, "save_path": save_path,
              "ti": ti, "files": file_list(ti), "handle": handle}
@@ -296,7 +282,6 @@ def load_resumes(ns: NodeState) -> int:
         ih = str(ti.info_hashes().v2)
         role = derive_role(ns.node_id, atp.save_path)
         handle = ns.ses.add_torrent(atp)
-        bootstrap(ns, handle)  # re-enter the swarm via introducers on restart
         with ns.lock:
             ns.torrents[ih] = {"name": ti.name(), "role": role,
                                "save_path": atp.save_path, "ti": ti,
@@ -341,18 +326,12 @@ def session_loop(ns: NodeState) -> None:
         with ns.lock:
             entries = list(ns.torrents.values())
 
-        retry_bootstrap = loops % BOOTSTRAP_EVERY == 0
         torrents, peers = [], []
         for e in entries:
             st = e["handle"].status()
             torrents.append(torrent_dict(st, e["ti"], e["files"], e["role"]))
             for p in e["handle"].get_peer_info():
                 peers.append(peer_dict(p, e["name"]))
-            # Self-heal discovery: a torrent with no peers re-dials its introducers
-            # (e.g. it was added before its introducer joined that swarm). PEX
-            # takes over once a single connection lands.
-            if retry_bootstrap and st.num_peers == 0:
-                bootstrap(ns, e["handle"])
 
         snap = {
             "node_id": ns.node_id,

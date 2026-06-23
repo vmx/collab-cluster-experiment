@@ -12,12 +12,10 @@ Reading the graph:
 - Direction comes from the `incoming` source bit: an inbound connection is
   flagged `incoming`, so we read each connection from the *dialer* (non-incoming)
   side. That yields exactly one directed edge per connection — "n1 -> n0" means
-  node 1 dialed node 0 — and drops the self-dials PEX can trigger by gossiping a
-  node its own address.
-- The `src:` bits are libtorrent's *cumulative* view of where a peer is known
-  from. Once the swarm meshes, PEX re-advertises everyone, so `pex` shows up on
-  nearly every edge (including the original introducer dial) — treat it as "PEX
-  also knows this peer", not "first discovered via PEX".
+  node 1 dialed node 0.
+- The `src:` bits are libtorrent's view of where a peer is known from. With
+  tracker-only discovery this is `tracker` (the dialing side learned the peer
+  from a tracker announce).
 
 Localhost only: identifying nodes by port assumes the 6881+id scheme.
 """

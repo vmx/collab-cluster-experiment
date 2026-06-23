@@ -66,6 +66,22 @@ def list_catalog() -> list:
     return sorted(metas, key=lambda m: m["name"])
 
 
+def write_whitelist() -> str:
+    """(Re)write the opentracker whitelist covering the whole catalog.
+
+    opentracker keys on the 20-byte info-hash. A v2 torrent announces using the
+    first 20 bytes of its SHA-256 v2 hash, i.e. the first 40 hex chars of the
+    sidecar's `info_hash`. Run the tracker with `-w config.WHITELIST_PATH`.
+    """
+    lines = [m["info_hash"][:40] for m in list_catalog()]
+    with open(config.WHITELIST_PATH, "w") as f:
+        f.write("\n".join(lines) + ("\n" if lines else ""))
+    print(f"wrote {config.WHITELIST_PATH} ({len(lines)} torrent(s)) — "
+          f"run: opentracker -i {config.HOST} -p {config.TRACKER_PORT} "
+          f"-P {config.TRACKER_PORT} -w {config.WHITELIST_PATH}")
+    return config.WHITELIST_PATH
+
+
 # --- building ----------------------------------------------------------------
 
 def build_sample(root: str) -> list:
@@ -108,9 +124,12 @@ def make_torrent(source: str) -> dict:
         sys.exit(f"error: no data found under {source}")
 
     ct = lt.create_torrent(fs, config.PIECE_SIZE, flags=lt.create_torrent.v2_only)
-    # Trackerless: no announce URL. Peers find each other via an introducer peer
-    # (config.INTRODUCERS) plus PEX. Leaving the torrent non-private keeps PEX
-    # allowed (private torrents disable peer exchange).
+    ct.add_tracker(config.TRACKER_URL)
+    # Private => discovery is tracker-only: libtorrent disables PEX, DHT and LSD
+    # for this torrent, so peers find each other purely by announcing to the
+    # tracker. (The private flag lives in the info-dict, so it is part of the
+    # info-hash — rebuild torrents after changing it.)
+    ct.set_priv(True)
     ct.set_creator("bittorrent-prototype")
     ct.set_comment(f"v2-only prototype content: {os.path.basename(source)}")
     lt.set_piece_hashes(ct, seed_save_path)  # hash the files as they sit on disk
@@ -153,6 +172,8 @@ def main(sources=None) -> None:
         sources = [sources]
     for src in sources:
         make_torrent(src)
+    # Keep the tracker whitelist in sync with the full catalog.
+    write_whitelist()
 
 
 if __name__ == "__main__":

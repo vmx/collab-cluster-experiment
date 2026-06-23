@@ -8,8 +8,8 @@ import math
 
 # libtorrent peer_info.source bit flags -> label. These are stable library
 # values; we keep them here (plain ints) so modules without a libtorrent import
-# (monitor, report) can decode the `source` we record. With no tracker/DHT/LSD,
-# "pex" and "incoming" are how peers are expected to be discovered.
+# (monitor, report) can decode the `source` we record. With tracker-only
+# discovery, "tracker" and "incoming" are how peers are expected to be learned.
 PEER_SOURCE_FLAGS = [
     (0x1, "tracker"),
     (0x2, "dht"),

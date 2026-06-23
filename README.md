@@ -7,11 +7,12 @@ drive the swarm by hand: tell each node to **seed** or **leech** specific
 torrents via a small control API. A separate **monitoring service** captures as
 many stats as possible into SQLite + JSON snapshots.
 
-- **No tracker** — discovery is decentralized. A joining torrent dials one of a
-  few **introducer** peers (`config.INTRODUCERS`) to enter the swarm, then
-  **PEX** (peer exchange) gossips the rest of the peers. An introducer is just an
-  ordinary peer, so any node can serve as one and a down introducer is simply
-  swapped for the next — no central service to operate.
+- **Tracker-based discovery** — peers find each other by announcing to a central
+  tracker. We don't ship one; you run the installed **opentracker**. Torrents are
+  built **private** (announce URL baked in), which makes libtorrent disable
+  PEX/DHT/LSD, so discovery is purely tracker-driven. opentracker runs in
+  whitelist mode here, so `make_torrent.py` also writes `data/tracker.whitelist`
+  (the catalog's info-hashes) for you to start the tracker with.
 - **BitTorrent v2 only** (SHA-256 merkle, no v1/hybrid).
 - **Multiple torrents at once** — a node can seed some and leech others
   simultaneously; all stats are reported per torrent.
@@ -32,21 +33,24 @@ start **empty**; you assign torrents to them at runtime with `control.py`.
 # 1. Build the torrent catalog (writes data/torrents/<name>.torrent + <name>.json).
 #    No args = built-in sample (two torrents: "media" and "documents").
 #    Or pass any number of files/directories — each becomes its own torrent.
-#    Torrents are trackerless; peers discover each other via introducer + PEX.
+#    Torrents are private + tracker-based; this also (re)writes the tracker
+#    whitelist (data/tracker.whitelist) and prints the exact opentracker command.
 python make_torrent.py                       # built-in sample (two torrents)
 python make_torrent.py ~/photos ~/some/file  # or build your own catalog
 
-# 2. Start some node daemons — one process each, identified only by --id.
+# 2. Start the tracker (opentracker) with the whitelist make_torrent wrote.
+#    Must be up before nodes announce. Re-run make_torrent if you add torrents.
+opentracker -i 127.0.0.1 -p 6969 -P 6969 -w data/tracker.whitelist
+
+# 3. Start some node daemons — one process each, identified only by --id.
 #    BitTorrent port = 6881+id, control/stats HTTP port = 8001+id. No role yet.
-#    The default introducer (config.INTRODUCERS = [0]) is the bootstrap peer,
-#    so node 0 should be up for newcomers to dial. List more ids for resilience.
 python node.py --id 0
 python node.py --id 1
 python node.py --id 2
 python node.py --id 3
 python node.py --id 4
 
-# 3. Drive the swarm with control.py (see `list` for available torrent names).
+# 4. Drive the swarm with control.py (see `list` for available torrent names).
 python control.py list                    # what's in the catalog
 python control.py add 0 media --role seed     # node 0 seeds "media"
 python control.py add 0 documents --role seed # ...and "documents"
@@ -56,7 +60,7 @@ python control.py add 3 documents --role leech
 python control.py status                  # what every node currently holds
 python control.py remove 3 documents      # tell a node to drop a torrent
 
-# 4. The monitor (start any time; it prints the live per-poll summary).
+# 5. The monitor (start any time; it prints the live per-poll summary).
 python monitor.py
 ```
 
@@ -65,18 +69,16 @@ The seed serves its content **in place** from where `make_torrent.py` found it
 torrent's tree under `nodes/<id>/<name>/`. The monitor prints a live summary:
 
 ```
-n0/media:100% ▲127K ▼3K p1  n1/media: 47% ▲ 64K ▼256K p2·pex1  n2/documents: 31% ...
+n0/media:100% ▲127K ▼3K p1  n1/media: 47% ▲ 64K ▼256K p2  n2/documents: 31% ...
 ```
 
-(`nN/<torrent>`, `▲` upload KiB/s, `▼` download KiB/s, `pN` connected peers,
-`·pexK` = of those peers, how many were discovered via PEX rather than a direct
-introducer dial — i.e. peer exchange actually doing the work.)
+(`nN/<torrent>`, `▲` upload KiB/s, `▼` download KiB/s, `pN` connected peers.)
 
 Notes:
 - Order matters only loosely: nodes and the monitor tolerate each other starting
   in any order (the monitor shows `nN:--` for nodes that aren't answering yet).
-  Because discovery is trackerless, a newcomer can only bootstrap once one of its
-  `config.INTRODUCERS` is up — so start an introducer (node 0 by default) early.
+  The tracker should be up before nodes announce, but a node that announces while
+  the tracker is down just retries on the next announce (`ANNOUNCE_INTERVAL`).
 - Ports, node count and timing all come from `config.py`. `NUM_NODES` only sets
   how many node ports the monitor and `control.py status` scan; you can start
   as few or as many nodes as you like.
@@ -91,14 +93,14 @@ Notes:
 
 ```bash
 # live JSON from a single node (session + per-torrent status + per-peer stats,
-# incl. each peer's discovery source — "pex", "incoming", ...)
+# incl. each peer's discovery source — "tracker", "incoming", ...)
 curl -s http://127.0.0.1:8001/stats | python -m json.tool
 
 # what each node is doing right now
 python control.py status
 
 # how the nodes are connected to each other right now (who dialed whom, per
-# torrent) — watch it go from introducer-only to a full mesh as PEX kicks in
+# torrent), and that peers were learned from the tracker (src:tracker)
 python topology.py
 watch -n 1 python topology.py
 
@@ -119,24 +121,29 @@ sqlite3 stats/monitor.db "SELECT node_id, info_hash, MAX(progress) FROM torrent_
 
 | File | Role |
 |---|---|
-| `config.py` | Ports, counts, paths, timing, `INTRODUCERS` — the single source of truth. |
-| `make_torrent.py` | Build v2-only (trackerless) `.torrent`s from any files/dirs into the catalog (`data/torrents/`); generates a two-torrent sample if no args. Also the catalog-lookup helpers used by the node/control. |
-| `node.py` | One roleless node daemon: libtorrent session (trackerless — bootstraps via `config.INTRODUCERS` + PEX) + HTTP `/stats` (GET) and `/add` `/remove` (POST) control endpoints. |
+| `config.py` | Ports, counts, paths, timing, tracker URL/whitelist — the single source of truth. |
+| `make_torrent.py` | Build v2-only, private, tracker-based `.torrent`s from any files/dirs into the catalog (`data/torrents/`); generates a two-torrent sample if no args, and (re)writes `data/tracker.whitelist`. Also the catalog-lookup helpers used by the node/control. |
+| `node.py` | One roleless node daemon: libtorrent session (announces to the tracker) + HTTP `/stats` (GET) and `/add` `/remove` (POST) control endpoints. |
 | `control.py` | CLI to list the catalog, inspect nodes, and tell nodes to seed/leech torrents. |
-| `monitor.py` | Polls all nodes → SQLite + JSON snapshots (per torrent); surfaces PEX-discovered peer counts. |
+| `monitor.py` | Polls all nodes → SQLite + JSON snapshots (per torrent). |
 | `report.py` | Prints a per-torrent summary from `stats/monitor.db`. |
 | `piece_map.py` | Per torrent: which peer holds which pieces/files + how many copies of each file exist. |
-| `topology.py` | Per torrent: the live peer-connection graph (who dialed whom), so you can watch PEX grow the mesh from the introducer. |
+| `topology.py` | Per torrent: the live peer-connection graph (who dialed whom, and that peers came from the tracker). |
 | `swarm_stats.py` | Shared helpers that group node snapshots by torrent and aggregate per-piece/per-file copy stats (used by `monitor.py` + `piece_map.py`). |
+
+You bring the tracker: the installed **opentracker** (not part of this repo).
 
 ## Ports
 
+- Tracker (opentracker): `6969` (tcp + udp)
 - Node *i* BitTorrent: `6881 + i`
 - Node *i* control/stats HTTP: `8001 + i`
 
 ## Outputs (generated, safe to delete)
 
 - `data/torrents/` — `<name>.torrent` + `<name>.json` per catalog entry
+- `data/tracker.whitelist` — info-hashes for opentracker's whitelist (regenerated
+  by `make_torrent.py`)
 - `data/sample/` — the built-in sample datasets (when no content is given)
 - `nodes/<id>/<name>/` — each leecher's download directory per torrent
 - `nodes/<id>/.resume/<name>.resume` — libtorrent fast-resume per torrent (lets a
@@ -157,9 +164,9 @@ sqlite3 stats/monitor.db "SELECT node_id, info_hash, MAX(progress) FROM torrent_
   seeding/finished flags.
 - **Peers** (`peer_info`): per-connection up/down speed, payload speed, progress,
   totals, flags, source, RTT (tagged with the torrent name). The `source` bitmask
-  records how each peer was discovered; with no tracker this is dominated by
-  `pex` and `incoming`. `report.py` summarises the per-source counts, and the
-  live `/stats` exposes decoded `source_flags`.
+  records how each peer was discovered; here it is dominated by `tracker` and
+  `incoming`. `report.py` summarises the per-source counts, and the live `/stats`
+  exposes decoded `source_flags`.
 - **Pieces & files** (in each node's live `/stats` + the JSON snapshots; consumed
   by `piece_map.py`): per-piece ownership bitfield and the static file→piece-range
   map, enabling who-has-what and per-file copy counts.
