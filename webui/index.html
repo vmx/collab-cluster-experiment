@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BitTorrent swarm — piece map</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0d1117;
+        --panel: #161b22;
+        --border: #30363d;
+        --fg: #c9d1d9;
+        --muted: #8b949e;
+        --accent: #58a6ff;
+        --ok: #3fb950;
+        --bad: #f85149;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 1.25rem 1.5rem 3rem;
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      }
+      h1 {
+        font-size: 1.15rem;
+        margin: 0;
+      }
+      h2 {
+        font-size: 1rem;
+        margin: 0 0 0.15rem;
+      }
+      h3 {
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--muted);
+        margin: 1rem 0 0.4rem;
+      }
+      .muted {
+        color: var(--muted);
+        font-weight: 400;
+      }
+      .small {
+        font-size: 0.8rem;
+      }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        padding-bottom: 0.75rem;
+        border-bottom: 1px solid var(--border);
+        margin-bottom: 1rem;
+      }
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+      }
+      .pill {
+        font-size: 0.75rem;
+        font-weight: 600;
+        padding: 0.15rem 0.55rem;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+      }
+      .pill.live {
+        color: var(--ok);
+        border-color: var(--ok);
+      }
+      .pill.error {
+        color: var(--bad);
+        border-color: var(--bad);
+      }
+      .pill.connecting {
+        color: var(--muted);
+      }
+
+      .banner {
+        background: rgba(248, 81, 73, 0.12);
+        border: 1px solid var(--bad);
+        color: #ffa198;
+        border-radius: 6px;
+        padding: 0.5rem 0.75rem;
+        margin-bottom: 1rem;
+      }
+      .empty {
+        color: var(--muted);
+        padding: 2rem 0;
+      }
+
+      .torrent {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1rem 1.1rem;
+        margin-bottom: 1.25rem;
+      }
+
+      .summary {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.6rem;
+        margin: 0.75rem 0 0.25rem;
+      }
+      .stat {
+        display: flex;
+        flex-direction: column;
+        gap: 0.1rem;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 0.45rem 0.7rem;
+        min-width: 7rem;
+      }
+      .num {
+        font-size: 1.2rem;
+        font-weight: 600;
+      }
+      .num.ok {
+        color: var(--ok);
+      }
+      .num.bad {
+        color: var(--bad);
+      }
+      .lbl {
+        font-size: 0.72rem;
+        color: var(--muted);
+      }
+
+      .rows {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+      }
+      .noderow {
+        display: grid;
+        grid-template-columns: 18rem 1fr auto;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 1px 0;
+      }
+      .rowlabel {
+        white-space: pre;
+        color: var(--fg);
+      }
+      .noderow.avail .rowlabel {
+        color: var(--muted);
+      }
+      .map {
+        display: flex;
+        flex-wrap: nowrap;
+        gap: 1px;
+        min-height: 14px;
+      }
+      .cell {
+        display: inline-block;
+        width: 6px;
+        height: 14px;
+        border-radius: 1px;
+      }
+      .stored {
+        color: var(--muted);
+        text-align: right;
+        white-space: nowrap;
+      }
+
+      .hist {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .hist li {
+        padding: 1px 0;
+      }
+
+      .filerow {
+        display: grid;
+        grid-template-columns: 2fr 6rem 4rem 5rem 3fr;
+        gap: 0.5rem;
+        padding: 2px 0;
+        font-size: 12.5px;
+        border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+      }
+      .filerow.filehead {
+        color: var(--muted);
+        font-weight: 600;
+        border-bottom: 1px solid var(--border);
+      }
+      .fnum {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      .fhold {
+        color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

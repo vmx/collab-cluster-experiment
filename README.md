@@ -31,7 +31,10 @@ live view of the whole swarm.
   a node that's stopped (Ctrl-C / SIGTERM) and restarted comes back with the same
   torrents and download progress, no re-download and no re-issuing commands.
 - **Python stdlib only**, plus the `libtorrent` python binding (tested with
-  libtorrent 2.0.13 / Python 3.13). No third-party dependencies.
+  libtorrent 2.0.13 / Python 3.13). No third-party dependencies. The browser
+  dashboard is just as self-contained — a no-build [Tutuca](https://github.com/marianoguerra/tutuca)
+  SPA with the framework vendored as a single `webui/tutuca.js`, so nothing is
+  installed and nothing is fetched from the internet at runtime.
 
 ## Run
 
@@ -51,8 +54,9 @@ python make_torrent.py ~/photos ~/some/file  # or build your own catalog
 python bittorrent_tracker.py
 
 # 3. Start the collector (start any time; nodes buffer nothing, they just push
-#    on their next tick). Receives node snapshots and serves a live view (/live);
-#    in-memory only, nothing is persisted. Listens on :8100.
+#    on their next tick). Receives node snapshots and serves a live view (/live,
+#    /summary) plus the web UI; in-memory only, nothing is persisted. Listens on
+#    :8100 — open http://127.0.0.1:8100/ in a browser for the live dashboard.
 python collector.py
 
 # 4. Start some node daemons — one process each, identified only by --id.
@@ -104,15 +108,29 @@ Notes:
 
 ## Inspect
 
+The easiest swarm-wide view is the **web UI**: open <http://127.0.0.1:8100/> in a
+browser once the collector is running. It's the piece map in the browser — per-node
+piece ownership, per-piece availability, the availability histogram, the
+"copies of the dataset" summary, and per-file replication — and it refreshes itself
+every second. The UI is a zero-build [Tutuca](https://github.com/marianoguerra/tutuca)
+SPA served straight from `webui/` (the framework is vendored as a single
+`webui/tutuca.js`, so there's nothing to install and no internet needed at runtime).
+It reads the collector's `/summary`, which is built by `swarm_stats` — the same
+aggregation `piece_map.py` uses — so the browser and the terminal never disagree.
+
+For the terminal, JSON, or scripting:
+
 ```bash
 # live JSON from a single node (session + per-torrent status + per-peer stats,
 # incl. each peer's discovery source — "tracker", "incoming", ...)
 curl -s http://127.0.0.1:8001/stats | python -m json.tool
 
-# the collector's view: live swarm state (latest snapshot per fresh node) and
-# its own health (which nodes are reporting, last-seen age)
-curl -s http://127.0.0.1:8100/live  | python -m json.tool
-curl -s http://127.0.0.1:8100/stats | python -m json.tool
+# the collector's view: live swarm state (latest snapshot per fresh node), the
+# aggregated per-torrent summary the web UI renders, and its own health (which
+# nodes are reporting, last-seen age)
+curl -s http://127.0.0.1:8100/live    | python -m json.tool
+curl -s http://127.0.0.1:8100/summary | python -m json.tool
+curl -s http://127.0.0.1:8100/stats   | python -m json.tool
 
 # the tracker's view of the swarm, and the catalog it hosts
 curl -s http://127.0.0.1:8000/stats | python -m json.tool
@@ -136,9 +154,10 @@ watch -n 2 python piece_map.py  # refresh every 2s (use the `watch` CLI tool)
 | `catalog.py` | Stdlib client the node/control use to fetch the catalog (list, meta, `.torrent`) from the tracker over HTTP. |
 | `node.py` | One roleless node daemon: libtorrent session (announces to the tracker; fetches torrents from its `/catalog`) + HTTP `/stats` (GET) and `/add` `/remove` (POST) control endpoints; pushes its snapshot to the collector (`--collector`). Has a persisted `node_key`. |
 | `control.py` | Operator-local CLI to list the catalog (from the tracker), inspect a local node, and tell nodes to seed/leech torrents. |
-| `collector.py` | Central push endpoint: keeps the latest snapshot per node in memory (no persistence) and serves `/live` (live swarm state) and `/stats` (collector health). |
+| `collector.py` | Central push endpoint: keeps the latest snapshot per node in memory (no persistence) and serves `/live` (live swarm state), `/summary` (the per-torrent aggregation the web UI renders), `/stats` (collector health), and the web UI from `webui/`. |
 | `piece_map.py` | Per torrent: which peer holds which pieces/files + how many copies of each file exist (reads the collector's `/live`). |
-| `swarm_stats.py` | Shared helpers that group node snapshots by torrent and aggregate per-piece/per-file copy stats (used by `collector.py` + `piece_map.py`). |
+| `swarm_stats.py` | Shared helpers that group node snapshots by torrent and aggregate per-piece/per-file copy stats (used by `collector.py` for `/summary` + `piece_map.py`). |
+| `webui/` | The browser dashboard: `index.html` + `app.js` (a [Tutuca](https://github.com/marianoguerra/tutuca) SPA, no build step) polling `/summary`, plus the vendored single-file `tutuca.js` framework. Served by `collector.py`. |
 
 ## Ports
 
