@@ -29,9 +29,13 @@ def collect_by_torrent(nodes: list) -> list:
     """Group every node's torrent entries by torrent.
 
     Returns a list of (meta, rows), one per distinct torrent, sorted by name:
-      rows: [{"id", "label", "role", "bits": list[bool] of length num_pieces}]
+      rows: [{"id", "label", "role", "bits": list[bool] of length num_pieces,
+              "state", "progress", "dl", "ul"}]
             id = node_key (stable swarm-wide identity, used for the DB / holders);
-            label = short human name for display.
+            label = short human name for display;
+            state/progress/dl/ul = this node's live transfer activity for the
+            torrent (for the overview's aggregate throughput / "replicating"
+            signal). Ownership views ignore these; only `bits` matters there.
       meta: {info_hash, name, num_pieces, piece_length, total_size, files}
     """
     groups: dict = {}  # info_hash -> {"meta", "rows"}
@@ -51,7 +55,11 @@ def collect_by_torrent(nodes: list) -> list:
                          "total_size": total_size, "files": t.get("files") or []},
                 "rows": []})
             g["rows"].append({"id": key, "label": label,
-                              "role": t.get("role", "?"), "bits": bits})
+                              "role": t.get("role", "?"), "bits": bits,
+                              "state": t.get("state", ""),
+                              "progress": float(t.get("progress") or 0.0),
+                              "dl": int(t.get("download_rate") or 0),
+                              "ul": int(t.get("upload_rate") or 0)})
     return [(g["meta"], g["rows"])
             for g in sorted(groups.values(), key=lambda g: g["meta"]["name"])]
 

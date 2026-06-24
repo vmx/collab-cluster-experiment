@@ -109,19 +109,42 @@ Notes:
 ## Inspect
 
 The easiest swarm-wide view is the **web UI**: open <http://127.0.0.1:8100/> in a
-browser once the collector is running. It's the piece map in the browser — per-node
-piece ownership, per-piece availability, the availability histogram, the
-"copies of the dataset" summary, and per-file replication — and it refreshes itself
-every second. The UI is a zero-build [Tutuca](https://github.com/marianoguerra/tutuca)
-SPA served straight from `webui/` (the framework is vendored as a single
-`webui/tutuca.js`, so there's nothing to install and no internet needed at runtime).
-It reads the collector's `/summary`, which is built by `swarm_stats` — the same
-aggregation `piece_map.py` uses — so the browser and the terminal never disagree.
-That endpoint is built to fan out to many viewers cheaply: the result is cached
-for one push interval (`SUMMARY_TTL`) so a crowd shares one recompute per tick
-rather than one per request, piece bitfields are bucketed server-side into the
-≤`WEBUI_MAX_COLS` columns the UI actually draws (so the payload stays small for
-big torrents), and it carries an `ETag` so unchanged state comes back as a `304`.
+browser once the collector is running. It has a few screens, reachable from the top
+nav — real routes via the History API (URLPattern matching, not hashes), each a
+shareable, reloadable URL — and it refreshes itself every second:
+
+- **Overview** (`/`) — one row per dataset: size, copy counts (the weakest-link
+  "durable" copies up front, with full copies and the rarest piece as context), a
+  per-node *spread* strip showing how much of the dataset each node holds, and the
+  live activity (replicating vs complete, with throughput). It reads `/api/overview`,
+  which carries **no per-piece bitfields**, so it stays cheap to poll no matter how
+  many datasets/nodes there are. Datasets are sorted rarest-copies-first so the
+  least-replicated float to the top.
+- **Drill-down** (`/dataset/<info_hash>`, click any row) — the full piece map for
+  one dataset: per-node piece ownership, per-piece availability, the availability
+  histogram, the copies summary, and per-file replication. It reads the dataset's
+  detail from `/api/torrent/<info_hash>` only while that dataset is open.
+- **Transfers** (`/transfers`) — what's moving right now: one row per incomplete
+  (node, dataset) with a progress bar, live rate and ETA (stalled transfers show
+  too, without an ETA), soonest-done first. Reads `/api/transfers`.
+- **Nodes** (`/nodes`) — the infrastructure side of "where is the data": per node,
+  how much it stores, how many datasets it holds/completes, and its throughput.
+  Reads `/api/nodes`.
+
+The machine endpoints are namespaced under `/api/` so they never collide with those
+client-side page paths; the collector serves the app shell (`index.html`) for any
+non-`/api/` GET, so every route deep-links and reloads (with `<base href="/">`
+keeping assets resolving from the root).
+
+The UI is a zero-build [Tutuca](https://github.com/marianoguerra/tutuca) SPA served
+straight from `webui/` (the framework is vendored as a single `webui/tutuca.js`, so
+there's nothing to install and no internet needed at runtime). The endpoints are
+built by `swarm_stats` — the same aggregation `piece_map.py` uses — so the browser
+and the terminal never disagree, and they fan out to many viewers cheaply: results
+are cached for one push interval (`SUMMARY_TTL`) so a crowd shares one recompute per
+tick, the heavy detail's piece bitfields are bucketed server-side into the
+≤`WEBUI_MAX_COLS` columns the UI actually draws, and each carries an `ETag` so
+unchanged state comes back as a `304`.
 
 For the terminal, JSON, or scripting:
 
@@ -130,12 +153,21 @@ For the terminal, JSON, or scripting:
 # incl. each peer's discovery source — "tracker", "incoming", ...)
 curl -s http://127.0.0.1:8001/stats | python -m json.tool
 
-# the collector's view: live swarm state (latest snapshot per fresh node), the
-# aggregated per-torrent summary the web UI renders, and its own health (which
-# nodes are reporting, last-seen age)
-curl -s http://127.0.0.1:8100/live    | python -m json.tool
-curl -s http://127.0.0.1:8100/summary | python -m json.tool
-curl -s http://127.0.0.1:8100/stats   | python -m json.tool
+# the collector's view. Operator endpoints live at the root (live swarm state +
+# its own health); the dashboard's data API is namespaced under /api/ so it never
+# collides with the SPA's page routes (/, /dataset/<hash>, /transfers, /nodes):
+#   /api/overview            one light row per dataset (size, copy counts, live
+#                            throughput, per-node held-fraction; NO piece bitfields)
+#   /api/torrent/<info_hash> full per-dataset detail, fetched only on drill-down
+#   /api/transfers           in-flight transfers (per (node,dataset): progress/rate/ETA)
+#   /api/nodes               per-node storage + activity (stored, held, throughput)
+#   /api/summary             the original all-torrents-at-once payload
+curl -s http://127.0.0.1:8100/live          | python -m json.tool
+curl -s http://127.0.0.1:8100/stats         | python -m json.tool
+curl -s http://127.0.0.1:8100/api/overview  | python -m json.tool
+curl -s http://127.0.0.1:8100/api/transfers | python -m json.tool
+curl -s http://127.0.0.1:8100/api/nodes     | python -m json.tool
+curl -s "http://127.0.0.1:8100/api/torrent/$(curl -s http://127.0.0.1:8100/api/overview | python -c 'import sys,json;print(json.load(sys.stdin)["datasets"][0]["info_hash"])')" | python -m json.tool
 
 # the tracker's view of the swarm, and the catalog it hosts
 curl -s http://127.0.0.1:8000/stats | python -m json.tool
@@ -159,10 +191,10 @@ watch -n 2 python piece_map.py  # refresh every 2s (use the `watch` CLI tool)
 | `catalog.py` | Stdlib client the node/control use to fetch the catalog (list, meta, `.torrent`) from the tracker over HTTP. |
 | `node.py` | One roleless node daemon: libtorrent session (announces to the tracker; fetches torrents from its `/catalog`) + HTTP `/stats` (GET) and `/add` `/remove` (POST) control endpoints; pushes its snapshot to the collector (`--collector`). Has a persisted `node_key`. |
 | `control.py` | Operator-local CLI to list the catalog (from the tracker), inspect a local node, and tell nodes to seed/leech torrents. |
-| `collector.py` | Central push endpoint: keeps the latest snapshot per node in memory (no persistence) and serves `/live` (live swarm state), `/summary` (the per-torrent aggregation the web UI renders), `/stats` (collector health), and the web UI from `webui/`. |
+| `collector.py` | Central push endpoint: keeps the latest snapshot per node in memory (no persistence) and serves `/live` + `/stats` (operator views), the dashboard API under `/api/` (`overview` light per-dataset list, `torrent/<info_hash>` full drill-down detail, `transfers` in-flight transfers, `nodes` per-node storage, `summary` legacy all-torrents), and the web UI from `webui/` (app shell served for any non-`/api/` path). |
 | `piece_map.py` | Per torrent: which peer holds which pieces/files + how many copies of each file exist (reads the collector's `/live`). |
-| `swarm_stats.py` | Shared helpers that group node snapshots by torrent and aggregate per-piece/per-file copy stats (used by `collector.py` for `/summary` + `piece_map.py`). |
-| `webui/` | The browser dashboard: `index.html` + `app.js` (a [Tutuca](https://github.com/marianoguerra/tutuca) SPA, no build step) polling `/summary`, plus the vendored single-file `tutuca.js` framework. Served by `collector.py`. |
+| `swarm_stats.py` | Shared helpers that group node snapshots by torrent and aggregate per-piece/per-file copy stats (used by `collector.py` for `/api/overview` + `/api/torrent/<info_hash>` + `/api/summary`, and by `piece_map.py`). |
+| `webui/` | The browser dashboard: `index.html` + `app.js` (a [Tutuca](https://github.com/marianoguerra/tutuca) SPA, no build step) — History-API-routed screens Overview (`/`), per-dataset piece-map drill-down (`/dataset/<info_hash>`), Transfers (`/transfers`) and Nodes (`/nodes`), reading the `/api/*` endpoints — plus the vendored single-file `tutuca.js` framework. Served by `collector.py`. |
 
 ## Ports
 
