@@ -23,6 +23,7 @@ Endpoints:
   GET  /stats    - the collector's own health: nodes seen + last-seen ages
   GET  /         - the web UI (static files served from ./webui/)
 """
+import hashlib
 import json
 import os
 import threading
@@ -66,19 +67,44 @@ def piece_size(i: int, piece_length: int, total_size: int, num_pieces: int) -> i
     return total_size - piece_length * (num_pieces - 1)
 
 
+def bucket_fracs(bits: list, num_pieces: int, cols: int) -> list:
+    """Held-fraction of each display column (one column per piece when they fit).
+    The dashboard draws at most WEBUI_MAX_COLS columns, so bucketing here keeps
+    the payload tiny regardless of piece count. Column boundaries match
+    piece_map.render_bits so the web and terminal views agree."""
+    if cols >= num_pieces:
+        return [1.0 if b else 0.0 for b in bits]
+    out = []
+    for c in range(cols):
+        seg = bits[c * num_pieces // cols:(c + 1) * num_pieces // cols]
+        out.append(round(sum(1 for b in seg if b) / len(seg), 3) if seg else 0.0)
+    return out
+
+
+def bucket_avail(avail: list, num_pieces: int, cols: int) -> list:
+    """Worst-case (min) holder count per display column. Mirrors render_avail."""
+    if cols >= num_pieces:
+        return list(avail)
+    return [min(avail[c * num_pieces // cols:(c + 1) * num_pieces // cols])
+            for c in range(cols)]
+
+
 def build_summary() -> dict:
     """The swarm-wide view piece_map.py renders, as render-ready JSON.
 
     Aggregation comes straight from swarm_stats (the same code piece_map uses),
     so the web UI and the terminal view never drift; only presentation differs.
-    Per-node ownership bitfields are included so the UI can draw the piece map;
-    holder ids are resolved to display labels here.
+    Piece bitfields are bucketed into display columns here rather than shipped raw,
+    so the payload stays small even for torrents with thousands of pieces; holder
+    ids are resolved to display labels. Colouring of the columns is left to the UI.
     """
+    cols_cap = config.WEBUI_MAX_COLS
     torrents = []
     for meta, rows in swarm_stats.collect_by_torrent(fresh_snapshots()):
         num_pieces = meta["num_pieces"]
         piece_length = meta["piece_length"]
         total_size = meta["total_size"]
+        cols = min(num_pieces, cols_cap)
         avail = swarm_stats.availability(rows, num_pieces)
         labels = {r["id"]: r["label"] for r in rows}  # node_key -> display label
         min_avail = min(avail) if avail else 0
@@ -92,8 +118,13 @@ def build_summary() -> dict:
             out_rows.append({
                 "label": r["label"], "role": r["role"],
                 "have": sum(r["bits"]), "stored": stored,
-                "bits": [1 if b else 0 for b in r["bits"]],
+                "cells": bucket_fracs(r["bits"], num_pieces, cols),
             })
+
+        # Availability histogram: how many pieces are held by exactly k nodes.
+        histogram = [{"holders": k, "pieces": cnt}
+                     for k in range(len(rows), -1, -1)
+                     for cnt in [sum(1 for a in avail if a == k)] if cnt]
 
         files = []
         for f in swarm_stats.per_file(rows, meta["files"], avail):
@@ -110,7 +141,9 @@ def build_summary() -> dict:
             "info_hash": meta["info_hash"], "name": meta["name"],
             "num_pieces": num_pieces, "piece_length": piece_length,
             "total_size": total_size, "nodes_seen": len(rows),
-            "rows": out_rows, "avail": avail, "files": files,
+            "rows": out_rows,
+            "avail_cells": bucket_avail(avail, num_pieces, cols),
+            "histogram": histogram, "files": files,
             "summary": {
                 "full_copies": len(full_holders), "full_holders": full_holders,
                 "min_avail": min_avail,
@@ -122,6 +155,27 @@ def build_summary() -> dict:
     return {"ts": time.time(), "torrents": torrents}
 
 
+SUMMARY_LOCK = threading.Lock()
+# Cached /summary so a crowd of viewers shares one build per tick. The ETag is
+# keyed to the swarm state (the torrents, not the timestamp), so an idle swarm
+# keeps a stable ETag and viewers get cheap 304s instead of resent bytes.
+_SUMMARY_CACHE = {"built_at": 0.0, "body": b"", "etag": ""}
+
+
+def summary_payload() -> tuple:
+    """(body_bytes, etag) for /summary, rebuilt at most once per SUMMARY_TTL."""
+    now = time.time()
+    with SUMMARY_LOCK:
+        age = now - _SUMMARY_CACHE["built_at"]
+        if not _SUMMARY_CACHE["body"] or age >= config.SUMMARY_TTL:
+            data = build_summary()
+            digest = hashlib.md5(
+                json.dumps(data["torrents"], sort_keys=True).encode()).hexdigest()
+            _SUMMARY_CACHE.update(built_at=now, body=json.dumps(data).encode(),
+                                  etag=f'"{digest}"')
+        return _SUMMARY_CACHE["body"], _SUMMARY_CACHE["etag"]
+
+
 def make_handler():
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -129,10 +183,13 @@ def make_handler():
         def log_message(self, *args):
             pass
 
-        def _send(self, body: bytes, ctype: str = "text/plain", code: int = 200) -> None:
+        def _send(self, body: bytes, ctype: str = "text/plain", code: int = 200,
+                  extra_headers: dict = None) -> None:
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
+            for k, v in (extra_headers or {}).items():
+                self.send_header(k, v)
             self.end_headers()
             self.wfile.write(body)
 
@@ -168,7 +225,15 @@ def make_handler():
                                    "nodes": fresh_snapshots()}).encode()
                 self._send(body, "application/json")
             elif self.path == "/summary":
-                self._send(json.dumps(build_summary()).encode(), "application/json")
+                body, etag = summary_payload()
+                if self.headers.get("If-None-Match") == etag:
+                    self.send_response(304)
+                    self.send_header("ETag", etag)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                else:
+                    self._send(body, "application/json",
+                               extra_headers={"ETag": etag, "Cache-Control": "no-cache"})
             elif self.path == "/stats":
                 now = time.time()
                 with LOCK:

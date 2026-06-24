@@ -35,6 +35,13 @@ COLLECTOR_PORT = 8100
 COLLECTOR_BASE = f"http://{HOST}:{COLLECTOR_PORT}"   # where nodes/viewers reach it
 COLLECTOR_URL = f"{COLLECTOR_BASE}/ingest"           # node push target (--collector default)
 
+# Web UI /summary tuning. The collector buckets each torrent's pieces into at most
+# this many columns before sending (the dashboard only draws that many), so the
+# payload stays small no matter how many pieces a torrent has. The built summary
+# is cached for SUMMARY_TTL (defined with the timing constants below) so a crowd
+# of viewers shares one recompute per tick instead of one per request.
+WEBUI_MAX_COLS = 120
+
 # --- Tracker-based discovery (our own tracker) -------------------------------
 # Discovery is tracker-driven: torrents are built with this announce URL baked in
 # and marked private (which disables PEX/DHT/LSD), so peers find each other purely
@@ -65,6 +72,10 @@ PUSH_INTERVAL = 1.0        # how often a node POSTs its snapshot to the collecto
 # Drop a node from the live view after this much silence (it stopped
 # pushing). Mirrors the tracker's reap window: comfortably more than PUSH_INTERVAL.
 NODE_STALE_AFTER = 3 * PUSH_INTERVAL
+
+# Cache the built /summary for one push interval: new node data only lands that
+# often, so recomputing more often than this just burns CPU on identical input.
+SUMMARY_TTL = PUSH_INTERVAL
 
 
 def bt_port(node_id: int) -> int:

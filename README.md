@@ -117,6 +117,11 @@ SPA served straight from `webui/` (the framework is vendored as a single
 `webui/tutuca.js`, so there's nothing to install and no internet needed at runtime).
 It reads the collector's `/summary`, which is built by `swarm_stats` — the same
 aggregation `piece_map.py` uses — so the browser and the terminal never disagree.
+That endpoint is built to fan out to many viewers cheaply: the result is cached
+for one push interval (`SUMMARY_TTL`) so a crowd shares one recompute per tick
+rather than one per request, piece bitfields are bucketed server-side into the
+≤`WEBUI_MAX_COLS` columns the UI actually draws (so the payload stays small for
+big torrents), and it carries an `ETag` so unchanged state comes back as a `304`.
 
 For the terminal, JSON, or scripting:
 

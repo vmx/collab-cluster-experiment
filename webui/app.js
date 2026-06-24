@@ -11,9 +11,10 @@ import { component, html, tutuca } from "./tutuca.js";
 
 const SUMMARY_URL = "/summary"; // same origin: the collector serves both
 const POLL_MS = 1000; // refresh once a second
-const MAX_COLS = 120; // widest piece map; more pieces than this get bucketed
 
 // --- pure presentation helpers -------------------------------------------------
+// The collector already buckets pieces into display columns and precomputes the
+// histogram; here we only turn its numbers into colours and text.
 
 function human(n) {
   const units = ["B", "KiB", "MiB", "GiB"];
@@ -24,34 +25,6 @@ function human(n) {
     i++;
   }
   return i === 0 ? `${Math.round(n)} B` : `${n.toFixed(1)} ${units[i]}`;
-}
-
-// Bucket a piece bitfield into `cols` columns, returning the held-fraction of
-// each column (mirrors piece_map.render_bits). One column per piece when they fit.
-function bucketFracs(bits, numPieces, cols) {
-  if (cols >= numPieces) return bits.map((b) => (b ? 1 : 0));
-  const out = [];
-  for (let c = 0; c < cols; c++) {
-    const lo = Math.floor((c * numPieces) / cols);
-    const hi = Math.floor(((c + 1) * numPieces) / cols);
-    const seg = bits.slice(lo, hi);
-    const have = seg.reduce((a, b) => a + (b ? 1 : 0), 0);
-    out.push(seg.length ? have / seg.length : 0);
-  }
-  return out;
-}
-
-// Bucket per-piece holder counts into `cols` columns, taking the worst (min)
-// availability in each bucket — same rule piece_map.render_avail uses.
-function bucketAvail(avail, numPieces, cols) {
-  if (cols >= numPieces) return avail.slice();
-  const out = [];
-  for (let c = 0; c < cols; c++) {
-    const lo = Math.floor((c * numPieces) / cols);
-    const hi = Math.floor(((c + 1) * numPieces) / cols);
-    out.push(Math.min(...avail.slice(lo, hi)));
-  }
-  return out;
 }
 
 function cellForFrac(frac) {
@@ -68,16 +41,11 @@ function cellForAvail(count, maxNodes) {
   return { style: `background:rgba(63,185,80,${a})`, title: `${count} holder(s)` };
 }
 
-function histogramLines(avail, nodes) {
-  const lines = [];
-  for (let k = nodes; k >= 0; k--) {
-    const pieces = avail.filter((a) => a === k).length;
-    if (pieces) {
-      const tag = k === 0 ? "  ← MISSING from swarm" : "";
-      lines.push(`${k} node(s): ${pieces} pieces${tag}`);
-    }
-  }
-  return lines;
+function histogramLines(histogram) {
+  return histogram.map((h) => {
+    const tag = h.holders === 0 ? "  ← MISSING from swarm" : "";
+    return `${h.holders} node(s): ${h.pieces} pieces${tag}`;
+  });
 }
 
 // --- components ----------------------------------------------------------------
@@ -104,8 +72,8 @@ const NodeRow = component({
     },
   },
   statics: {
-    fromData(r, numPieces, cols) {
-      const cells = bucketFracs(r.bits, numPieces, cols).map((f) => Cell.make(cellForFrac(f)));
+    fromData(r, numPieces) {
+      const cells = r.cells.map((f) => Cell.make(cellForFrac(f)));
       return this.make({
         label: r.label,
         role: r.role,
@@ -207,11 +175,8 @@ const Torrent = component({
   },
   statics: {
     fromData(t) {
-      const cols = Math.min(t.num_pieces, MAX_COLS);
-      const rows = t.rows.map((r) => NodeRow.Class.fromData(r, t.num_pieces, cols));
-      const availCells = bucketAvail(t.avail, t.num_pieces, cols).map((c) =>
-        Cell.make(cellForAvail(c, t.nodes_seen)),
-      );
+      const rows = t.rows.map((r) => NodeRow.Class.fromData(r, t.num_pieces));
+      const availCells = t.avail_cells.map((c) => Cell.make(cellForAvail(c, t.nodes_seen)));
       const files = t.files.map((f) => FileRow.Class.fromData(f, t.name));
       const s = t.summary;
       return this.make({
@@ -228,7 +193,7 @@ const Torrent = component({
         totalStored: s.total_stored,
         rows,
         availCells,
-        histLines: histogramLines(t.avail, t.nodes_seen),
+        histLines: histogramLines(t.histogram),
         files,
       });
     },
@@ -364,10 +329,15 @@ export function getExamples() {
     piece_length: 262144,
     total_size: 2000000,
     nodes_seen: 2,
-    avail: [2, 2, 1, 1, 0, 1, 2, 2],
+    avail_cells: [2, 2, 1, 1, 0, 1, 2, 2],
+    histogram: [
+      { holders: 2, pieces: 4 },
+      { holders: 1, pieces: 3 },
+      { holders: 0, pieces: 1 },
+    ],
     rows: [
-      { label: "0", role: "seed", have: 8, stored: 2000000, bits: [1, 1, 1, 1, 1, 1, 1, 1] },
-      { label: "1", role: "leech", have: 4, stored: 1000000, bits: [1, 1, 0, 0, 0, 0, 1, 1] },
+      { label: "0", role: "seed", have: 8, stored: 2000000, cells: [1, 1, 1, 1, 1, 1, 1, 1] },
+      { label: "1", role: "leech", have: 4, stored: 1000000, cells: [1, 1, 0, 0, 0, 0, 1, 1] },
     ],
     files: [
       {
