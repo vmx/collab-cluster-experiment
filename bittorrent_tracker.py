@@ -12,7 +12,7 @@ the .torrent metadata, with no shared catalog directory.
 Endpoints:
   GET /announce          - standard BitTorrent announce (compact + dict peers)
   GET /scrape            - standard scrape
-  GET /stats             - JSON (non-BitTorrent) snapshot for the monitor
+  GET /stats             - JSON (non-BitTorrent) snapshot for manual inspection
   GET /catalog           - JSON list of catalog torrents (the sidecar metas)
   GET /catalog/<name>.json    - one torrent's sidecar meta
   GET /catalog/<name>.torrent - one torrent's .torrent bytes

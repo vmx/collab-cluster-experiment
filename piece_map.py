@@ -9,22 +9,18 @@ bitfields and renders:
   * a per-piece availability row + histogram  (piece -> peers)
   * a "copies of the file" summary
 
-By default it reads the collector's /live (the latest snapshot of every node
-still reporting). With --snapshot it reads the most recent combined snapshot
-from stats/snapshots/ instead (post-mortem: analyse a finished run offline).
+It reads the collector's /live: the latest snapshot of every node still
+reporting.
 
 Usage:
     python piece_map.py                  # live, from the collector, once
     python piece_map.py --collector URL  # a non-default collector
-    python piece_map.py --snapshot       # newest stats/snapshots/*.json
 
 To refresh continuously, wrap it with the `watch` CLI tool:
     watch -n 2 python piece_map.py
 """
 import argparse
-import glob
 import json
-import os
 import urllib.request
 
 import config
@@ -46,16 +42,6 @@ def fetch_collector(base: str) -> list:
     """The collector's live view: latest snapshot of every node still reporting."""
     with urllib.request.urlopen(f"{base}/live", timeout=2.0) as r:
         return json.loads(r.read().decode()).get("nodes", [])
-
-
-def fetch_snapshot() -> list:
-    files = sorted(glob.glob(os.path.join(config.SNAPSHOT_DIR, "*.json")))
-    if not files:
-        return []
-    with open(files[-1]) as f:
-        combined = json.load(f)
-    print(f"(snapshot: {os.path.basename(files[-1])})")
-    return list(combined.get("nodes", {}).values())
 
 
 def piece_size(i: int, piece_length: int, total_size: int, num_pieces: int) -> int:
@@ -93,7 +79,7 @@ def report(nodes: list, source: str) -> None:
     torrents = swarm_stats.collect_by_torrent(nodes)
     if not torrents:
         print("No torrents reported (is the collector running and are nodes pushing "
-              "with torrents assigned? check the collector's /stats, or try --snapshot).")
+              "with torrents assigned? check the collector's /stats).")
         return
     for i, (meta, rows) in enumerate(torrents):
         if i:
@@ -170,14 +156,9 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--collector", default=config.COLLECTOR_BASE, metavar="URL",
                     help="collector base URL to read /live from (default: %(default)s)")
-    ap.add_argument("--snapshot", action="store_true",
-                    help="read newest stats/snapshots/*.json instead (post-mortem)")
     args = ap.parse_args()
 
-    if args.snapshot:
-        report(fetch_snapshot(), "snapshot")
-    else:
-        report(fetch_collector(args.collector), "live")
+    report(fetch_collector(args.collector), "live")
 
 
 if __name__ == "__main__":

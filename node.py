@@ -2,7 +2,8 @@
 endpoint. A node starts empty and roleless; you tell it what to do at runtime.
 
   GET  /stats          -> JSON snapshot (session metrics + per-torrent status +
-                          per-peer info) for the monitor to poll.
+                          per-peer info); the node also pushes this to the
+                          collector, and you can GET it directly for a local peek.
   POST /add            -> body {"name": <catalog torrent>, "role": "seed"|"leech"}
                           add a torrent from the catalog (seed serves it in place,
                           leech downloads it into nodes/<id>/<name>/).
@@ -213,7 +214,7 @@ def make_session(node_id: int) -> "lt.session":
         # Honour our short announce interval instead of libtorrent's 300s floor,
         # so nodes started at different times still get paired promptly.
         "min_announce_interval": config.ANNOUNCE_INTERVAL,
-        # Pace the transfer so the monitor sees a real time-series (see config).
+        # Pace the transfer so progress is observable as it happens (see config).
         # By default libtorrent exempts loopback/LAN peers from rate limits, so
         # we must turn that off for the cap to apply to our localhost swarm.
         "upload_rate_limit": config.UPLOAD_RATE_LIMIT,

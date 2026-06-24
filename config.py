@@ -8,9 +8,6 @@ import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 NODES_DIR = os.path.join(BASE_DIR, "nodes")
-STATS_DIR = os.path.join(BASE_DIR, "stats")
-SNAPSHOT_DIR = os.path.join(STATS_DIR, "snapshots")
-DB_PATH = os.path.join(STATS_DIR, "collector.db")
 
 # Catalog of created torrents. make_torrent.py writes one pair per torrent here:
 #   data/torrents/<name>.torrent  + data/torrents/<name>.json (sidecar meta).
@@ -53,8 +50,8 @@ TRACKER_BASE = f"http://{HOST}:{TRACKER_PORT}"
 PIECE_SIZE = 256 * 1024          # 256 KiB; power of two (v2 requires >= 16 KiB)
 
 # Per-node upload rate cap (bytes/s, 0 = unlimited). Over localhost a transfer is
-# otherwise instantaneous; capping it spreads the transfer over time so the
-# monitor captures a meaningful rate/progress time-series. 1 MiB/s => ~30s+.
+# otherwise instantaneous; capping it spreads the transfer over time so the live
+# rate/progress is actually observable as it happens. 1 MiB/s => ~30s+.
 UPLOAD_RATE_LIMIT = 1 * 1024 * 1024
 
 # --- Timing (seconds) --------------------------------------------------------
@@ -65,8 +62,7 @@ UPLOAD_RATE_LIMIT = 1 * 1024 * 1024
 ANNOUNCE_INTERVAL = 5
 NODE_LOOP_INTERVAL = 1.0   # how often a node refreshes its stats snapshot
 PUSH_INTERVAL = 1.0        # how often a node POSTs its snapshot to the collector
-POLL_INTERVAL = 1.0        # collector's cross-node aggregation tick (file_replication)
-# Drop a node from the live view / aggregation after this much silence (it stopped
+# Drop a node from the live view after this much silence (it stopped
 # pushing). Mirrors the tracker's reap window: comfortably more than PUSH_INTERVAL.
 NODE_STALE_AFTER = 3 * PUSH_INTERVAL
 

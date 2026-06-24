@@ -7,9 +7,9 @@ several torrents at once, so everything is grouped per torrent (by v2 info-hash)
 import math
 
 # libtorrent peer_info.source bit flags -> label. These are stable library
-# values; we keep them here (plain ints) so modules without a libtorrent import
-# (monitor, report) can decode the `source` we record. With tracker-only
-# discovery, "tracker" and "incoming" are how peers are expected to be learned.
+# values; we keep them here (plain ints) so viewers without a libtorrent import
+# can decode the `source` a node reports. With tracker-only discovery, "tracker"
+# and "incoming" are how peers are expected to be learned.
 PEER_SOURCE_FLAGS = [
     (0x1, "tracker"),
     (0x2, "dht"),
