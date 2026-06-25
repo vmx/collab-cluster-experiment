@@ -17,6 +17,7 @@ import argparse
 import glob
 import json
 import os
+import shutil
 import signal
 import threading
 import time
@@ -85,6 +86,17 @@ def resume_dir(node_id: int) -> str:
 
 def resume_path(node_id: int, name: str) -> str:
     return os.path.join(resume_dir(node_id), f"{name}.resume")
+
+
+def node_disk(node_id: int) -> dict:
+    """Free/total bytes of the filesystem holding this node's data directory —
+    the disk that fills up as the node stores more torrent data. Reported in the
+    snapshot so the dashboard can show how much room each node has left."""
+    try:
+        usage = shutil.disk_usage(os.path.join(config.NODES_DIR, str(node_id)))
+        return {"free": usage.free, "total": usage.total}
+    except OSError:
+        return {"free": 0, "total": 0}
 
 
 def state_name(state) -> str:
@@ -369,6 +381,7 @@ def session_loop(ns: NodeState) -> None:
             "ts": time.time(),
             "bt_port": config.bt_port(ns.node_id),
             "session": ns.session_stats,
+            "disk": node_disk(ns.node_id),
             "torrents": torrents,
             "peers": peers,
         }

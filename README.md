@@ -132,7 +132,8 @@ shareable, reloadable URL — and it refreshes itself every second:
   (node, dataset) with a progress bar, live rate and ETA (stalled transfers show
   too, without an ETA), soonest-done first. Reads `/api/transfers`.
 - **Nodes** (`/nodes`) — the infrastructure side of "where is the data": per node,
-  how much it stores, how many datasets it holds/completes, and its throughput.
+  how much it stores, how much disk it has free, how many datasets it
+  holds/completes, and its throughput.
   Reads `/api/nodes`. **Click any node** (`/node/<label>`) to drill into the
   datasets it holds — each with its role, completion and rate, and each linking back
   to that dataset's drill-down. Reads `/api/node/<label>`.
@@ -166,7 +167,7 @@ curl -s http://127.0.0.1:8001/stats | python -m json.tool
 #                            throughput, per-node held-fraction; NO piece bitfields)
 #   /api/torrent/<info_hash> full per-dataset detail, fetched only on drill-down
 #   /api/transfers           in-flight transfers (per (node,dataset): progress/rate/ETA)
-#   /api/nodes               per-node storage + activity (stored, held, throughput)
+#   /api/nodes               per-node storage + activity (stored, free disk, held, throughput)
 #   /api/node/<label>        one node's held datasets (drill-down from /nodes)
 #   /api/summary             the original all-torrents-at-once payload
 curl -s http://127.0.0.1:8100/live          | python -m json.tool
@@ -233,7 +234,8 @@ you see current values, not trends.
 Each node's snapshot (and thus the collector's `/live`) carries, per torrent:
 
 - **Session**: all ~296 libtorrent counters and gauges via
-  `session_stats_metrics()` (net bytes, peer counts, disk, piece picker, …).
+  `session_stats_metrics()` (net bytes, peer counts, disk, piece picker, …), plus
+  `disk` — free/total bytes of the filesystem holding the node's data directory.
 - **Torrent** (keyed by `info_hash`): progress, current up/download rates (incl.
   payload), totals, all-time totals, peer/seed/connection counts, pieces,
   distributed copies, seeding/finished flags.

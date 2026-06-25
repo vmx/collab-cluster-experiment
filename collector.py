@@ -297,10 +297,13 @@ def build_nodes() -> dict:
         ts = snap.get("torrents", [])
         done = [bool(t.get("is_seeding") or float(t.get("progress") or 0) >= 1.0)
                 for t in ts]
+        disk = snap.get("disk") or {}
         nodes.append({
             "label": snap.get("label", snap.get("node_key", "?")),
             "datasets": len(ts), "complete": sum(done),
             "stored": sum(int(t.get("total_done") or 0) for t in ts),
+            "disk_free": int(disk.get("free") or 0),
+            "disk_total": int(disk.get("total") or 0),
             # Skip completed torrents' download_rate: libtorrent's decaying average
             # lingers after completion, so a node holding only complete copies would
             # otherwise show an inbound rate while not actually downloading.
@@ -343,10 +346,13 @@ def build_node_detail(label: str) -> dict:
                 "complete": complete,
             })
         torrents.sort(key=lambda x: x["name"])
+        disk = snap.get("disk") or {}
         return {
             "label": label, "datasets": len(torrents),
             "complete": sum(1 for t in torrents if t["complete"]),
             "stored": sum(t["stored"] for t in torrents),
+            "disk_free": int(disk.get("free") or 0),
+            "disk_total": int(disk.get("total") or 0),
             "download_rate": sum(t["download_rate"] for t in torrents),
             "upload_rate": sum(t["upload_rate"] for t in torrents),
             "num_peers": sum(t["num_peers"] for t in torrents),

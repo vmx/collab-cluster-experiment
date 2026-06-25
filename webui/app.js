@@ -57,6 +57,13 @@ function formatEta(secs) {
   return `${h}h ${m % 60}m`;
 }
 
+// Free disk on a node: human bytes plus the % of the volume still free when the
+// total is known, e.g. "412.0 GiB (37%)".
+function diskFreeText(free, total) {
+  if (!total) return free ? human(free) : "—";
+  return `${human(free)} (${Math.round((100 * free) / total)}%)`;
+}
+
 function cellForFrac(frac) {
   if (frac <= 0) return { style: "background:#21262d", title: "missing" };
   if (frac >= 1) return { style: "background:#3fb950", title: "complete" };
@@ -383,7 +390,7 @@ const TransferRow = component({
 // Backed by /nodes.
 const NodeStatRow = component({
   name: "NodeStatRow",
-  fields: { label: "", href: "#", datasetsText: "", storedText: "", dlText: "", ulText: "", peersText: "" },
+  fields: { label: "", href: "#", datasetsText: "", storedText: "", freeText: "", dlText: "", ulText: "", peersText: "" },
   statics: {
     fromData(n) {
       return this.make({
@@ -391,6 +398,7 @@ const NodeStatRow = component({
         href: `/node/${encodeURIComponent(n.label)}`,
         datasetsText: `${n.complete}/${n.datasets}`,
         storedText: human(n.stored),
+        freeText: diskFreeText(n.disk_free, n.disk_total),
         dlText: n.download_rate ? `▼${human(n.download_rate)}/s` : "—",
         ulText: n.upload_rate ? `▲${human(n.upload_rate)}/s` : "—",
         peersText: String(n.num_peers),
@@ -401,6 +409,7 @@ const NodeStatRow = component({
     <span @text=".label"></span>
     <span class="nnum" @text=".datasetsText"></span>
     <span class="nnum" @text=".storedText"></span>
+    <span class="nnum" @text=".freeText"></span>
     <span class="nnum" @text=".dlText"></span>
     <span class="nnum" @text=".ulText"></span>
     <span class="nnum" @text=".peersText"></span>
@@ -457,7 +466,7 @@ const NodeDetail = component({
     fromData(n) {
       return this.make({
         label: `n${n.label}`,
-        metaText: `${n.complete}/${n.datasets} complete  ·  ▼${human(n.download_rate)}/s ▲${human(n.upload_rate)}/s  ·  ${n.num_peers} peers`,
+        metaText: `${n.complete}/${n.datasets} complete  ·  ${diskFreeText(n.disk_free, n.disk_total)} free  ·  ▼${human(n.download_rate)}/s ▲${human(n.upload_rate)}/s  ·  ${n.num_peers} peers`,
         storedText: human(n.stored),
         rows: n.torrents.map((t) => NodeTorrentRow.Class.fromData(t)),
       });
@@ -821,7 +830,7 @@ const Dashboard = component({
       <h3>Nodes</h3>
       <div class="node-head">
         <span>node</span><span class="nnum">complete/held</span><span class="nnum">stored</span>
-        <span class="nnum">download</span><span class="nnum">upload</span><span class="nnum">peers</span>
+        <span class="nnum">free</span><span class="nnum">download</span><span class="nnum">upload</span><span class="nnum">peers</span>
       </div>
       <x render-each=".nodes"></x>
       <div class="empty" @show="$isEmptyNodes">No nodes reporting yet.</div>
