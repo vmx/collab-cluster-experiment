@@ -302,6 +302,115 @@
         text-align: right;
         font-variant-numeric: tabular-nums;
       }
+      .noderow2:hover {
+        background: var(--panel);
+      }
+      a.noderow2 {
+        text-decoration: none;
+        color: var(--fg);
+        border-radius: 4px;
+      }
+
+      /* --- overview search + status filter --- */
+      .filterbar {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin: 0.75rem 0 0.75rem;
+        flex-wrap: wrap;
+      }
+      .search-wrap {
+        position: relative;
+        flex: 1 1 16rem;
+        max-width: 28rem;
+        display: flex;
+      }
+      .search {
+        width: 100%;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        color: var(--fg);
+        font: inherit;
+        padding: 0.4rem 1.8rem 0.4rem 0.6rem;
+      }
+      .search:focus {
+        outline: none;
+        border-color: var(--accent);
+      }
+      .search-clear {
+        position: absolute;
+        right: 0.35rem;
+        top: 50%;
+        transform: translateY(-50%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 1.2rem;
+        height: 1.2rem;
+        border: none;
+        border-radius: 50%;
+        background: transparent;
+        color: var(--muted);
+        font-size: 1rem;
+        line-height: 1;
+        cursor: pointer;
+      }
+      .search-clear:hover {
+        color: var(--fg);
+        background: var(--border);
+      }
+      .chips {
+        display: flex;
+        gap: 0.25rem;
+      }
+      .chip {
+        font: inherit;
+        font-size: 0.8rem;
+        color: var(--muted);
+        background: transparent;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 0.25rem 0.7rem;
+        cursor: pointer;
+      }
+      .chip:hover {
+        color: var(--fg);
+      }
+      .chip.active {
+        color: var(--fg);
+        background: var(--panel);
+        border-color: var(--accent);
+      }
+
+      /* --- node drill-down: datasets-held table --- */
+      .ntrow,
+      .ntrow.nthead {
+        display: grid;
+        grid-template-columns: 1.5fr 4rem 1fr 5rem 6rem 6rem;
+        gap: 0.75rem;
+        align-items: center;
+        padding: 0.4rem 0.6rem;
+        font-size: 13px;
+        border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+      }
+      .ntrow.nthead {
+        color: var(--muted);
+        font-weight: 600;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        border-bottom: 1px solid var(--border);
+      }
+
+      /* cross-link from a dataset's per-node row to that node's page */
+      a.nodelink {
+        text-decoration: none;
+        color: var(--fg);
+      }
+      a.nodelink:hover {
+        color: var(--accent);
+      }
       .lbl {
         font-size: 0.72rem;
         color: var(--muted);

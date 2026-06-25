@@ -21,6 +21,7 @@ const OVERVIEW_URL = "/api/overview";
 const DETAIL_URL = "/api/torrent/"; // + info_hash
 const TRANSFERS_URL = "/api/transfers";
 const NODES_URL = "/api/nodes";
+const NODE_DETAIL_URL = "/api/node/"; // + label
 const POLL_MS = 1000; // refresh once a second
 
 // Which collector endpoint each screen polls. routeTo + tick look the request up
@@ -30,6 +31,7 @@ const REQ_FOR_ROUTE = {
   detail: "fetchDetail",
   transfers: "fetchTransfers",
   nodes: "fetchNodes",
+  node: "fetchNodeDetail",
 };
 
 // --- pure presentation helpers -------------------------------------------------
@@ -102,9 +104,10 @@ const Cell = component({
 });
 
 // One node's ownership line: label/role/percent, the piece map, and bytes stored.
+// The label links to that node's drill-down (which other datasets it holds).
 const NodeRow = component({
   name: "NodeRow",
-  fields: { label: "", role: "", have: 0, numPieces: 0, stored: 0, cells: [] },
+  fields: { label: "", href: "#", role: "", have: 0, numPieces: 0, stored: 0, cells: [] },
   methods: {
     headText() {
       const pct = this.numPieces ? (100 * this.have) / this.numPieces : 0;
@@ -119,6 +122,7 @@ const NodeRow = component({
       const cells = r.cells.map((f) => Cell.make(cellForFrac(f)));
       return this.make({
         label: r.label,
+        href: `/node/${encodeURIComponent(r.label)}`,
         role: r.role,
         have: r.have,
         numPieces,
@@ -128,7 +132,7 @@ const NodeRow = component({
     },
   },
   view: html`<div class="noderow">
-    <span class="rowlabel" @text="$headText"></span>
+    <a class="rowlabel nodelink" data-link="1" :href=".href" @text="$headText"></a>
     <span class="map"><x render-each=".cells"></x></span>
     <span class="stored" @text="$storedText"></span>
   </div>`,
@@ -375,14 +379,16 @@ const TransferRow = component({
   </div>`,
 });
 
-// One node's storage + activity line. Backed by /nodes.
+// One node's storage + activity line; the whole row links to its drill-down.
+// Backed by /nodes.
 const NodeStatRow = component({
   name: "NodeStatRow",
-  fields: { label: "", datasetsText: "", storedText: "", dlText: "", ulText: "", peersText: "" },
+  fields: { label: "", href: "#", datasetsText: "", storedText: "", dlText: "", ulText: "", peersText: "" },
   statics: {
     fromData(n) {
       return this.make({
         label: `n${n.label}`,
+        href: `/node/${encodeURIComponent(n.label)}`,
         datasetsText: `${n.complete}/${n.datasets}`,
         storedText: human(n.stored),
         dlText: n.download_rate ? `▼${human(n.download_rate)}/s` : "—",
@@ -391,15 +397,106 @@ const NodeStatRow = component({
       });
     },
   },
-  view: html`<div class="noderow2">
+  view: html`<a class="noderow2" data-link="1" :href=".href">
     <span @text=".label"></span>
     <span class="nnum" @text=".datasetsText"></span>
     <span class="nnum" @text=".storedText"></span>
     <span class="nnum" @text=".dlText"></span>
     <span class="nnum" @text=".ulText"></span>
     <span class="nnum" @text=".peersText"></span>
+  </a>`,
+});
+
+// One dataset held by a node (a row in the node drill-down): links to the
+// dataset, shows role, completion, stored bytes and live rate. Backed by
+// /api/node/<label>.
+const NodeTorrentRow = component({
+  name: "NodeTorrentRow",
+  fields: {
+    name: "",
+    href: "#",
+    role: "",
+    pctText: "",
+    barStyle: "",
+    barClass: "pbar-fill",
+    storedText: "",
+    rateText: "",
+  },
+  statics: {
+    fromData(t) {
+      const pct = Math.round(t.progress * 100);
+      const active = t.download_rate > 0;
+      return this.make({
+        name: t.name,
+        href: `/dataset/${encodeURIComponent(t.info_hash)}`,
+        role: t.role,
+        pctText: t.complete ? "complete" : `${pct}%`,
+        barStyle: `width:${pct}%`,
+        barClass: t.complete ? "pbar-fill" : active ? "pbar-fill" : "pbar-fill stalled",
+        storedText: human(t.stored),
+        rateText: active ? `▼${human(t.download_rate)}/s` : "—",
+      });
+    },
+  },
+  view: html`<div class="ntrow">
+    <a class="tlink" data-link="1" :href=".href" @text=".name"></a>
+    <span @text=".role"></span>
+    <span class="pbar"><span :class=".barClass" :style=".barStyle"></span></span>
+    <span class="nnum" @text=".pctText"></span>
+    <span class="nnum" @text=".storedText"></span>
+    <span class="nnum" @text=".rateText"></span>
   </div>`,
 });
+
+// The node drill-down: a node's totals plus the datasets it holds. Backed by
+// /api/node/<label>.
+const NodeDetail = component({
+  name: "NodeDetail",
+  fields: { label: "", metaText: "", storedText: "", rows: [] },
+  statics: {
+    fromData(n) {
+      return this.make({
+        label: `n${n.label}`,
+        metaText: `${n.complete}/${n.datasets} complete  ·  ▼${human(n.download_rate)}/s ▲${human(n.upload_rate)}/s  ·  ${n.num_peers} peers`,
+        storedText: human(n.stored),
+        rows: n.torrents.map((t) => NodeTorrentRow.Class.fromData(t)),
+      });
+    },
+  },
+  view: html`<section class="torrent">
+    <h2><span @text=".label"></span> <span class="muted" @text="$storedText"></span></h2>
+    <div class="muted small" @text=".metaText"></div>
+    <h3>Datasets held</h3>
+    <div class="ntrow nthead">
+      <span>dataset</span><span>role</span><span>progress</span><span class="nnum">%</span>
+      <span class="nnum">stored</span><span class="nnum">rate</span>
+    </div>
+    <x render-each=".rows"></x>
+  </section>`,
+});
+
+// The latest /api/overview datasets (already sorted rarest-first), kept here so
+// the search box and status filter can narrow the list client-side, instantly,
+// without re-fetching. Refreshed on every overview poll.
+let lastDatasets = [];
+
+// Pure: narrow a raw /api/overview dataset list by name search + status filter.
+// Status: "all" | "replicating" | "incomplete". Exported for unit testing.
+export function filterDatasets(list, query, status) {
+  const q = (query || "").trim().toLowerCase();
+  return list
+    .filter((d) => !q || d.name.toLowerCase().includes(q))
+    .filter((d) => {
+      if (status === "replicating") return d.downloading > 0 || d.download_rate > 0;
+      if (status === "incomplete") return d.min_avail < 1 || d.durable_copies < 1;
+      return true;
+    });
+}
+
+// Build the DatasetRow view-models for the visible slice of the latest poll.
+function visibleDatasets(query, status) {
+  return filterDatasets(lastDatasets, query, status).map((d) => DatasetRow.Class.fromData(d));
+}
 
 // Root: routes between the Overview, the per-dataset drill-down, Transfers and
 // Nodes via the History API. It polls whichever endpoint the current screen needs.
@@ -419,6 +516,11 @@ const Dashboard = component({
     replicatingText: "0",
     rarest: 0,
     rarestClass: "num",
+    // overview search/filter
+    query: "",
+    statusFilter: "all", // "all" | "replicating" | "incomplete"
+    shownCount: 0,
+    totalCount: 0,
     // detail state: 0 or 1 Torrent vm so render-each shows nothing when empty
     detail: [],
     // transfers screen
@@ -429,6 +531,8 @@ const Dashboard = component({
     nodes: [],
     nodesCount: 0,
     nodesStoredText: "0 B",
+    // node drill-down: 0 or 1 NodeDetail vm
+    nodeDetail: [],
   },
   methods: {
     statusText() {
@@ -452,8 +556,21 @@ const Dashboard = component({
     isNodes() {
       return this.route === "nodes";
     },
-    isEmptyList() {
-      return this.route === "list" && this.status === "live" && this.datasets.size === 0;
+    isNode() {
+      return this.route === "node";
+    },
+    // Empty states. On the list, distinguish "swarm has nothing yet" from "your
+    // search/filter matched nothing", so the message is actionable.
+    noDatasets() {
+      return this.route === "list" && this.status === "live" && this.totalCount === 0;
+    },
+    noMatches() {
+      return (
+        this.route === "list" && this.status === "live" && this.totalCount > 0 && this.datasets.size === 0
+      );
+    },
+    countText() {
+      return `showing ${this.shownCount} of ${this.totalCount}`;
     },
     detailMissing() {
       return this.route === "detail" && this.status === "live" && this.detail.size === 0;
@@ -464,7 +581,23 @@ const Dashboard = component({
     isEmptyNodes() {
       return this.route === "nodes" && this.status === "live" && this.nodes.size === 0;
     },
-    // Nav-tab highlighting. The drill-down lives under the Overview tab.
+    nodeMissing() {
+      return this.route === "node" && this.status === "live" && this.nodeDetail.size === 0;
+    },
+    // Status filter chip highlighting.
+    chipAll() {
+      return this.statusFilter === "all" ? "chip active" : "chip";
+    },
+    chipReplicating() {
+      return this.statusFilter === "replicating" ? "chip active" : "chip";
+    },
+    chipIncomplete() {
+      return this.statusFilter === "incomplete" ? "chip active" : "chip";
+    },
+    hasQuery() {
+      return this.query.length > 0;
+    },
+    // Nav-tab highlighting. Each drill-down lives under its parent tab.
     navOverview() {
       return this.route === "list" || this.route === "detail" ? "tab active" : "tab";
     },
@@ -472,7 +605,13 @@ const Dashboard = component({
       return this.route === "transfers" ? "tab active" : "tab";
     },
     navNodes() {
-      return this.route === "nodes" ? "tab active" : "tab";
+      return this.route === "nodes" || this.route === "node" ? "tab active" : "tab";
+    },
+    // Re-derive the visible dataset list from the latest poll for a new query or
+    // status filter (instant, no re-fetch). Shared by the input + chip handlers.
+    refilter(query, status) {
+      const vis = visibleDatasets(query, status);
+      return this.setQuery(query).setStatusFilter(status).setDatasets(vis).setShownCount(vis.length);
     },
     // Apply a parsed route: switch screen and kick an immediate fetch so it
     // doesn't wait for the next tick. Off-screen data stays put (hidden), which
@@ -480,6 +619,25 @@ const Dashboard = component({
     routeTo(ctx, parsed) {
       ctx.request(REQ_FOR_ROUTE[parsed.route]);
       return this.setRoute(parsed.route).setError("");
+    },
+  },
+  // Event handlers (Tutuca resolves on.input / on.click against this block). The
+  // search box and the status-filter chips both just re-derive the visible list.
+  input: {
+    updateQuery(value) {
+      return this.refilter(value || "", this.statusFilter);
+    },
+    filterAll() {
+      return this.refilter(this.query, "all");
+    },
+    filterReplicating() {
+      return this.refilter(this.query, "replicating");
+    },
+    filterIncomplete() {
+      return this.refilter(this.query, "incomplete");
+    },
+    clearQuery() {
+      return this.refilter("", this.statusFilter);
     },
   },
   receive: {
@@ -497,7 +655,9 @@ const Dashboard = component({
   response: {
     fetchOverview(res, err) {
       if (err) return this.setStatus("error").setError(String((err && err.message) || err));
-      const datasets = res.datasets
+      // Cache the sorted list for client-side search/filter, then derive the
+      // visible rows under the current query + status filter.
+      lastDatasets = res.datasets
         .slice()
         // rarest (weakest-link) copies first, so the least-replicated float up.
         .sort((a, b) => a.durable_copies - b.durable_copies || a.name.localeCompare(b.name));
@@ -505,8 +665,8 @@ const Dashboard = component({
       let stored = 0;
       let dl = 0;
       let replicating = 0;
-      let rarest = datasets.length ? Infinity : 0;
-      for (const d of res.datasets) {
+      let rarest = lastDatasets.length ? Infinity : 0;
+      for (const d of lastDatasets) {
         stored += d.total_stored;
         dl += d.download_rate;
         if (d.downloading > 0 || d.download_rate > 0) replicating++;
@@ -516,14 +676,15 @@ const Dashboard = component({
       return this.setError("")
         .setStatus("live")
         .setTs(res.ts)
-        .setDatasets(datasets.map((d) => DatasetRow.Class.fromData(d)))
-        .setTotDatasets(datasets.length)
+        .refilter(this.query, this.statusFilter)
+        .setTotalCount(lastDatasets.length)
+        .setTotDatasets(lastDatasets.length)
         .setTotStoredText(human(stored))
         .setTotNodes(nodes.size)
         .setTotDlText(`${human(dl)}/s`)
         .setReplicatingText(String(replicating))
         .setRarest(rarest)
-        .setRarestClass(datasets.length ? copiesClass(rarest, rarest) : "num");
+        .setRarestClass(lastDatasets.length ? copiesClass(rarest, rarest) : "num");
     },
     fetchDetail(res, err) {
       // A 404 (dataset no longer reported) surfaces as an error; show the
@@ -533,6 +694,13 @@ const Dashboard = component({
         .setStatus("live")
         .setTs(res.ts)
         .setDetail([Torrent.Class.fromData(res)]);
+    },
+    fetchNodeDetail(res, err) {
+      if (err) return this.setStatus("live").setNodeDetail([]);
+      return this.setError("")
+        .setStatus("live")
+        .setTs(res.ts)
+        .setNodeDetail([NodeDetail.Class.fromData(res)]);
     },
     fetchTransfers(res, err) {
       if (err) return this.setStatus("error").setError(String((err && err.message) || err));
@@ -581,15 +749,42 @@ const Dashboard = component({
         <div class="stat"><span :class=".rarestClass" @text=".rarest"></span><span class="lbl">rarest copies</span></div>
       </div>
 
-      <h3>Datasets</h3>
+      <div class="filterbar">
+        <div class="search-wrap">
+          <input
+            class="search"
+            type="text"
+            placeholder="search datasets by name…"
+            :value=".query"
+            @on.input="updateQuery value"
+          />
+          <button
+            type="button"
+            class="search-clear"
+            title="clear search"
+            @show="$hasQuery"
+            @on.click="clearQuery"
+          >×</button>
+        </div>
+        <div class="chips">
+          <button type="button" :class="$chipAll" @on.click="filterAll">All</button>
+          <button type="button" :class="$chipReplicating" @on.click="filterReplicating">Replicating</button>
+          <button type="button" :class="$chipIncomplete" @on.click="filterIncomplete">Incomplete</button>
+        </div>
+        <span class="muted small" @text="$countText"></span>
+      </div>
+
       <div class="dataset-head">
         <span>dataset</span><span class="tnum">size</span><span class="tnum">copies</span>
         <span>spread (per node)</span><span class="tnum">activity</span>
       </div>
       <x render-each=".datasets"></x>
-      <div class="empty" @show="$isEmptyList">
+      <div class="empty" @show="$noDatasets">
         No datasets reported yet. Start the tracker, the nodes, and assign torrents
         (see the README); this view updates on its own.
+      </div>
+      <div class="empty" @show="$noMatches">
+        No datasets match the current search/filter.
       </div>
     </div>
 
@@ -631,6 +826,14 @@ const Dashboard = component({
       <x render-each=".nodes"></x>
       <div class="empty" @show="$isEmptyNodes">No nodes reporting yet.</div>
     </div>
+
+    <div @show="$isNode">
+      <a class="back" data-link="1" href="/nodes">← all nodes</a>
+      <div class="empty" @show="$nodeMissing">
+        This node is no longer reporting.
+      </div>
+      <x render-each=".nodeDetail"></x>
+    </div>
   </div>`,
 });
 
@@ -643,21 +846,24 @@ const Dashboard = component({
 // and reloads resolve to the SPA. URLPattern does the matching; the first match
 // wins, so the specific detail route is listed before the catch-all.
 const ROUTES = [
-  { pattern: new URLPattern({ pathname: "/dataset/:hash" }), route: "detail" },
+  { pattern: new URLPattern({ pathname: "/dataset/:hash" }), route: "detail", key: "hash" },
+  { pattern: new URLPattern({ pathname: "/node/:label" }), route: "node", key: "label" },
   { pattern: new URLPattern({ pathname: "/transfers" }), route: "transfers" },
   { pattern: new URLPattern({ pathname: "/nodes" }), route: "nodes" },
   { pattern: new URLPattern({ pathname: "/*" }), route: "list" },
 ];
 
+// -> { route, param } where param is the single path variable (an info_hash for
+// the dataset detail, a node label for the node detail), "" for the rest.
 function matchRoute() {
-  for (const { pattern, route } of ROUTES) {
+  for (const { pattern, route, key } of ROUTES) {
     const m = pattern.exec({ pathname: location.pathname });
     if (m) {
-      const hash = m.pathname.groups.hash;
-      return { route, hash: hash ? decodeURIComponent(hash) : "" };
+      const raw = key ? m.pathname.groups[key] : "";
+      return { route, param: raw ? decodeURIComponent(raw) : "" };
     }
   }
-  return { route: "list", hash: "" };
+  return { route: "list", param: "" };
 }
 
 function main() {
@@ -667,6 +873,8 @@ function main() {
     DatasetRow,
     TransferRow,
     NodeStatRow,
+    NodeDetail,
+    NodeTorrentRow,
     Torrent,
     NodeRow,
     FileRow,
@@ -688,12 +896,19 @@ function main() {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       return r.json();
     },
-    // Reads the live route itself (like fetchOverview reads its fixed URL), so the
-    // request needs no argument and always targets the currently-open dataset.
+    // Reads the live route's path param itself (like fetchOverview reads its fixed
+    // URL), so the request needs no argument and always targets the open dataset.
     async fetchDetail() {
-      const hash = matchRoute().hash;
+      const hash = matchRoute().param;
       if (!hash) throw new Error("no dataset selected");
       const r = await fetch(DETAIL_URL + encodeURIComponent(hash), { cache: "no-store" });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    },
+    async fetchNodeDetail() {
+      const label = matchRoute().param;
+      if (!label) throw new Error("no node selected");
+      const r = await fetch(NODE_DETAIL_URL + encodeURIComponent(label), { cache: "no-store" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       return r.json();
     },
@@ -731,7 +946,7 @@ if (typeof document !== "undefined" && document.getElementById("app")) {
 // --- module exports for the tutuca CLI (lint / render / test) ------------------
 
 export function getComponents() {
-  return [Dashboard, DatasetRow, TransferRow, NodeStatRow, Torrent, NodeRow, FileRow, Cell];
+  return [Dashboard, DatasetRow, TransferRow, NodeStatRow, NodeDetail, NodeTorrentRow, Torrent, NodeRow, FileRow, Cell];
 }
 
 export function getRoot() {

@@ -36,6 +36,9 @@ Endpoints:
                    per incomplete (node, dataset)) with progress, rate and ETA.
   GET  /api/nodes - {"ts", "nodes": [...]} per-node storage + activity: bytes
                    stored, datasets held/complete, throughput, peer count.
+  GET  /api/node/<label>
+                 - one node's held datasets (drill-down from /nodes): per torrent
+                   role, completion, stored, rate + info_hash. 404 if not reporting.
   GET  /api/summary - {"ts", "torrents": [...]} the full detail of EVERY torrent
                    at once (the original payload). Retained as a convenience; the
                    tiered /api/overview + /api/torrent split supersedes it.
@@ -292,18 +295,64 @@ def build_nodes() -> dict:
     nodes = []
     for snap in fresh_snapshots(now):
         ts = snap.get("torrents", [])
-        complete = sum(1 for t in ts
-                       if t.get("is_seeding") or float(t.get("progress") or 0) >= 1.0)
+        done = [bool(t.get("is_seeding") or float(t.get("progress") or 0) >= 1.0)
+                for t in ts]
         nodes.append({
             "label": snap.get("label", snap.get("node_key", "?")),
-            "datasets": len(ts), "complete": complete,
+            "datasets": len(ts), "complete": sum(done),
             "stored": sum(int(t.get("total_done") or 0) for t in ts),
-            "download_rate": sum(int(t.get("download_rate") or 0) for t in ts),
+            # Skip completed torrents' download_rate: libtorrent's decaying average
+            # lingers after completion, so a node holding only complete copies would
+            # otherwise show an inbound rate while not actually downloading.
+            "download_rate": sum(int(t.get("download_rate") or 0)
+                                 for t, c in zip(ts, done) if not c),
             "upload_rate": sum(int(t.get("upload_rate") or 0) for t in ts),
             "num_peers": sum(int(t.get("num_peers") or 0) for t in ts),
         })
     nodes.sort(key=lambda n: n["label"])
     return {"ts": now, "nodes": nodes}
+
+
+def build_node_detail(label: str) -> dict:
+    """One node's held datasets, or None if no fresh node reports that label.
+
+    The drill-down from the Nodes screen: which torrents this node holds, each
+    with its role, completion and live rate, plus the node's totals. info_hash is
+    included so the UI can link every row back to that dataset's detail.
+    """
+    for snap in fresh_snapshots():
+        if snap.get("label", snap.get("node_key")) != label:
+            continue
+        torrents = []
+        for t in snap.get("torrents", []):
+            progress = float(t.get("progress") or 0.0)
+            complete = bool(t.get("is_seeding") or progress >= 1.0)
+            # libtorrent's download_rate is a decaying moving average that lingers
+            # for several seconds after a torrent completes. A node that holds the
+            # whole dataset isn't downloading, so report 0 — otherwise a "complete"
+            # row keeps showing an inbound rate and looks like it's still pulling.
+            torrents.append({
+                "info_hash": t.get("info_hash_v2") or t.get("name"),
+                "name": t.get("name", ""), "role": t.get("role", "?"),
+                "state": t.get("state", ""), "progress": progress,
+                "stored": int(t.get("total_done") or 0),
+                "total_size": int(t.get("total_size") or 0),
+                "download_rate": 0 if complete else int(t.get("download_rate") or 0),
+                "upload_rate": int(t.get("upload_rate") or 0),
+                "num_peers": int(t.get("num_peers") or 0),
+                "complete": complete,
+            })
+        torrents.sort(key=lambda x: x["name"])
+        return {
+            "label": label, "datasets": len(torrents),
+            "complete": sum(1 for t in torrents if t["complete"]),
+            "stored": sum(t["stored"] for t in torrents),
+            "download_rate": sum(t["download_rate"] for t in torrents),
+            "upload_rate": sum(t["upload_rate"] for t in torrents),
+            "num_peers": sum(t["num_peers"] for t in torrents),
+            "torrents": torrents,
+        }
+    return None
 
 
 # Each cached endpoint shares one build per tick across all viewers. The ETag is
@@ -418,6 +467,18 @@ def make_handler():
                 body, etag = cached_payload("nodes", build_nodes,
                                             lambda d: d["nodes"])
                 self._send_cached_json(body, etag)
+            elif path.startswith("/api/node/"):
+                # Drill-down for one node. Cached per label; None (node not
+                # reporting) is served as a 404 rather than cached empty.
+                label = path[len("/api/node/"):]
+                body, etag = cached_payload(
+                    "node:" + label,
+                    lambda: build_node_detail(label) or {"error": "unknown"},
+                    lambda d: d)
+                if b'"label"' not in body:  # the {"error": ...} sentinel
+                    self._send(body, "application/json", 404)
+                else:
+                    self._send_cached_json(body, etag)
             elif path == "/api/summary":
                 body, etag = cached_payload("summary", build_summary,
                                             lambda d: d["torrents"])
