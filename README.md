@@ -36,6 +36,48 @@ live view of the whole swarm.
   SPA with the framework vendored as a single `webui/tutuca.js`, so nothing is
   installed and nothing is fetched from the internet at runtime.
 
+## BitTorrent basics
+
+If you're new to BitTorrent, here's just enough of the vocabulary to follow the
+rest of this README. The terms in **bold** are the ones that show up in the
+commands, stats, and web UI.
+
+- **Torrent file** (`.torrent`) — a small metadata file that describes *one*
+  dataset (a single file, or a whole directory tree shared as a group). It is
+  **not** the content; it's the recipe for fetching it. It lists the files and
+  their sizes, the **piece** size, a cryptographic hash for every piece, and one
+  or more **tracker** URLs. In this prototype `make_torrent.py` builds these into
+  the catalog, and the tracker hands them out over `/catalog`.
+
+- **Pieces** — the content is sliced into fixed-size chunks called pieces (the
+  torrent file records a hash of each). Peers exchange pieces, not whole files,
+  so a download arrives out of order and from many peers at once. Because every
+  piece is verified against its hash, corrupt or malicious data can't slip in.
+  Which peer holds which pieces is exactly what `piece_map.py` and the web UI's
+  drill-down visualise.
+
+- **Info-hash** — the hash of the torrent's "info" section, used as the dataset's
+  unique ID. Peers and the tracker refer to a dataset solely by its info-hash;
+  you'll see it in URLs like `/api/torrent/<info_hash>`.
+
+- **Seed / leech** — a **seeder** has the complete dataset and only uploads; a
+  **leecher** is still downloading (and uploads the pieces it already has to
+  others). A **swarm** is everyone — seeders and leechers — trading a given
+  dataset. Here you set a node's role explicitly with `control.py add … --role`.
+
+- **Tracker** — a lightweight server that lets peers find each other. A peer
+  **announces** ("I want dataset X, here's my address") and gets back a list of
+  other peers in that swarm; the tracker never sees the content itself. Normally
+  BitTorrent can *also* find peers without a tracker (via **DHT**, **PEX**, and
+  **LSD** — decentralised peer-gossip mechanisms), but this prototype builds its
+  torrents **private**, which disables those and forces discovery through the one
+  tracker (`bittorrent_tracker.py`) so the swarm stays observable.
+
+- **BitTorrent v2** — the newer version of the format (BEP 52). It uses SHA-256
+  merkle trees for hashing instead of v1's SHA-1, giving per-file (not just
+  per-torrent) integrity and cleaner handling of many-file torrents. This
+  prototype is **v2-only** — no v1 or hybrid torrents.
+
 ## Run
 
 Start each piece by hand (e.g. one terminal each). Nodes are long-running and
