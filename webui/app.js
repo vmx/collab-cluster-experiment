@@ -22,6 +22,7 @@ const DETAIL_URL = "/api/torrent/"; // + info_hash
 const TRANSFERS_URL = "/api/transfers";
 const NODES_URL = "/api/nodes";
 const NODE_DETAIL_URL = "/api/node/"; // + label
+const RECENT_URL = "/api/catalog/recent"; // newly added catalog torrents
 const POLL_MS = 1000; // refresh once a second
 
 // Which collector endpoint each screen polls. routeTo + tick look the request up
@@ -542,6 +543,11 @@ const Dashboard = component({
     nodesStoredText: "0 B",
     // node drill-down: 0 or 1 NodeDetail vm
     nodeDetail: [],
+    // newly-added-torrent toast. catalogSeq is the highest catalog seq seen; -1
+    // means "not yet baselined" so the initial catalog load doesn't toast.
+    catalogSeq: -1,
+    toastText: "",
+    toastShow: false,
   },
   methods: {
     statusText() {
@@ -648,6 +654,9 @@ const Dashboard = component({
     clearQuery() {
       return this.refilter("", this.statusFilter);
     },
+    dismissToast() {
+      return this.setToastShow(false);
+    },
   },
   receive: {
     init(ctx) {
@@ -658,6 +667,9 @@ const Dashboard = component({
     },
     tick(ctx) {
       ctx.request(REQ_FOR_ROUTE[this.route]);
+      // Poll for newly added datasets on every screen, not just the overview,
+      // so a new torrent toasts wherever the operator happens to be.
+      ctx.request("fetchCatalogRecent");
       return this;
     },
   },
@@ -733,6 +745,21 @@ const Dashboard = component({
         .setNodesCount(res.nodes.length)
         .setNodesStoredText(human(stored));
     },
+    // Newly added datasets (from the tracker via the collector). Best-effort: a
+    // failed poll is ignored. The first successful poll only baselines the seq so
+    // the existing catalog doesn't toast; later ones toast anything newer.
+    fetchCatalogRecent(res, err) {
+      if (err) return this;
+      const added = res.added || [];
+      const maxSeq = added.reduce((m, a) => Math.max(m, a.seq || 0), 0);
+      if (this.catalogSeq < 0) return this.setCatalogSeq(maxSeq); // baseline only
+      if (maxSeq <= this.catalogSeq) return this;
+      const fresh = added.filter((a) => (a.seq || 0) > this.catalogSeq);
+      const names = fresh.map((a) => a.name).join(", ");
+      const text =
+        fresh.length === 1 ? `New dataset added: ${fresh[0].name}` : `${fresh.length} new datasets: ${names}`;
+      return this.setCatalogSeq(maxSeq).setToastText(text).setToastShow(true);
+    },
   },
   view: html`<div class="dash">
     <header class="topbar">
@@ -748,6 +775,11 @@ const Dashboard = component({
       <a :class="$navNodes" data-link="1" href="/nodes">Nodes</a>
     </nav>
     <div class="banner" @show="truthy? .error" @text=".error"></div>
+    <div class="toast" @show="truthy? .toastShow">
+      <span class="toast-dot"></span>
+      <span @text=".toastText"></span>
+      <button type="button" class="toast-close" title="dismiss" @on.click="dismissToast">×</button>
+    </div>
 
     <div @show="$isList">
       <div class="summary">
@@ -918,6 +950,11 @@ function main() {
       const label = matchRoute().param;
       if (!label) throw new Error("no node selected");
       const r = await fetch(NODE_DETAIL_URL + encodeURIComponent(label), { cache: "no-store" });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    },
+    async fetchCatalogRecent() {
+      const r = await fetch(RECENT_URL, { cache: "no-store" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       return r.json();
     },

@@ -42,6 +42,11 @@ Endpoints:
   GET  /api/summary - {"ts", "torrents": [...]} the full detail of EVERY torrent
                    at once (the original payload). Retained as a convenience; the
                    tiered /api/overview + /api/torrent split supersedes it.
+  GET  /api/catalog/recent - {"ts", "added": [...]} recently added catalog
+                   torrents (name, info_hash, source, seq, added_at). A background
+                   thread subscribes to the tracker's /catalog/subscribe stream and
+                   keeps the tail in memory so the dashboard can toast new datasets
+                   without the browser reaching the tracker directly.
   GET  /          - the web UI; any other GET path also serves the app shell.
 """
 import hashlib
@@ -51,6 +56,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import catalog
 import config
 import swarm_stats
 
@@ -70,6 +76,45 @@ LOCK = threading.Lock()
 # node_key -> (received_ts, snapshot). The freshest state of every node, in
 # memory; the live input for /live.
 LATEST: dict = {}
+
+# Recently added catalog torrents, learned by subscribing to the tracker. The
+# browser dashboard polls /api/catalog/recent (it never reaches the tracker
+# itself) to toast new datasets. In memory only and capped to the tail.
+CATALOG_LOCK = threading.Lock()
+RECENT_CATALOG: list = []
+RECENT_CATALOG_CAP = 50
+
+
+def catalog_watch_loop() -> None:
+    """Subscribe to the tracker's catalog stream and remember recent additions.
+
+    Best-effort with reconnect, like the node push loop: if the tracker is down or
+    the stream drops, wait a moment and reconnect. We resume from the last seq we
+    saw (starting at 0 to bootstrap the whole catalog once), so a reconnect never
+    re-appends torrents we already recorded.
+    """
+    last_seq = 0
+
+    def on_torrent(meta: dict) -> None:
+        nonlocal last_seq
+        seq = int(meta.get("seq") or 0)
+        with CATALOG_LOCK:
+            RECENT_CATALOG.append({
+                "name": meta.get("name"),
+                "info_hash": meta.get("info_hash"),
+                "source": meta.get("source"),
+                "seq": seq,
+                "added_at": time.time(),
+            })
+            del RECENT_CATALOG[:-RECENT_CATALOG_CAP]  # keep only the tail
+        last_seq = max(last_seq, seq)
+
+    while True:
+        try:
+            catalog.subscribe(on_torrent, since=last_seq)
+        except Exception:
+            pass
+        time.sleep(2)  # reconnect backoff
 
 
 def fresh_snapshots(now: float = None) -> list:
@@ -489,6 +534,11 @@ def make_handler():
                 body, etag = cached_payload("summary", build_summary,
                                             lambda d: d["torrents"])
                 self._send_cached_json(body, etag)
+            elif path == "/api/catalog/recent":
+                with CATALOG_LOCK:
+                    added = list(RECENT_CATALOG)
+                body = json.dumps({"ts": time.time(), "added": added}).encode()
+                self._send(body, "application/json")
             elif path == "/live":
                 body = json.dumps({"ts": time.time(),
                                    "nodes": fresh_snapshots()}).encode()
@@ -515,6 +565,8 @@ def main() -> None:
     srv = ThreadingHTTPServer((config.COLLECTOR_HOST, config.COLLECTOR_PORT),
                               make_handler())
     srv.daemon_threads = True
+    # Relay the tracker's newly-added-torrent stream to the dashboard.
+    threading.Thread(target=catalog_watch_loop, daemon=True).start()
     print(f"collector on http://{config.COLLECTOR_HOST}:{config.COLLECTOR_PORT}/  "
           f"(web UI + ingest + live/stats + /api/*, in-memory)",
           flush=True)

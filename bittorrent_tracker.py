@@ -16,6 +16,13 @@ Endpoints:
   GET /catalog           - JSON list of catalog torrents (the sidecar metas)
   GET /catalog/<name>.json    - one torrent's sidecar meta
   GET /catalog/<name>.torrent - one torrent's .torrent bytes
+  GET /catalog/subscribe - Server-Sent Events stream of newly added torrents.
+                           A background thread watches TORRENTS_DIR, so anything
+                           that drops a torrent into the catalog (make_torrent.py)
+                           is pushed to subscribers without polling. By default a
+                           subscriber only sees torrents added after it connects;
+                           pass ?since=<seq> to resume (each event carries a seq),
+                           or ?since=0 to replay the whole catalog then stream.
 """
 import json
 import os
@@ -35,6 +42,46 @@ LOCK = threading.Lock()
 SWARM: dict = {}
 ANNOUNCE_COUNT: dict = {}  # info_hash(bytes) -> int
 START_TIME = time.time()
+
+# Newly-added-torrent notifications. A watcher thread appends each freshly seen
+# catalog meta to CATALOG_EVENTS (append-only; index+1 is its seq) and wakes any
+# open /catalog/subscribe streams via the condition. In-memory only, like the
+# swarm state — a restart rebuilds it from disk on the first scan.
+CATALOG_COND = threading.Condition()
+CATALOG_EVENTS: list = []
+# How long a subscribe stream blocks between events before emitting a heartbeat
+# comment (which also lets it notice a client that has gone away).
+SUBSCRIBE_HEARTBEAT = 15.0
+# How often the watcher rescans the catalog directory for new torrents.
+CATALOG_SCAN_INTERVAL = 1.0
+
+
+def watch_catalog(interval: float = CATALOG_SCAN_INTERVAL) -> None:
+    """Poll TORRENTS_DIR for newly registered torrents and publish them.
+
+    The catalog is just files on disk (make_torrent.py writes them, offline), so
+    the tracker learns of additions by scanning rather than by being told. The
+    first scan seeds the known-set *without* notifying, so torrents that already
+    existed at startup are available for ?since=0 replay but are not announced as
+    "new" to default subscribers.
+    """
+    known: set = set()
+    seeded = False
+    while True:
+        try:
+            metas = make_torrent.list_catalog()
+        except Exception:
+            metas = []
+        new = [m for m in metas if m["name"] not in known]
+        for m in new:
+            known.add(m["name"])
+        if new:
+            with CATALOG_COND:
+                CATALOG_EVENTS.extend(new)
+                if seeded:
+                    CATALOG_COND.notify_all()
+        seeded = True
+        time.sleep(interval)
 
 
 def parse_query(qs: str) -> dict:
@@ -103,6 +150,8 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_stats()
         elif parts.path == "/catalog":
             self.handle_catalog_list()
+        elif parts.path == "/catalog/subscribe":
+            self.handle_catalog_subscribe(parse_query(parts.query))
         elif parts.path.startswith("/catalog/"):
             self.handle_catalog_file(parts.path[len("/catalog/"):])
         else:
@@ -192,6 +241,47 @@ class Handler(BaseHTTPRequestHandler):
         self._send(json.dumps(make_torrent.list_catalog()).encode(),
                    "application/json")
 
+    def handle_catalog_subscribe(self, params: dict) -> None:
+        """Stream newly added torrents as Server-Sent Events until the client
+        disconnects. Runs in its own handler thread (ThreadingHTTPServer), so
+        blocking here doesn't hold up other requests."""
+        since = first(params, "since")
+        with CATALOG_COND:
+            if since is None:
+                cursor = len(CATALOG_EVENTS)  # only torrents added from now on
+            else:
+                cursor = _to_int(since, 0)
+                cursor = max(0, min(cursor, len(CATALOG_EVENTS)))
+
+        # No Content-Length: this is an open-ended stream terminated by close.
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        # Let the browser EventSource reach this from the collector-hosted dashboard.
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        try:
+            while True:
+                with CATALOG_COND:
+                    if cursor >= len(CATALOG_EVENTS):
+                        CATALOG_COND.wait(timeout=SUBSCRIBE_HEARTBEAT)
+                    start = cursor
+                    pending = CATALOG_EVENTS[cursor:]
+                    cursor = len(CATALOG_EVENTS)
+                if pending:
+                    chunks = []
+                    for offset, meta in enumerate(pending):
+                        payload = dict(meta, seq=start + offset + 1)
+                        chunks.append(f"data: {json.dumps(payload)}\n\n")
+                    self.wfile.write("".join(chunks).encode())
+                else:
+                    self.wfile.write(b": heartbeat\n\n")  # keep-alive / liveness probe
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return  # client went away; end the stream
+
     def handle_catalog_file(self, name: str) -> None:
         # name is "<torrent>.torrent" or "<torrent>.json"; reject path tricks.
         if "/" in name or "\\" in name or name.startswith("."):
@@ -209,8 +299,10 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     srv = ThreadingHTTPServer((config.HOST, config.TRACKER_PORT), Handler)
     srv.daemon_threads = True  # don't let keep-alive handler threads block Ctrl-C
+    # Watch the catalog dir so /catalog/subscribe can push new torrents.
+    threading.Thread(target=watch_catalog, daemon=True).start()
     print(f"tracker on http://{config.HOST}:{config.TRACKER_PORT}/  "
-          f"(announce + catalog)", flush=True)
+          f"(announce + catalog + subscribe)", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

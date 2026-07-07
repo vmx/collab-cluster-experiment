@@ -82,6 +82,21 @@ python control.py status 1                 # what node 1 currently holds
 python control.py remove 3 documents      # tell a node to drop a torrent
 ```
 
+To watch the catalog grow, subscribe to newly added torrents. The tracker
+watches its catalog dir and streams each new torrent (Server-Sent Events at
+`/catalog/subscribe`), so anything `make_torrent.py` adds shows up live with no
+polling:
+
+```
+python control.py subscribe               # tail -f the catalog; Ctrl-C to stop
+# then, in another terminal, `python make_torrent.py <path>` and watch it appear.
+```
+
+By default a subscriber sees only torrents added after it connects; pass
+`--since <seq>` to resume (each event carries a `seq`), or `--since 0` to replay
+the whole catalog first. The web dashboard also toasts new datasets as they land
+(the collector relays the stream, exposed as `/api/catalog/recent`).
+
 The seed serves its content **in place** from where `make_torrent.py` found it
 (recorded in the catalog sidecar) — nothing is copied. Leechers reconstruct each
 torrent's tree under `nodes/<id>/<name>/`. For a live swarm-wide view, watch the
@@ -181,6 +196,7 @@ curl -s "http://127.0.0.1:8100/api/torrent/$(curl -s http://127.0.0.1:8100/api/o
 # the tracker's view of the swarm, and the catalog it hosts
 curl -s http://127.0.0.1:8000/stats | python -m json.tool
 curl -s http://127.0.0.1:8000/catalog | python -m json.tool
+curl -sN http://127.0.0.1:8000/catalog/subscribe   # live stream of new torrents (SSE)
 
 # what one (local) node is doing right now
 python control.py status 0
@@ -196,10 +212,10 @@ watch -n 2 python piece_map.py  # refresh every 2s (use the `watch` CLI tool)
 |---|---|
 | `config.py` | Ports, counts, paths, timing, tracker URL — the single source of truth. |
 | `make_torrent.py` | Build v2-only, private, tracker-based `.torrent`s from any files/dirs into the catalog (`data/torrents/`, the tracker's store); generates a two-torrent sample if no args. Also the local catalog-lookup helpers the tracker uses to serve `/catalog`. |
-| `bittorrent_tracker.py` | The tiny stdlib tracker: `/announce` + `/scrape` + `/stats`, keyed by info-hash (no whitelist), and `/catalog` endpoints that host the torrents. |
-| `catalog.py` | Stdlib client the node/control use to fetch the catalog (list, meta, `.torrent`) from the tracker over HTTP. |
+| `bittorrent_tracker.py` | The tiny stdlib tracker: `/announce` + `/scrape` + `/stats`, keyed by info-hash (no whitelist), and `/catalog` endpoints that host the torrents (incl. `/catalog/subscribe`, an SSE stream of newly added torrents). |
+| `catalog.py` | Stdlib client the node/control use to fetch the catalog (list, meta, `.torrent`) from the tracker over HTTP, and to `subscribe` to newly added torrents. |
 | `node.py` | One roleless node daemon: libtorrent session (announces to the tracker; fetches torrents from its `/catalog`) + HTTP `/stats` (GET) and `/add` `/remove` (POST) control endpoints; pushes its snapshot to the collector (`--collector`). Has a persisted `node_key`. |
-| `control.py` | Operator-local CLI to list the catalog (from the tracker), inspect a local node, and tell nodes to seed/leech torrents. |
+| `control.py` | Operator-local CLI to list the catalog (from the tracker), subscribe to newly added torrents, inspect a local node, and tell nodes to seed/leech torrents. |
 | `collector.py` | Central push endpoint: keeps the latest snapshot per node in memory (no persistence) and serves `/live` + `/stats` (operator views), the dashboard API under `/api/` (`overview` light per-dataset list, `torrent/<info_hash>` full drill-down detail, `transfers` in-flight transfers, `nodes` per-node storage, `node/<label>` one node's datasets, `summary` legacy all-torrents), and the web UI from `webui/` (app shell served for any non-`/api/` path). |
 | `piece_map.py` | Per torrent: which peer holds which pieces/files + how many copies of each file exist (reads the collector's `/live`). |
 | `swarm_stats.py` | Shared helpers that group node snapshots by torrent and aggregate per-piece/per-file copy stats (used by `collector.py` for `/api/overview` + `/api/torrent/<info_hash>` + `/api/summary`, and by `piece_map.py`). |

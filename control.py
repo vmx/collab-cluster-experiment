@@ -6,6 +6,7 @@ node holds, and tell nodes to seed or leech specific torrents.
     python control.py add 0 media --role seed      # node 0 seeds 'media'
     python control.py add 1 media --role leech     # node 1 leeches 'media'
     python control.py remove 1 media               # node 1 drops 'media'
+    python control.py subscribe                    # watch for newly added torrents
 
 Torrents are referred to by name (the basename of the shared file/dir), as shown
 by `list`. Build the catalog first with `python make_torrent.py [paths...]`.
@@ -90,6 +91,25 @@ def cmd_remove(args) -> None:
     print(f"node {args.node}: {json.dumps(res)}")
 
 
+def cmd_subscribe(args) -> None:
+    # A tail -f-style watch: block on the tracker's stream and print each newly
+    # added torrent as it appears, in the same columns as `list`.
+    print(f"{'name':<20} {'v2 info-hash':<20} source")
+    print("(watching for new torrents — Ctrl-C to stop)")
+
+    def on_torrent(meta: dict) -> None:
+        print(f"{meta.get('name', '?'):<20} {meta.get('info_hash', '')[:18]:<20} "
+              f"{meta.get('source', '')}", flush=True)
+
+    try:
+        catalog.subscribe(on_torrent, since=args.since)
+    except KeyboardInterrupt:
+        pass
+    except Exception:
+        print("subscription ended — is bittorrent_tracker.py running?")
+        sys.exit(1)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -111,6 +131,13 @@ def main() -> None:
     p_rm.add_argument("node", type=int)
     p_rm.add_argument("name")
     p_rm.set_defaults(func=cmd_remove)
+
+    p_sub = sub.add_parser("subscribe",
+                           help="watch for newly added catalog torrents (blocks)")
+    p_sub.add_argument("--since", type=int, default=None,
+                       help="resume from this event seq (0 replays the whole "
+                            "catalog first); default: only torrents added from now")
+    p_sub.set_defaults(func=cmd_subscribe)
 
     args = ap.parse_args()
     args.func(args)

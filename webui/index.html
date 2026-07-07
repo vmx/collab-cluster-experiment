@@ -97,6 +97,35 @@
         color: var(--muted);
         padding: 2rem 0;
       }
+      /* Newly-added-dataset toast: a green info banner with a dismiss button. */
+      .toast {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        background: rgba(63, 185, 80, 0.12);
+        border: 1px solid var(--ok);
+        color: #7ee2a8;
+        border-radius: 6px;
+        padding: 0.5rem 0.75rem;
+        margin-bottom: 1rem;
+      }
+      .toast-dot {
+        width: 0.5rem;
+        height: 0.5rem;
+        border-radius: 50%;
+        background: var(--ok);
+        flex: none;
+      }
+      .toast-close {
+        margin-left: auto;
+        background: none;
+        border: none;
+        color: inherit;
+        font-size: 1.1rem;
+        line-height: 1;
+        cursor: pointer;
+        padding: 0 0.25rem;
+      }
 
       .torrent {
         background: var(--panel);

@@ -36,3 +36,30 @@ def fetch_meta(name: str) -> dict:
 def fetch_torrent_bytes(name: str) -> bytes:
     """The raw .torrent bytes for `name` (bdecode/torrent_info them yourself)."""
     return _get(f"/catalog/{name}.torrent")
+
+
+def subscribe(on_torrent, since: int = None) -> None:
+    """Stream newly added catalog torrents from the tracker, calling
+    `on_torrent(meta)` for each (meta is the sidecar dict plus a `seq`).
+
+    Blocks, consuming the tracker's /catalog/subscribe Server-Sent Events stream
+    until the connection ends (or the caller interrupts). With `since` omitted the
+    stream carries only torrents added after this call connects; pass a seq to
+    resume from there, or 0 to replay the whole catalog first.
+    """
+    url = f"{config.TRACKER_BASE}/catalog/subscribe"
+    if since is not None:
+        url += f"?since={int(since)}"
+    req = urllib.request.Request(url, headers={"Accept": "text/event-stream"})
+    # No read timeout: the stream is idle between additions (heartbeats aside).
+    with urllib.request.urlopen(req) as resp:
+        data_lines: list = []
+        for raw in resp:                      # HTTPResponse yields one line at a time
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+            if line == "":                    # blank line terminates an SSE event
+                if data_lines:
+                    on_torrent(json.loads("\n".join(data_lines)))
+                    data_lines = []
+            elif line.startswith("data:"):
+                data_lines.append(line[len("data:"):].lstrip())
+            # ':' comment lines (heartbeats) and other fields are ignored.
