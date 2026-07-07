@@ -1,9 +1,11 @@
 """Shared configuration for the BitTorrent v2 prototype network.
 
-Single source of truth for ports, paths, counts and timing. Everything runs on
-localhost so the experiment is deterministic and easy to restart.
+Single source of truth for ports, paths, counts and timing. Services can be
+co-located on one host for a deterministic dev run or spread across a real
+network; the BitTorrent peer layer advertises routable addresses either way.
 """
 import os
+import socket
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -19,7 +21,38 @@ TORRENTS_DIR = os.path.join(DATA_DIR, "torrents")
 SAMPLE_DIR = os.path.join(DATA_DIR, "sample")
 
 # --- Network -----------------------------------------------------------------
+# HOST is the loopback address for reaching co-located services (tracker,
+# collector, a node's control server) in a single-host dev run.
 HOST = "127.0.0.1"
+
+# Peers, unlike those control endpoints, may live on other hosts, so the
+# BitTorrent layer binds and advertises a real routable address instead of
+# loopback. BIND_HOST is what a node listens on (all interfaces, so remote peers
+# can connect); ADVERTISE_IP is the address it announces to the tracker and
+# reports to the collector so peers dial it on a routable address.
+BIND_HOST = "0.0.0.0"
+
+
+def primary_ip() -> str:
+    """This host's primary outbound IPv4 — the address other hosts reach it on.
+
+    Opens a throwaway UDP socket toward a public address (a UDP connect sends no
+    packet) and reads back the local endpoint the OS picked as the source, which
+    is the routable interface even on a multi-homed host. Falls back to loopback
+    when the host is offline, e.g. a self-contained single-machine dev run."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+# Auto-detected per host; override with SWARM_ADVERTISE_IP on a multi-homed or
+# NAT host that must advertise a specific address to the rest of the swarm.
+ADVERTISE_IP = os.environ.get("SWARM_ADVERTISE_IP") or primary_ip()
 
 BT_PORT_BASE = 6881      # node i listens for BitTorrent on BT_PORT_BASE + i
 STATS_PORT_BASE = 8001   # node i serves its /stats JSON on STATS_PORT_BASE + i
@@ -76,6 +109,11 @@ NODE_STALE_AFTER = 3 * PUSH_INTERVAL
 # Cache the built /summary for one push interval: new node data only lands that
 # often, so recomputing more often than this just burns CPU on identical input.
 SUMMARY_TTL = PUSH_INTERVAL
+
+# How often the collector re-polls the tracker's /stats to refresh swarm
+# membership for the reconciliation view. Membership changes at announce cadence,
+# so tracking that interval keeps the collector's picture within one announce.
+TRACKER_POLL_INTERVAL = ANNOUNCE_INTERVAL
 
 
 def bt_port(node_id: int) -> int:

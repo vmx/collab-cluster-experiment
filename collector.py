@@ -42,6 +42,12 @@ Endpoints:
   GET  /api/summary - {"ts", "torrents": [...]} the full detail of EVERY torrent
                    at once (the original payload). Retained as a convenience; the
                    tiered /api/overview + /api/torrent split supersedes it.
+  GET  /api/swarm - {"ts", "tracker_ok", "datasets": [...]} per dataset, the
+                   tracker's announce-based membership reconciled against what
+                   nodes report: each registered peer resolved to a node (or shown
+                   as external), whether it's reporting and how many peers it has
+                   (isolated => announced but meshing with no one), plus `silent`
+                   nodes that hold the dataset without appearing in the tracker.
   GET  /api/catalog/recent - {"ts", "added": [...]} recently added catalog
                    torrents (name, info_hash, source, seq, added_at). A background
                    thread subscribes to the tracker's /catalog/subscribe stream and
@@ -83,6 +89,35 @@ LATEST: dict = {}
 CATALOG_LOCK = threading.Lock()
 RECENT_CATALOG: list = []
 RECENT_CATALOG_CAP = 50
+
+# Latest swarm membership as the tracker sees it (learned from announces), polled
+# so the collector can reconcile it against what nodes report. Keyed by the 40-hex
+# truncated v2 info-hash the tracker announces under. TRACKER_OK flags whether the
+# last poll succeeded, so a view built while the tracker is down can say so rather
+# than silently showing stale membership.
+TRACKER_LOCK = threading.Lock()
+TRACKER_STATS: dict = {}   # info_hash hex(40) -> list of registered peer dicts
+TRACKER_OK = False
+
+
+def tracker_stats_loop() -> None:
+    """Poll the tracker's /stats so the collector holds the announce-based swarm
+    membership alongside the node-pushed snapshots. Best-effort with backoff, like
+    the catalog watcher: if the tracker is unreachable we keep the last membership
+    and mark it stale (TRACKER_OK=False) until it answers again."""
+    global TRACKER_OK
+    while True:
+        try:
+            data = catalog.fetch_stats()
+            stats = {t["info_hash"]: t.get("peers", [])
+                     for t in data.get("torrents", [])}
+            with TRACKER_LOCK:
+                TRACKER_STATS.clear()
+                TRACKER_STATS.update(stats)
+            TRACKER_OK = True
+        except Exception:
+            TRACKER_OK = False
+        time.sleep(config.TRACKER_POLL_INTERVAL)
 
 
 def catalog_watch_loop() -> None:
@@ -406,6 +441,83 @@ def build_node_detail(label: str) -> dict:
     return None
 
 
+def _node_addr_index(snaps: list) -> dict:
+    """addr_key(ip, port) -> node label, from each node's self-declared announce
+    address (advertise_ip + bt_port) — the same address it feeds the tracker's
+    &ip=, so a tracker membership entry resolves back to the node it belongs to.
+    Keyed on the declared address (not the IP we observed at ingest) so the two
+    sides match even when the node sits behind NAT."""
+    idx = {}
+    for s in snaps:
+        ip, port = s.get("advertise_ip"), s.get("bt_port")
+        if ip and port:
+            idx[swarm_stats.addr_key(ip, port)] = s.get("label", s.get("node_key"))
+    return idx
+
+
+def build_swarm() -> dict:
+    """Reconcile the tracker's membership (who announced) with what nodes report.
+
+    Two independent views of one swarm: the tracker learns members from announces;
+    nodes report the datasets they hold and their live peer counts. Cross-checking
+    them surfaces gaps a single view can't — a node that announced but isn't
+    meshing (registered, num_peers 0), a member the collector never hears from
+    (registered but not reporting), or a node holding data yet not announcing
+    (silent). Per dataset, keyed by the 40-hex truncated v2 info-hash the tracker
+    uses (nodes report the full 64-hex v2 hash, so we truncate to match)."""
+    now = time.time()
+    snaps = fresh_snapshots(now)
+    addr_index = _node_addr_index(snaps)
+
+    names, holders = {}, {}   # ih(40) -> name ; ih(40) -> {label: {num_peers,progress}}
+    for s in snaps:
+        label = s.get("label", s.get("node_key"))
+        for t in s.get("torrents", []):
+            ih = (t.get("info_hash_v2") or "")[:40]
+            if not ih:
+                continue
+            names.setdefault(ih, t.get("name", ""))
+            holders.setdefault(ih, {})[label] = {
+                "num_peers": int(t.get("num_peers") or 0),
+                "progress": float(t.get("progress") or 0.0),
+            }
+
+    with TRACKER_LOCK:
+        tstats = {ih: list(peers) for ih, peers in TRACKER_STATS.items()}
+
+    datasets = []
+    for ih in sorted(set(tstats) | set(holders)):
+        registered = tstats.get(ih, [])
+        held = holders.get(ih, {})
+        matched = set()
+        members = []
+        for p in registered:
+            label = addr_index.get(swarm_stats.addr_key(p["ip"], p["port"]))
+            if label:
+                matched.add(label)
+            conn = held.get(label)
+            members.append({
+                "addr": swarm_stats.addr_key(p["ip"], p["port"]),
+                "node": label,               # None => an announcer we don't collect from
+                "role": p.get("role", swarm_stats.PEER_ROLE_LEECHER),
+                "age": p.get("age"),
+                "reporting": conn is not None,
+                "num_peers": conn["num_peers"] if conn else None,
+                "isolated": conn is not None and conn["num_peers"] == 0,
+            })
+        datasets.append({
+            "info_hash": ih, "name": names.get(ih, ""),
+            "registered": len(registered),
+            "seeders": sum(1 for p in registered
+                           if p.get("role") == swarm_stats.PEER_ROLE_SEEDER),
+            "members": members,
+            # Nodes holding the dataset but absent from the tracker: not announcing,
+            # or already reaped from the swarm — the inverse gap.
+            "silent": sorted(set(held) - matched),
+        })
+    return {"ts": now, "tracker_ok": TRACKER_OK, "datasets": datasets}
+
+
 # Each cached endpoint shares one build per tick across all viewers. The ETag is
 # keyed to the payload state (not the timestamp), so an idle swarm keeps a stable
 # ETag and viewers get cheap 304s instead of resent bytes.
@@ -461,6 +573,12 @@ def make_handler():
             except Exception as exc:
                 return self._send(json.dumps({"error": str(exc)}).encode(),
                                   "application/json", 400)
+            # Record the IP we saw the node dial in from, as a cross-check against
+            # the advertise_ip it self-reports (a mismatch hints at NAT or a
+            # misconfigured advertise address). build_swarm() matches on the
+            # declared advertise_ip, not this, so the two sides agree even behind
+            # NAT where the observed source differs from the advertised address.
+            snap["observed_ip"] = self.client_address[0]
             with LOCK:
                 LATEST[key] = (time.time(), snap)
             self._send(b"", code=204)
@@ -534,6 +652,10 @@ def make_handler():
                 body, etag = cached_payload("summary", build_summary,
                                             lambda d: d["torrents"])
                 self._send_cached_json(body, etag)
+            elif path == "/api/swarm":
+                body, etag = cached_payload("swarm", build_swarm,
+                                            lambda d: (d["tracker_ok"], d["datasets"]))
+                self._send_cached_json(body, etag)
             elif path == "/api/catalog/recent":
                 with CATALOG_LOCK:
                     added = list(RECENT_CATALOG)
@@ -567,6 +689,8 @@ def main() -> None:
     srv.daemon_threads = True
     # Relay the tracker's newly-added-torrent stream to the dashboard.
     threading.Thread(target=catalog_watch_loop, daemon=True).start()
+    # Poll the tracker's membership so /api/swarm can reconcile it against nodes.
+    threading.Thread(target=tracker_stats_loop, daemon=True).start()
     print(f"collector on http://{config.COLLECTOR_HOST}:{config.COLLECTOR_PORT}/  "
           f"(web UI + ingest + live/stats + /api/*, in-memory)",
           flush=True)

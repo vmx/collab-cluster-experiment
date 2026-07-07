@@ -25,6 +25,37 @@ def source_labels(source: int) -> list:
     return [label for bit, label in PEER_SOURCE_FLAGS if source & bit]
 
 
+def peer_addr(ip: str, port) -> dict:
+    """The canonical shape for a peer's network address in any stats payload.
+
+    Kept structured (not a joined "ip:port" string) so consumers compare and
+    aggregate addresses without re-parsing. Both sources of peer data emit this:
+    the tracker (addresses learned from announces) and each node (the endpoints
+    libtorrent is actually connected to)."""
+    return {"ip": ip, "port": int(port)}
+
+
+def addr_key(ip: str, port) -> str:
+    """A hashable "ip:port" key for matching the same address across sources
+    (e.g. reconciling tracker membership against node-reported connections)."""
+    return f"{ip}:{int(port)}"
+
+
+# A peer is in exactly one of these states per torrent, decided solely by whether
+# it still has bytes left to fetch. The two are mutually exclusive — a peer that
+# holds every piece is a seeder, anything else is a leecher — so stats carry this
+# closed set as a role string rather than a boolean that could read as "neither"
+# or "both".
+PEER_ROLE_SEEDER = "seeder"
+PEER_ROLE_LEECHER = "leecher"
+
+
+def peer_role(complete: bool) -> str:
+    """A peer's role for a torrent: seeder if it holds the whole torrent (nothing
+    left to download), otherwise leecher."""
+    return PEER_ROLE_SEEDER if complete else PEER_ROLE_LEECHER
+
+
 def collect_by_torrent(nodes: list) -> list:
     """Group every node's torrent entries by torrent.
 

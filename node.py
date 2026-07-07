@@ -187,7 +187,7 @@ def peer_dict(p, torrent_name) -> dict:
         client = client.decode("utf-8", "replace")
     return {
         "torrent": torrent_name,
-        "ip": f"{p.ip[0]}:{p.ip[1]}",
+        **swarm_stats.peer_addr(p.ip[0], p.ip[1]),
         "client": client,
         "down_speed": p.down_speed,
         "up_speed": p.up_speed,
@@ -207,7 +207,9 @@ def peer_dict(p, torrent_name) -> dict:
 
 def make_session(node_id: int) -> "lt.session":
     settings = {
-        "listen_interfaces": f"{config.HOST}:{config.bt_port(node_id)}",
+        # Bind all interfaces so peers on other hosts can reach us (not just
+        # loopback); we advertise a routable address separately, below.
+        "listen_interfaces": f"{config.BIND_HOST}:{config.bt_port(node_id)}",
         # Discovery is tracker-only: each node announces to the tracker baked into
         # the (private) torrent and gets back the peer list. The torrents are
         # private, so libtorrent disables PEX/DHT/LSD anyway; we also keep these
@@ -216,19 +218,21 @@ def make_session(node_id: int) -> "lt.session":
         "enable_lsd": False,
         "enable_upnp": False,
         "enable_natpmp": False,
-        # All nodes share 127.0.0.1; without this libtorrent allows only ONE
-        # peer connection per IP per torrent, so the localhost swarm can't mesh.
+        # Distinct hosts have distinct IPs, but many nodes on one dev host share
+        # an IP; without this libtorrent allows only ONE peer connection per IP
+        # per torrent, so a single-host swarm couldn't mesh.
         "allow_multiple_connections_per_ip": True,
         "alert_mask": lt.alert.category_t.all_categories,
-        # The tracker only ever sees 127.0.0.1; announce our real listen address
-        # so peers it hands back are dialable.
-        "announce_ip": config.HOST,
+        # Advertise our routable address in announces so the tracker hands other
+        # peers an address they can dial, rather than the loopback/NAT-edge IP the
+        # tracker would otherwise infer from the announce connection.
+        "announce_ip": config.ADVERTISE_IP,
         # Honour our short announce interval instead of libtorrent's 300s floor,
         # so nodes started at different times still get paired promptly.
         "min_announce_interval": config.ANNOUNCE_INTERVAL,
         # Pace the transfer so progress is observable as it happens (see config).
         # By default libtorrent exempts loopback/LAN peers from rate limits, so
-        # we must turn that off for the cap to apply to our localhost swarm.
+        # we must turn that off for the cap to apply within a single-host swarm.
         "upload_rate_limit": config.UPLOAD_RATE_LIMIT,
         "ignore_limits_on_local_network": False,
     }
@@ -379,6 +383,10 @@ def session_loop(ns: NodeState) -> None:
             "node_key": ns.node_key,    # stable swarm-wide identity
             "label": str(ns.node_id),   # short, human (used for display)
             "ts": time.time(),
+            # The routable address this node announces to the tracker; the
+            # collector matches tracker membership against (advertise_ip, bt_port)
+            # so both sides key on the same self-reported address.
+            "advertise_ip": config.ADVERTISE_IP,
             "bt_port": config.bt_port(ns.node_id),
             "session": ns.session_stats,
             "disk": node_disk(ns.node_id),

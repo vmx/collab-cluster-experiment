@@ -36,6 +36,7 @@ import libtorrent as lt
 
 import config
 import make_torrent
+import swarm_stats
 
 LOCK = threading.Lock()
 # info_hash(bytes) -> { peer_id(bytes): {ip, port, left, uploaded, downloaded, last_seen} }
@@ -112,6 +113,32 @@ def _to_int(b: bytes, default: int = 0) -> int:
         return default
 
 
+def _valid_ipv4(s: str) -> bool:
+    """Whether s is a dotted-quad we can store and later compact-encode."""
+    try:
+        socket.inet_aton(s)
+        return "." in s  # inet_aton also accepts "123"; require dotted form
+    except OSError:
+        return False
+
+
+def announce_ip(handler, params: dict) -> str:
+    """The address to record for an announcing peer.
+
+    Prefer the peer's self-declared &ip= (validated) over the announce
+    connection's source: on a real network a node knows its routable address
+    better than the tracker, whose view of the source is the NAT edge, and in a
+    dev run it's loopback. Falls back to the socket source when no valid ip= is
+    given. This is a private, trusted swarm, so honouring the declared ip is safe;
+    a public tracker would gate this to loopback/trusted clients."""
+    declared = first(params, "ip")
+    if declared:
+        d = declared.decode("latin-1")
+        if _valid_ipv4(d):
+            return d
+    return handler.client_address[0]
+
+
 def reap(info_hash: bytes) -> None:
     """Drop peers we haven't heard from in a few announce intervals.
 
@@ -163,7 +190,7 @@ class Handler(BaseHTTPRequestHandler):
         if not info_hash or not peer_id:
             return self._failure("missing info_hash or peer_id")
 
-        ip = self.client_address[0]
+        ip = announce_ip(self, params)
         port = _to_int(first(params, "port"))
         event = (first(params, "event", b"") or b"").decode("latin-1")
         left = _to_int(first(params, "left"))
@@ -222,14 +249,19 @@ class Handler(BaseHTTPRequestHandler):
     def handle_stats(self) -> None:
         with LOCK:
             out = {"uptime": time.time() - START_TIME, "torrents": []}
+            now = time.time()
             for ih, peers in SWARM.items():
-                complete = sum(1 for p in peers.values() if p["left"] == 0)
                 out["torrents"].append({
                     "info_hash": ih.hex(),
-                    "seeders": complete,
-                    "leechers": len(peers) - complete,
-                    "peers": len(peers),
                     "announces": ANNOUNCE_COUNT.get(ih, 0),
+                    "peers": [
+                        {
+                            **swarm_stats.peer_addr(p["ip"], p["port"]),
+                            "role": swarm_stats.peer_role(p["left"] == 0),
+                            "age": round(now - p["last_seen"]),  # whole seconds
+                        }
+                        for p in peers.values()
+                    ],
                 })
         self._send(json.dumps(out).encode(), "application/json")
 

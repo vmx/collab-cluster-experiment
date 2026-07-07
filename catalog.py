@@ -22,6 +22,13 @@ def fetch_list() -> list:
     return json.loads(_get("/catalog").decode())
 
 
+def fetch_stats(timeout: float = 5.0) -> dict:
+    """The tracker's live /stats: swarm membership as learned from announces
+    ({"uptime", "torrents": [{"info_hash", "announces", "peers": [...]}]}). The
+    collector polls this to reconcile who announced against what nodes report."""
+    return json.loads(_get("/stats", timeout).decode())
+
+
 def fetch_meta(name: str) -> dict:
     """One torrent's sidecar meta. Raises FileNotFoundError if the tracker has no
     such torrent (so callers can treat it like the old local-file lookup)."""
