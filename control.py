@@ -1,7 +1,7 @@
 """Drive the running swarm by hand: list the torrent catalog, inspect what each
 node holds, and tell nodes to seed or leech specific torrents.
 
-    python control.py list                         # catalog of available torrents
+    python control.py list                         # catalog + live peers per torrent
     python control.py status                       # what every node holds now
     python control.py add 0 media --role seed      # node 0 seeds 'media'
     python control.py add 1 media --role leech     # node 1 leeches 'media'
@@ -18,6 +18,7 @@ import urllib.request
 
 import catalog
 import config
+import swarm_stats
 
 
 def _node_url(node_id: int, path: str) -> str:
@@ -53,9 +54,21 @@ def cmd_list(_args) -> None:
     if not metas:
         print("catalog empty — build one with: python make_torrent.py [paths...]")
         return
-    print(f"{'name':<20} {'v2 info-hash':<20} source")
+    # The tracker holds no content — only the catalog and which peers announce it.
+    # So show live seeders/leechers (where the data actually lives) rather than the
+    # local path the torrent happened to be built from. Tracker keys torrents by the
+    # 40-hex truncated v2 info-hash, so match on meta['info_hash'][:40].
+    try:
+        live = {t["info_hash"]: t.get("peers", [])
+                for t in catalog.fetch_stats().get("torrents", [])}
+    except Exception:
+        live = {}
+    print(f"{'name':<20} {'v2 info-hash':<20} peers")
     for m in metas:
-        print(f"{m['name']:<20} {m['info_hash'][:18]:<20} {m['source']}")
+        peers = live.get(m["info_hash"][:40], [])
+        seeders = sum(1 for p in peers if p.get("role") == swarm_stats.PEER_ROLE_SEEDER)
+        print(f"{m['name']:<20} {m['info_hash'][:18]:<20} "
+              f"{seeders} seed / {len(peers) - seeders} leech")
 
 
 def cmd_status(args) -> None:
@@ -94,12 +107,12 @@ def cmd_remove(args) -> None:
 def cmd_subscribe(args) -> None:
     # A tail -f-style watch: block on the tracker's stream and print each newly
     # added torrent as it appears, in the same columns as `list`.
-    print(f"{'name':<20} {'v2 info-hash':<20} source")
+    print(f"{'name':<20} v2 info-hash")
     print("(watching for new torrents — Ctrl-C to stop)")
 
     def on_torrent(meta: dict) -> None:
-        print(f"{meta.get('name', '?'):<20} {meta.get('info_hash', '')[:18]:<20} "
-              f"{meta.get('source', '')}", flush=True)
+        print(f"{meta.get('name', '?'):<20} {meta.get('info_hash', '')[:18]}",
+              flush=True)
 
     try:
         catalog.subscribe(on_torrent, since=args.since)
