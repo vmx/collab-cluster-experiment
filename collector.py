@@ -12,16 +12,16 @@ drops out until it reports again; on restart the collector rebuilds within one
 push interval.
 
 Endpoints:
-  POST /ingest   - receive one node's snapshot JSON; keep it as that node's latest
-  GET  /live     - {"ts", "nodes": [...]} latest snapshot of each fresh node,
-                   the live input for piece_map and any other viewer
-  GET  /stats    - the collector's own health: nodes seen + last-seen ages
+  Every machine endpoint lives under /api/ so it never collides with the SPA's
+  client-side page routes (the dashboard uses the History API: /,
+  /dataset/<info_hash>, /transfers, /nodes). The rule is simply: a GET that is
+  not a static asset or an /api/ endpoint is served the app shell (index.html),
+  so those page routes deep-link and reload correctly.
 
-  The web dashboard's data endpoints are namespaced under /api/ so they never
-  collide with its client-side page routes (the SPA uses the History API: /,
-  /dataset/<info_hash>, /transfers, /nodes). Any GET that is not a static asset,
-  an /api/ endpoint, or /live//stats is served the app shell (index.html), so
-  those page routes deep-link and reload correctly.
+  POST /api/ingest - receive one node's snapshot JSON; keep it as that node's latest
+  GET  /api/live   - {"ts", "nodes": [...]} latest snapshot of each fresh node,
+                   the live input for piece_map and any other viewer
+  GET  /api/health - the collector's own health: nodes seen + last-seen ages
 
   GET  /api/overview - {"ts", "datasets": [...]} the list view: one light row per
                    dataset (size, copy counts, live throughput, a per-node
@@ -75,7 +75,7 @@ STATIC_FILES = {
 
 LOCK = threading.Lock()
 # node_key -> (received_ts, snapshot). The freshest state of every node, in
-# memory; the live input for /live.
+# memory; the live input for /api/live.
 LATEST: dict = {}
 
 # Recently added catalog torrents, learned by subscribing to the tracker. The
@@ -549,7 +549,7 @@ def make_handler():
             self.wfile.write(body)
 
         def do_POST(self):
-            if self.path != "/ingest":
+            if self.path != "/api/ingest":
                 return self._send(b"", code=404)
             try:
                 length = int(self.headers.get("Content-Length", 0))
@@ -590,8 +590,8 @@ def make_handler():
 
         def do_GET(self):
             path = self.path
-            # The browser dashboard's data endpoints live under /api/ so they can't
-            # collide with the SPA's client-side page routes (/, /dataset/<hash>,
+            # Every data/machine endpoint lives under /api/ so it can't collide
+            # with the SPA's client-side page routes (/, /dataset/<hash>,
             # /transfers, /nodes), which all fall through to the app shell below.
             if path in STATIC_FILES:
                 filename, ctype = STATIC_FILES[path]
@@ -642,11 +642,11 @@ def make_handler():
                     added = list(RECENT_CATALOG)
                 body = json.dumps({"ts": time.time(), "added": added}).encode()
                 self._send(body, "application/json")
-            elif path == "/live":
+            elif path == "/api/live":
                 body = json.dumps({"ts": time.time(),
                                    "nodes": fresh_snapshots()}).encode()
                 self._send(body, "application/json")
-            elif path == "/stats":
+            elif path == "/api/health":
                 now = time.time()
                 with LOCK:
                     nodes = [{"node_key": k, "label": s.get("label", k),
@@ -673,7 +673,7 @@ def main() -> None:
     # Poll the tracker's membership so the drill-down can reconcile it against nodes.
     threading.Thread(target=tracker_stats_loop, daemon=True).start()
     print(f"collector on http://{config.COLLECTOR_HOST}:{config.COLLECTOR_PORT}/  "
-          f"(web UI + ingest + live/stats + /api/*, in-memory)",
+          f"(web UI + /api/* [ingest, live, health, dashboard], in-memory)",
           flush=True)
     try:
         srv.serve_forever()

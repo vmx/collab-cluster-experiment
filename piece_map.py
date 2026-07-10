@@ -9,7 +9,7 @@ bitfields and renders:
   * a per-piece availability row + histogram  (piece -> peers)
   * a "copies of the file" summary
 
-It reads the collector's /live: the latest snapshot of every node still
+It reads the collector's /api/live: the latest snapshot of every node still
 reporting.
 
 Usage:
@@ -40,7 +40,7 @@ def human(n: float) -> str:
 
 def fetch_collector(base: str) -> list:
     """The collector's live view: latest snapshot of every node still reporting."""
-    with urllib.request.urlopen(f"{base}/live", timeout=2.0) as r:
+    with urllib.request.urlopen(f"{base}/api/live", timeout=2.0) as r:
         return json.loads(r.read().decode()).get("nodes", [])
 
 
@@ -79,7 +79,7 @@ def report(nodes: list, source: str) -> None:
     torrents = swarm_stats.collect_by_torrent(nodes)
     if not torrents:
         print("No torrents reported (is the collector running and are nodes pushing "
-              "with torrents assigned? check the collector's /stats).")
+              "with torrents assigned? check the collector's /api/health).")
         return
     for i, (meta, rows) in enumerate(torrents):
         if i:
@@ -156,7 +156,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--collector", default=config.COLLECTOR_BASE, metavar="URL",
-                    help="collector base URL to read /live from (default: %(default)s)")
+                    help="collector base URL to read /api/live from (default: %(default)s)")
     args = ap.parse_args()
 
     report(fetch_collector(args.collector), "live")

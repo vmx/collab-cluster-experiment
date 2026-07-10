@@ -99,8 +99,9 @@ python make_torrent.py ~/photos ~/some/file  # or build your own catalog
 python bittorrent_tracker.py
 
 # 3. Start the collector (start any time; nodes buffer nothing, they just push
-#    on their next tick). Receives node snapshots and serves a live view (/live,
-#    /summary) plus the web UI; in-memory only, nothing is persisted. Listens on
+#    on their next tick). Receives node snapshots and serves a live view
+#    (/api/live, /api/summary) plus the web UI; in-memory only, nothing is
+#    persisted. Listens on
 #    :8100 — open http://127.0.0.1:8100/ in a browser for the live dashboard.
 python collector.py
 
@@ -228,9 +229,11 @@ For the terminal, JSON, or scripting:
 # incl. each peer's discovery source — "tracker", "incoming", ...)
 curl -s http://127.0.0.1:8001/stats | python -m json.tool
 
-# the collector's view. Operator endpoints live at the root (live swarm state +
-# its own health); the dashboard's data API is namespaced under /api/ so it never
-# collides with the SPA's page routes (/, /dataset/<hash>, /transfers, /nodes):
+# the collector's view. Every endpoint is namespaced under /api/ so none collide
+# with the SPA's page routes (/, /dataset/<hash>, /transfers, /nodes); anything
+# else falls through to the app shell:
+#   /api/live                live swarm state: latest snapshot of each fresh node
+#   /api/health              the collector's own health (nodes seen + last-seen ages)
 #   /api/overview            one light row per dataset (size, copy counts, live
 #                            throughput, per-node held-fraction; NO piece bitfields)
 #   /api/torrent/<info_hash> full per-dataset detail, fetched only on drill-down
@@ -238,8 +241,8 @@ curl -s http://127.0.0.1:8001/stats | python -m json.tool
 #   /api/nodes               per-node storage + activity (stored, free disk, held, throughput)
 #   /api/node/<label>        one node's held datasets (drill-down from /nodes)
 #   /api/summary             the original all-torrents-at-once payload
-curl -s http://127.0.0.1:8100/live          | python -m json.tool
-curl -s http://127.0.0.1:8100/stats         | python -m json.tool
+curl -s http://127.0.0.1:8100/api/live      | python -m json.tool
+curl -s http://127.0.0.1:8100/api/health    | python -m json.tool
 curl -s http://127.0.0.1:8100/api/overview  | python -m json.tool
 curl -s http://127.0.0.1:8100/api/transfers | python -m json.tool
 curl -s http://127.0.0.1:8100/api/nodes     | python -m json.tool
@@ -269,8 +272,8 @@ watch -n 2 python piece_map.py  # refresh every 2s (use the `watch` CLI tool)
 | `catalog.py` | Stdlib client the node/control use to fetch the catalog (list, `.torrent` bytes) from the tracker over HTTP, and to `subscribe` to newly added torrents. |
 | `node.py` | One node daemon (starts empty): libtorrent session (announces to the tracker; fetches torrents from its `/catalog`) + HTTP `/stats` (GET) and `/add` `/remove` (POST) control endpoints; pushes its snapshot to the collector (`--collector`). Has a persisted `node_key`. |
 | `control.py` | Operator-local CLI to list the catalog (from the tracker), subscribe to newly added torrents, inspect a local node, and tell nodes to serve/download torrents. |
-| `collector.py` | Central push endpoint: keeps the latest snapshot per node in memory (no persistence) and serves `/live` + `/stats` (operator views), the dashboard API under `/api/` (`overview` light per-dataset list, `torrent/<info_hash>` full drill-down detail incl. each node's connection status reconciled against the tracker, `transfers` in-flight transfers, `nodes` per-node storage, `node/<label>` one node's datasets, `summary` legacy all-torrents), and the web UI from `webui/` (app shell served for any non-`/api/` path). Also polls the tracker's `/stats` in the background so the drill-down can reconcile announced membership against node reports. |
-| `piece_map.py` | Per torrent: which peer holds which pieces/files + how many copies of each file exist (reads the collector's `/live`). |
+| `collector.py` | Central push endpoint: keeps the latest snapshot per node in memory (no persistence) and serves everything under `/api/`: `live` + `health` (operator views), plus the dashboard API (`overview` light per-dataset list, `torrent/<info_hash>` full drill-down detail incl. each node's connection status reconciled against the tracker, `transfers` in-flight transfers, `nodes` per-node storage, `node/<label>` one node's datasets, `summary` legacy all-torrents), and the web UI from `webui/` (app shell served for any non-`/api/` path). Also polls the tracker's `/stats` in the background so the drill-down can reconcile announced membership against node reports. |
+| `piece_map.py` | Per torrent: which peer holds which pieces/files + how many copies of each file exist (reads the collector's `/api/live`). |
 | `swarm_stats.py` | Shared helpers that group node snapshots by torrent and aggregate per-piece/per-file copy stats (used by `collector.py` for `/api/overview` + `/api/torrent/<info_hash>` + `/api/summary`, and by `piece_map.py`). |
 | `webui/` | The browser dashboard: `index.html` + `app.js` (a [Tutuca](https://github.com/marianoguerra/tutuca) SPA, no build step) — History-API-routed screens Overview (`/`, with name search + status filter), per-dataset piece-map drill-down (`/dataset/<info_hash>`, whose per-node rows also show each node's live connection status reconciled against the tracker's membership), Transfers (`/transfers`, which flags stuck 0-peer transfers), and Nodes (`/nodes`) with a per-node drill-down (`/node/<label>`), reading the `/api/*` endpoints — plus the vendored single-file `tutuca.js` framework. Served by `collector.py`. |
 
@@ -295,12 +298,12 @@ watch -n 2 python piece_map.py  # refresh every 2s (use the `watch` CLI tool)
 The collector keeps no on-disk state: the swarm view lives in memory and is
 rebuilt from node pushes within one push interval, so there's nothing to clean up
 and no historic record. Each metric below is present in every live snapshot
-(`/stats` on a node, `/live` on the collector) but is **not** stored over time —
+(`/stats` on a node, `/api/live` on the collector) but is **not** stored over time —
 you see current values, not trends.
 
 ## Captured stats
 
-Each node's snapshot (and thus the collector's `/live`) carries, per torrent:
+Each node's snapshot (and thus the collector's `/api/live`) carries, per torrent:
 
 - **Session**: all ~296 libtorrent counters and gauges via
   `session_stats_metrics()` (net bytes, peer counts, disk, piece picker, …), plus

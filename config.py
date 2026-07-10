@@ -65,7 +65,7 @@ STATS_PORT_BASE = 8001   # node i serves its /stats JSON on STATS_PORT_BASE + i
 COLLECTOR_HOST = "0.0.0.0"               # bind address (accept remote nodes)
 COLLECTOR_PORT = 8100
 COLLECTOR_BASE = f"http://{HOST}:{COLLECTOR_PORT}"   # where nodes/viewers reach it
-COLLECTOR_URL = f"{COLLECTOR_BASE}/ingest"           # node push target (--collector default)
+COLLECTOR_URL = f"{COLLECTOR_BASE}/api/ingest"       # node push target (--collector default)
 
 # Web UI /summary tuning. The collector buckets each torrent's pieces into at most
 # this many columns before sending (the dashboard only draws that many), so the
