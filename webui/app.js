@@ -420,14 +420,14 @@ const NodeStatRow = component({
 });
 
 // One dataset held by a node (a row in the node drill-down): links to the
-// dataset, shows role, completion, stored bytes and live rate. Backed by
+// dataset, shows status, completion, stored bytes and live rate. Backed by
 // /api/node/<label>.
 const NodeTorrentRow = component({
   name: "NodeTorrentRow",
   fields: {
     name: "",
     href: "#",
-    role: "",
+    status: "",
     pctText: "",
     barStyle: "",
     barClass: "pbar-fill",
@@ -441,7 +441,7 @@ const NodeTorrentRow = component({
       return this.make({
         name: t.name,
         href: `/dataset/${encodeURIComponent(t.info_hash)}`,
-        role: t.role,
+        status: t.complete ? "seed" : "leech",
         pctText: t.complete ? "complete" : `${pct}%`,
         barStyle: `width:${pct}%`,
         barClass: t.complete ? "pbar-fill" : active ? "pbar-fill" : "pbar-fill stalled",
@@ -452,7 +452,7 @@ const NodeTorrentRow = component({
   },
   view: html`<div class="ntrow">
     <a class="tlink" data-link="1" :href=".href" @text=".name"></a>
-    <span @text=".role"></span>
+    <span @text=".status"></span>
     <span class="pbar"><span :class=".barClass" :style=".barStyle"></span></span>
     <span class="nnum" @text=".pctText"></span>
     <span class="nnum" @text=".storedText"></span>
@@ -480,7 +480,7 @@ const NodeDetail = component({
     <div class="muted small" @text=".metaText"></div>
     <h3>Datasets held</h3>
     <div class="ntrow nthead">
-      <span>dataset</span><span>role</span><span>progress</span><span class="nnum">%</span>
+      <span>dataset</span><span>status</span><span>progress</span><span class="nnum">%</span>
       <span class="nnum">stored</span><span class="nnum">rate</span>
     </div>
     <x render-each=".rows"></x>

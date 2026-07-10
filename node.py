@@ -1,12 +1,14 @@
 """A BitTorrent v2 node daemon: a libtorrent session plus an HTTP control/stats
-endpoint. A node starts empty and roleless; you tell it what to do at runtime.
+endpoint. A node starts empty, holding no torrents; you tell it what to do at runtime.
 
   GET  /stats          -> JSON snapshot (session metrics + per-torrent status +
                           per-peer info); the node also pushes this to the
                           collector, and you can GET it directly for a local peek.
-  POST /add            -> body {"name": <catalog torrent>, "role": "seed"|"leech"}
-                          add a torrent from the catalog (seed serves it in place,
-                          leech downloads it into nodes/<id>/<name>/).
+  POST /add            -> body {"name": <catalog torrent>, "mode": "serve"|"download",
+                          "path": <local <name> file/dir, serve mode only>}
+                          add a torrent from the catalog (serve hosts a copy already
+                          on this host at `path`; download fetches it into
+                          nodes/<id>/<name>/).
   POST /remove         -> body {"name": <torrent>} or {"info_hash": <v2 hash>}
 
 The session runs in a background thread that continuously refreshes the shared
@@ -52,7 +54,7 @@ class NodeState:
         self.node_key = node_key
         self.ses = ses
         self.lock = threading.Lock()
-        # info_hash(v2 str) -> {name, role, save_path, ti, files, handle}
+        # info_hash(v2 str) -> {name, save_path, ti, files, handle}
         self.torrents: dict = {}
         self.session_stats: dict = {}
         self.snapshot: dict = {"node_key": node_key, "label": str(node_id),
@@ -141,7 +143,7 @@ def file_list(ti) -> list:
     return out
 
 
-def torrent_dict(st, ti, files_meta, role) -> dict:
+def torrent_dict(st, ti, files_meta) -> dict:
     info_hash_v2 = ""
     try:
         info_hash_v2 = str(st.info_hashes.v2)
@@ -150,7 +152,6 @@ def torrent_dict(st, ti, files_meta, role) -> dict:
     return {
         "info_hash_v2": info_hash_v2,
         "name": ti.name(),
-        "role": role,
         "state": state_name(st.state),
         # Per-piece ownership bitfield: which pieces (=which data) THIS node holds.
         # This is the authoritative source for the swarm-wide piece map.
@@ -239,43 +240,59 @@ def make_session(node_id: int) -> "lt.session":
     return lt.session(settings)
 
 
-def add_torrent(ns: NodeState, name: str, role: str) -> dict:
-    """Add a catalog torrent to the running session. Returns a small status dict."""
-    if role not in ("seed", "leech"):
-        raise ValueError(f"role must be 'seed' or 'leech', got {role!r}")
-    # The catalog lives on the tracker: fetch the meta + .torrent over HTTP rather
-    # than reading a shared directory. (raises FileNotFoundError if unknown)
-    meta = catalog.fetch_meta(name)
+def add_torrent(ns: NodeState, name: str, mode: str, serve_path: str = None) -> dict:
+    """Add a catalog torrent to the running session. `mode` says where the data
+    comes from: "serve" hosts a copy already on this host — `serve_path` is the
+    local <name> file/dir itself (what was given to make_torrent.py) — while
+    "download" fetches a fresh copy into nodes/<id>/. Returns a status dict."""
+    if mode not in ("serve", "download"):
+        raise ValueError(f"mode must be 'serve' or 'download', got {mode!r}")
+    if mode == "serve" and not serve_path:
+        raise ValueError("serve mode needs a path to the local content directory")
+    # The catalog holds only .torrent files; fetch and parse the one we want. Its
+    # name and info-hash come from the torrent itself, the single source of truth.
+    # (fetch_torrent_bytes raises FileNotFoundError if the catalog has no `name`.)
     ti = lt.torrent_info(lt.bdecode(catalog.fetch_torrent_bytes(name)))
+    tname = ti.name()
     ih = str(ti.info_hashes().v2)
 
     with ns.lock:
         if ih in ns.torrents:
             cur = ns.torrents[ih]
-            return {"info_hash": ih, "name": cur["name"], "role": cur["role"],
+            return {"info_hash": ih, "name": cur["name"],
                     "added": False, "note": "already present"}
 
-    if role == "seed":
-        save_path = meta["seed_save_path"]  # serve in place, no copy
+    # For serve, `serve_path` is the content itself — the file/dir named <tname>,
+    # i.e. what was passed to make_torrent.py. libtorrent wants its *parent* as
+    # save_path and rechecks the pieces already on disk; the on-disk name must
+    # match the torrent's, so validate it rather than silently seeding nothing.
+    if mode == "serve":
+        content = os.path.abspath(serve_path)
+        if not os.path.exists(content):
+            raise ValueError(f"serve path does not exist: {content}")
+        if os.path.basename(content) != tname:
+            raise ValueError(f"serve path must be the '{tname}' file/dir itself, "
+                             f"got {os.path.basename(content)!r}")
+        save_path = os.path.dirname(content)
     else:
-        save_path = os.path.join(config.NODES_DIR, str(ns.node_id), meta["name"])
-    os.makedirs(save_path, exist_ok=True)
+        save_path = os.path.join(config.NODES_DIR, str(ns.node_id), tname)
+        os.makedirs(save_path, exist_ok=True)
 
     atp = lt.add_torrent_params()
     atp.ti = ti
     atp.save_path = save_path
     handle = ns.ses.add_torrent(atp)
 
-    entry = {"name": meta["name"], "role": role, "save_path": save_path,
+    entry = {"name": tname, "save_path": save_path,
              "ti": ti, "files": file_list(ti), "handle": handle}
     with ns.lock:
         ns.torrents[ih] = entry
     # Persist the assignment immediately so a restart before any download still
     # restores it (the loop writes the actual .resume file from the alert).
     handle.save_resume_data(SAVE_FLAGS)
-    print(f"node {ns.node_id}: +{role} '{meta['name']}' "
+    print(f"node {ns.node_id}: +{mode} '{tname}' "
           f"({len(entry['files'])} files) save_path={save_path}", flush=True)
-    return {"info_hash": ih, "name": meta["name"], "role": role, "added": True}
+    return {"info_hash": ih, "name": tname, "mode": mode, "added": True}
 
 
 def remove_torrent(ns: NodeState, name: str = None, info_hash: str = None) -> dict:
@@ -294,13 +311,6 @@ def remove_torrent(ns: NodeState, name: str = None, info_hash: str = None) -> di
         pass
     print(f"node {ns.node_id}: -{entry['name']}", flush=True)
     return {"removed": True, "info_hash": ih, "name": entry["name"]}
-
-
-def derive_role(node_id: int, save_path: str) -> str:
-    """A leecher saves under nodes/<id>/...; anything else is serving in place."""
-    leech_root = os.path.abspath(os.path.join(config.NODES_DIR, str(node_id)))
-    sp = os.path.abspath(save_path)
-    return "leech" if sp == leech_root or sp.startswith(leech_root + os.sep) else "seed"
 
 
 def _write_resume(node_id: int, alert) -> None:
@@ -326,14 +336,13 @@ def load_resumes(ns: NodeState) -> int:
                   flush=True)
             continue
         ih = str(ti.info_hashes().v2)
-        role = derive_role(ns.node_id, atp.save_path)
         handle = ns.ses.add_torrent(atp)
         with ns.lock:
-            ns.torrents[ih] = {"name": ti.name(), "role": role,
+            ns.torrents[ih] = {"name": ti.name(),
                                "save_path": atp.save_path, "ti": ti,
                                "files": file_list(ti), "handle": handle}
         count += 1
-        print(f"node {ns.node_id}: resumed {role} '{ti.name()}'", flush=True)
+        print(f"node {ns.node_id}: resumed '{ti.name()}'", flush=True)
     return count
 
 
@@ -375,7 +384,7 @@ def session_loop(ns: NodeState) -> None:
         torrents, peers = [], []
         for e in entries:
             st = e["handle"].status()
-            torrents.append(torrent_dict(st, e["ti"], e["files"], e["role"]))
+            torrents.append(torrent_dict(st, e["ti"], e["files"]))
             for p in e["handle"].get_peer_info():
                 peers.append(peer_dict(p, e["name"]))
 
@@ -437,7 +446,8 @@ def make_handler(ns: NodeState):
             try:
                 body = self._read_json()
                 if self.path == "/add":
-                    res = add_torrent(ns, body["name"], body.get("role", "leech"))
+                    res = add_torrent(ns, body["name"], body.get("mode", "download"),
+                                      body.get("path"))
                     self._send_json(res)
                 elif self.path == "/remove":
                     res = remove_torrent(ns, body.get("name"), body.get("info_hash"))

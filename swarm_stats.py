@@ -60,7 +60,7 @@ def collect_by_torrent(nodes: list) -> list:
     """Group every node's torrent entries by torrent.
 
     Returns a list of (meta, rows), one per distinct torrent, sorted by name:
-      rows: [{"id", "label", "role", "bits": list[bool] of length num_pieces,
+      rows: [{"id", "label", "bits": list[bool] of length num_pieces,
               "state", "progress", "dl", "ul"}]
             id = node_key (stable swarm-wide identity, used for the DB / holders);
             label = short human name for display;
@@ -86,7 +86,7 @@ def collect_by_torrent(nodes: list) -> list:
                          "total_size": total_size, "files": t.get("files") or []},
                 "rows": []})
             g["rows"].append({"id": key, "label": label,
-                              "role": t.get("role", "?"), "bits": bits,
+                              "bits": bits,
                               "state": t.get("state", ""),
                               "progress": float(t.get("progress") or 0.0),
                               "dl": int(t.get("download_rate") or 0),

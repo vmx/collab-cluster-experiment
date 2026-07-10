@@ -124,7 +124,8 @@ def render_torrent(meta: dict, rows: list, source: str) -> None:
         pct = 100 * have / num_pieces
         stored = sum(piece_size(i, piece_length, total_size, num_pieces)
                      for i, b in enumerate(r["bits"]) if b)
-        label = f"  n{r['label']} {r['role']:<5} {pct:5.1f}% {have:>4}/{num_pieces:<4}"
+        role = "seed" if have == num_pieces else "leech"
+        label = f"  n{r['label']} {role:<5} {pct:5.1f}% {have:>4}/{num_pieces:<4}"
         print(f"{label:<{label_w}} {render_bits(r['bits'], num_pieces, cols)}  {human(stored)}")
     print(f"{'  availability  (#holders)':<{label_w}} {render_avail(avail, num_pieces, cols)}")
 

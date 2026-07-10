@@ -11,11 +11,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 NODES_DIR = os.path.join(BASE_DIR, "nodes")
 
-# Catalog of created torrents. make_torrent.py writes one pair per torrent here:
-#   data/torrents/<name>.torrent  + data/torrents/<name>.json (sidecar meta).
-# The sidecar records the torrent path and the seed's save_path (the parent dir
-# of the shared content) so nodes can serve arbitrary local files/directories
-# without hard-coding their location. Nodes/control resolve a torrent by <name>.
+# Catalog of created torrents. make_torrent.py writes one file per torrent here:
+#   data/torrents/<name>.torrent
+# The .torrent is the only source of truth — nodes/control resolve a torrent by
+# <name> and read its name + info-hash by parsing it; there is no sidecar.
 TORRENTS_DIR = os.path.join(DATA_DIR, "torrents")
 # Where the built-in sample datasets are generated when no content is given.
 SAMPLE_DIR = os.path.join(DATA_DIR, "sample")

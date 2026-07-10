@@ -3,9 +3,9 @@
 A BitTorrent swarm for experimenting with how well the protocol's metrics/stats
 work — built to run as independent nodes that may be spread across separate
 hosts/data centers, not just on one box. You build a **catalog** of one or more
-torrents (each from any file or directory tree), start a handful of **roleless
-node daemons**, then drive the swarm by hand: tell each node to **seed** or
-**leech** specific torrents via a small control API. Each node **pushes** its
+torrents (each from any file or directory tree), start a handful of **empty
+node daemons**, then drive the swarm by hand: tell each node to **serve** or
+**download** specific torrents via a small control API. Each node **pushes** its
 stats to a central **collector**, which aggregates them in memory and serves a
 live view of the whole swarm.
 
@@ -62,8 +62,11 @@ commands, stats, and web UI.
 
 - **Seed / leech** — a **seeder** has the complete dataset and only uploads; a
   **leecher** is still downloading (and uploads the pieces it already has to
-  others). A **swarm** is everyone — seeders and leechers — trading a given
-  dataset. Here you set a node's role explicitly with `control.py add … --role`.
+  others). It's a live status, not a fixed role: a leecher that finishes becomes
+  a seeder. A **swarm** is everyone — seeders and leechers — trading a given
+  dataset. `control.py add … --mode serve|download` only chooses how a node
+  starts: `serve` hosts a copy the node already has on disk (point `--path` at
+  the local file/dir), `download` fetches a copy.
 
 - **Tracker** — a lightweight server that lets peers find each other. A peer
   **announces** ("I want dataset X, here's my address") and gets back a list of
@@ -84,7 +87,7 @@ Start each piece by hand (e.g. one terminal each). Nodes are long-running and
 start **empty**; you assign torrents to them at runtime with `control.py`.
 
 ```bash
-# 1. Build the torrent catalog (writes data/torrents/<name>.torrent + <name>.json).
+# 1. Build the torrent catalog (writes data/torrents/<name>.torrent).
 #    No args = built-in sample (two torrents: "media" and "documents").
 #    Or pass any number of files/directories — each becomes its own torrent.
 #    Torrents are private + tracker-based (announce URL baked in).
@@ -102,7 +105,7 @@ python bittorrent_tracker.py
 python collector.py
 
 # 4. Start some node daemons — one process each, identified only by --id.
-#    BitTorrent port = 6881+id, control/stats HTTP port = 8001+id. No role yet.
+#    BitTorrent port = 6881+id, control/stats HTTP port = 8001+id. No torrents yet.
 #    Each node pushes its stats to the collector (--collector, defaults from
 #    config.py; pass --collector '' to run a node without reporting).
 python node.py --id 0
@@ -115,11 +118,11 @@ python node.py --id 4
 #    control is operator-local: you run it on the same host as the node and
 #    target it by id. Swarm-wide views come from the collector (see Inspect).
 python control.py list                    # what's in the catalog
-python control.py add 0 media --role seed     # node 0 seeds "media"
-python control.py add 0 documents --role seed # ...and "documents"
-python control.py add 1 media --role leech    # node 1 leeches "media"
-python control.py add 2 media --role leech
-python control.py add 3 documents --role leech
+python control.py add 0 media --mode serve --path data/sample/media         # node 0 serves "media"
+python control.py add 0 documents --mode serve --path data/sample/documents # ...and "documents"
+python control.py add 1 media --mode download     # node 1 downloads "media"
+python control.py add 2 media --mode download
+python control.py add 3 documents --mode download
 python control.py status 1                 # what node 1 currently holds
 python control.py remove 3 documents      # tell a node to drop a torrent
 ```
@@ -139,8 +142,10 @@ By default a subscriber sees only torrents added after it connects; pass
 the whole catalog first. The web dashboard also toasts new datasets as they land
 (the collector relays the stream, exposed as `/api/catalog/recent`).
 
-The seed serves its content **in place** from where `make_torrent.py` found it
-(recorded in the catalog sidecar) — nothing is copied. Leechers reconstruct each
+A node in `serve` mode hosts its content **in place** from the `--path` you give
+it (the local `<name>` file/dir itself, i.e. what you passed to `make_torrent.py`)
+— nothing is copied, and that path stays local to the node, never entering the
+catalog. Downloaders reconstruct each
 torrent's tree under `nodes/<id>/<name>/`. For a live swarm-wide view, watch the
 piece map (it reads the collector):
 
@@ -192,8 +197,8 @@ shareable, reloadable URL — and it refreshes itself every second:
   how much it stores, how much disk it has free, how many datasets it
   holds/completes, and its throughput.
   Reads `/api/nodes`. **Click any node** (`/node/<label>`) to drill into the
-  datasets it holds — each with its role, completion and rate, and each linking back
-  to that dataset's drill-down. Reads `/api/node/<label>`.
+  datasets it holds — each with its seed/leech status, completion and rate, and each
+  linking back to that dataset's drill-down. Reads `/api/node/<label>`.
 
 The machine endpoints are namespaced under `/api/` so they never collide with those
 client-side page paths; the collector serves the app shell (`index.html`) for any
@@ -253,11 +258,11 @@ watch -n 2 python piece_map.py  # refresh every 2s (use the `watch` CLI tool)
 | File | Role |
 |---|---|
 | `config.py` | Ports, counts, paths, timing, tracker URL — the single source of truth. |
-| `make_torrent.py` | Build v2-only, private, tracker-based `.torrent`s from any files/dirs into the catalog (`data/torrents/`, the tracker's store); generates a two-torrent sample if no args. Also the local catalog-lookup helpers the tracker uses to serve `/catalog`. |
+| `make_torrent.py` | Build v2-only, private, tracker-based `.torrent`s from any files/dirs into the catalog (`data/torrents/`, the tracker's store); generates a two-torrent sample if no args. Also `list_catalog`, which derives `{name, info_hash}` by parsing the `.torrent`s for the tracker to serve `/catalog`. |
 | `bittorrent_tracker.py` | The tiny stdlib tracker: `/announce` + `/scrape` + `/stats`, keyed by info-hash (no whitelist), and `/catalog` endpoints that host the torrents (incl. `/catalog/subscribe`, an SSE stream of newly added torrents). |
-| `catalog.py` | Stdlib client the node/control use to fetch the catalog (list, meta, `.torrent`) from the tracker over HTTP, and to `subscribe` to newly added torrents. |
-| `node.py` | One roleless node daemon: libtorrent session (announces to the tracker; fetches torrents from its `/catalog`) + HTTP `/stats` (GET) and `/add` `/remove` (POST) control endpoints; pushes its snapshot to the collector (`--collector`). Has a persisted `node_key`. |
-| `control.py` | Operator-local CLI to list the catalog (from the tracker), subscribe to newly added torrents, inspect a local node, and tell nodes to seed/leech torrents. |
+| `catalog.py` | Stdlib client the node/control use to fetch the catalog (list, `.torrent` bytes) from the tracker over HTTP, and to `subscribe` to newly added torrents. |
+| `node.py` | One node daemon (starts empty): libtorrent session (announces to the tracker; fetches torrents from its `/catalog`) + HTTP `/stats` (GET) and `/add` `/remove` (POST) control endpoints; pushes its snapshot to the collector (`--collector`). Has a persisted `node_key`. |
+| `control.py` | Operator-local CLI to list the catalog (from the tracker), subscribe to newly added torrents, inspect a local node, and tell nodes to serve/download torrents. |
 | `collector.py` | Central push endpoint: keeps the latest snapshot per node in memory (no persistence) and serves `/live` + `/stats` (operator views), the dashboard API under `/api/` (`overview` light per-dataset list, `torrent/<info_hash>` full drill-down detail, `transfers` in-flight transfers, `nodes` per-node storage, `node/<label>` one node's datasets, `swarm` tracker membership reconciled against node reports, `summary` legacy all-torrents), and the web UI from `webui/` (app shell served for any non-`/api/` path). Also polls the tracker's `/stats` in the background to feed `/api/swarm`. |
 | `piece_map.py` | Per torrent: which peer holds which pieces/files + how many copies of each file exist (reads the collector's `/live`). |
 | `swarm_stats.py` | Shared helpers that group node snapshots by torrent and aggregate per-piece/per-file copy stats (used by `collector.py` for `/api/overview` + `/api/torrent/<info_hash>` + `/api/summary`, and by `piece_map.py`). |
@@ -272,8 +277,8 @@ watch -n 2 python piece_map.py  # refresh every 2s (use the `watch` CLI tool)
 
 ## Outputs (generated, safe to delete)
 
-- `data/torrents/` — `<name>.torrent` + `<name>.json` per catalog entry (the
-  tracker's store, served via `/catalog`)
+- `data/torrents/` — `<name>.torrent` per catalog entry (the tracker's store,
+  served via `/catalog`)
 - `data/sample/` — the built-in sample datasets (when no content is given)
 - `nodes/<id>/<name>/` — each leecher's download directory per torrent
 - `nodes/<id>/.resume/<name>.resume` — libtorrent fast-resume per torrent (lets a

@@ -1,10 +1,10 @@
 """Drive the running swarm by hand: list the torrent catalog, inspect what each
-node holds, and tell nodes to seed or leech specific torrents.
+node holds, and tell nodes to serve or download specific torrents.
 
     python control.py list                         # catalog + live peers per torrent
     python control.py status                       # what every node holds now
-    python control.py add 0 media --role seed      # node 0 seeds 'media'
-    python control.py add 1 media --role leech     # node 1 leeches 'media'
+    python control.py add 0 media --mode serve --path /data/media  # serve in place
+    python control.py add 1 media --mode download                  # node 1 downloads
     python control.py remove 1 media               # node 1 drops 'media'
     python control.py subscribe                    # watch for newly added torrents
 
@@ -87,13 +87,18 @@ def cmd_status(args) -> None:
         return
     parts = []
     for t in torrents:
-        parts.append(f"{t.get('name', '?')}[{t.get('role', '?')} "
+        complete = t.get("is_seeding") or (t.get("progress") or 0) >= 1.0
+        role = "seed" if complete else "leech"
+        parts.append(f"{t.get('name', '?')}[{role} "
                      f"{(t.get('progress') or 0) * 100:.0f}% p{t.get('num_peers') or 0}]")
     print(f"node {nid}: " + "  ".join(parts))
 
 
 def cmd_add(args) -> None:
-    res = _post(args.node, "/add", {"name": args.name, "role": args.role})
+    if args.mode == "serve" and not args.path:
+        sys.exit("--mode serve needs --path <the local file/dir to serve>")
+    res = _post(args.node, "/add",
+                {"name": args.name, "mode": args.mode, "path": args.path})
     print(f"node {args.node}: {json.dumps(res)}")
     if res.get("error"):
         sys.exit(1)
@@ -134,10 +139,13 @@ def main() -> None:
     p_status.add_argument("node", type=int, help="node id to query on this host")
     p_status.set_defaults(func=cmd_status)
 
-    p_add = sub.add_parser("add", help="tell a node to seed/leech a torrent")
+    p_add = sub.add_parser("add", help="tell a node to serve/download a torrent")
     p_add.add_argument("node", type=int)
     p_add.add_argument("name", help="catalog torrent name (see `list`)")
-    p_add.add_argument("--role", choices=["seed", "leech"], default="leech")
+    p_add.add_argument("--mode", choices=["serve", "download"], default="download",
+                       help="serve in place from --path, or download a copy")
+    p_add.add_argument("--path", help="for --mode serve: the local file/dir to serve "
+                                      "(what you passed to make_torrent.py)")
     p_add.set_defaults(func=cmd_add)
 
     p_rm = sub.add_parser("remove", help="tell a node to drop a torrent")

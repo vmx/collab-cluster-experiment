@@ -38,7 +38,7 @@ Endpoints:
                    stored, datasets held/complete, throughput, peer count.
   GET  /api/node/<label>
                  - one node's held datasets (drill-down from /nodes): per torrent
-                   role, completion, stored, rate + info_hash. 404 if not reporting.
+                   completion, stored, rate + info_hash. 404 if not reporting.
   GET  /api/summary - {"ts", "torrents": [...]} the full detail of EVERY torrent
                    at once (the original payload). Retained as a convenience; the
                    tiered /api/overview + /api/torrent split supersedes it.
@@ -49,7 +49,7 @@ Endpoints:
                    (isolated => announced but meshing with no one), plus `silent`
                    nodes that hold the dataset without appearing in the tracker.
   GET  /api/catalog/recent - {"ts", "added": [...]} recently added catalog
-                   torrents (name, info_hash, source, seq, added_at). A background
+                   torrents (name, info_hash, seq, added_at). A background
                    thread subscribes to the tracker's /catalog/subscribe stream and
                    keeps the tail in memory so the dashboard can toast new datasets
                    without the browser reaching the tracker directly.
@@ -137,7 +137,6 @@ def catalog_watch_loop() -> None:
             RECENT_CATALOG.append({
                 "name": meta.get("name"),
                 "info_hash": meta.get("info_hash"),
-                "source": meta.get("source"),
                 "seq": seq,
                 "added_at": time.time(),
             })
@@ -216,9 +215,10 @@ def torrent_detail(meta: dict, rows: list) -> dict:
     for r in rows:
         stored = sum(piece_size(i, piece_length, total_size, num_pieces)
                      for i, b in enumerate(r["bits"]) if b)
+        have = sum(r["bits"])
         out_rows.append({
-            "label": r["label"], "role": r["role"],
-            "have": sum(r["bits"]), "stored": stored,
+            "label": r["label"], "role": "seed" if have == num_pieces else "leech",
+            "have": have, "stored": stored,
             "cells": bucket_fracs(r["bits"], num_pieces, cols),
         })
 
@@ -352,7 +352,7 @@ def build_transfers() -> dict:
             transfers.append({
                 "node": node, "name": t.get("name", ""),
                 "info_hash": t.get("info_hash_v2") or t.get("name"),
-                "role": t.get("role", "?"), "progress": progress,
+                "progress": progress,
                 "download_rate": dl, "upload_rate": int(t.get("upload_rate") or 0),
                 "num_peers": int(t.get("num_peers") or 0),
                 "total_size": total, "eta": eta,
@@ -400,7 +400,7 @@ def build_node_detail(label: str) -> dict:
     """One node's held datasets, or None if no fresh node reports that label.
 
     The drill-down from the Nodes screen: which torrents this node holds, each
-    with its role, completion and live rate, plus the node's totals. info_hash is
+    with its completion and live rate, plus the node's totals. info_hash is
     included so the UI can link every row back to that dataset's detail.
     """
     for snap in fresh_snapshots():
@@ -416,7 +416,7 @@ def build_node_detail(label: str) -> dict:
             # row keeps showing an inbound rate and looks like it's still pulling.
             torrents.append({
                 "info_hash": t.get("info_hash_v2") or t.get("name"),
-                "name": t.get("name", ""), "role": t.get("role", "?"),
+                "name": t.get("name", ""),
                 "state": t.get("state", ""), "progress": progress,
                 "stored": int(t.get("total_done") or 0),
                 "total_size": int(t.get("total_size") or 0),

@@ -13,8 +13,8 @@ Endpoints:
   GET /announce          - standard BitTorrent announce (compact + dict peers)
   GET /scrape            - standard scrape
   GET /stats             - JSON (non-BitTorrent) snapshot for manual inspection
-  GET /catalog           - JSON list of catalog torrents (the sidecar metas)
-  GET /catalog/<name>.json    - one torrent's sidecar meta
+  GET /catalog           - JSON list of catalog torrents ({name, info_hash},
+                           derived from each .torrent)
   GET /catalog/<name>.torrent - one torrent's .torrent bytes
   GET /catalog/subscribe - Server-Sent Events stream of newly added torrents.
                            A background thread watches TORRENTS_DIR, so anything
@@ -315,17 +315,16 @@ class Handler(BaseHTTPRequestHandler):
             return  # client went away; end the stream
 
     def handle_catalog_file(self, name: str) -> None:
-        # name is "<torrent>.torrent" or "<torrent>.json"; reject path tricks.
-        if "/" in name or "\\" in name or name.startswith("."):
+        # name is "<torrent>.torrent"; reject path tricks and anything else.
+        if "/" in name or "\\" in name or name.startswith(".") \
+                or not name.endswith(".torrent"):
             return self._send(b"", code=404)
         path = os.path.join(config.TORRENTS_DIR, name)
         if not os.path.isfile(path):
             return self._send(b"", code=404)
         with open(path, "rb") as f:
             body = f.read()
-        ctype = ("application/x-bittorrent" if name.endswith(".torrent")
-                 else "application/json")
-        self._send(body, ctype)
+        self._send(body, "application/x-bittorrent")
 
 
 def main() -> None:

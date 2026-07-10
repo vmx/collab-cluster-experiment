@@ -1,9 +1,11 @@
 """Client for the torrent catalog hosted on the tracker.
 
-The torrents live on the tracker (see bittorrent_tracker.py's /catalog endpoints),
-so nodes and control fetch them over HTTP by name rather than reading a shared
-data/torrents directory. Stdlib only — kept free of libtorrent so control.py can
-use it without that dependency; the node bdecodes the .torrent bytes itself.
+The catalog is just the .torrent files, hosted on the tracker (see
+bittorrent_tracker.py's /catalog endpoints); nodes and control fetch them over
+HTTP by name rather than reading a shared data/torrents directory. The tracker
+derives each torrent's name + info-hash from the .torrent itself. Stdlib only —
+kept free of libtorrent so control.py can use it without that dependency; the
+node bdecodes the .torrent bytes itself.
 """
 import json
 import urllib.error
@@ -18,7 +20,8 @@ def _get(path: str, timeout: float = 5.0) -> bytes:
 
 
 def fetch_list() -> list:
-    """All catalog torrents (sidecar meta dicts), as the tracker reports them."""
+    """All catalog torrents as {"name", "info_hash"} dicts the tracker derives
+    from each .torrent."""
     return json.loads(_get("/catalog").decode())
 
 
@@ -29,25 +32,21 @@ def fetch_stats(timeout: float = 5.0) -> dict:
     return json.loads(_get("/stats", timeout).decode())
 
 
-def fetch_meta(name: str) -> dict:
-    """One torrent's sidecar meta. Raises FileNotFoundError if the tracker has no
-    such torrent (so callers can treat it like the old local-file lookup)."""
+def fetch_torrent_bytes(name: str) -> bytes:
+    """The raw .torrent bytes for `name` (bdecode/torrent_info them yourself).
+    Raises FileNotFoundError if the catalog has no such torrent, so callers can
+    treat it like a local-file lookup."""
     try:
-        return json.loads(_get(f"/catalog/{name}.json").decode())
+        return _get(f"/catalog/{name}.torrent")
     except urllib.error.HTTPError as e:
         if e.code == 404:
             raise FileNotFoundError(name)
         raise
 
 
-def fetch_torrent_bytes(name: str) -> bytes:
-    """The raw .torrent bytes for `name` (bdecode/torrent_info them yourself)."""
-    return _get(f"/catalog/{name}.torrent")
-
-
 def subscribe(on_torrent, since: int = None) -> None:
     """Stream newly added catalog torrents from the tracker, calling
-    `on_torrent(meta)` for each (meta is the sidecar dict plus a `seq`).
+    `on_torrent(meta)` for each (meta is {"name", "info_hash", "seq"}).
 
     Blocks, consuming the tracker's /catalog/subscribe Server-Sent Events stream
     until the connection ends (or the caller interrupts). With `since` omitted the

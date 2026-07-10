@@ -5,19 +5,17 @@ a small on-disk catalog the nodes can resolve by name.
     python make_torrent.py /path/to/dir-or-file [more paths...]
     python make_torrent.py                # no args: generate two sample torrents
 
-Each torrent is written to the catalog as a pair under config.TORRENTS_DIR:
+Each torrent is written to the catalog as a single file under config.TORRENTS_DIR:
     <name>.torrent   the torrent itself
-    <name>.json      sidecar meta: {id, torrent, seed_save_path, name, source,
-                                     info_hash}
 where <name> is the torrent's name (the basename of the shared file/dir). The
-seed serves the content *in place* from where it lives: we record the content's
-parent directory as the seed's save_path so a node can seed it without copying.
-Leechers download into nodes/<id>/<name>/.
+torrent is the only source of truth — its name and info-hash are read back by
+parsing it, so there is no sidecar. To seed the content in place, hand the node
+that already holds it the local directory to serve from (`control.py add …
+--mode serve --path <dir>`); other nodes download into nodes/<id>/<name>/.
 
 v2-only => SHA-256 merkle hashing, no v1/hybrid.
 """
 import glob
-import json
 import os
 import sys
 
@@ -47,22 +45,13 @@ def catalog_torrent_path(name: str) -> str:
     return os.path.join(config.TORRENTS_DIR, f"{name}.torrent")
 
 
-def catalog_meta_path(name: str) -> str:
-    return os.path.join(config.TORRENTS_DIR, f"{name}.json")
-
-
-def load_meta(name: str) -> dict:
-    """Resolve a catalog torrent by name. Raises FileNotFoundError if unknown."""
-    with open(catalog_meta_path(name)) as f:
-        return json.load(f)
-
-
 def list_catalog() -> list:
-    """All registered torrents (meta dicts), sorted by name."""
+    """All registered torrents as {"name", "info_hash"} dicts, sorted by name,
+    derived by parsing each .torrent in the catalog (its single source of truth)."""
     metas = []
-    for path in sorted(glob.glob(os.path.join(config.TORRENTS_DIR, "*.json"))):
-        with open(path) as f:
-            metas.append(json.load(f))
+    for path in sorted(glob.glob(os.path.join(config.TORRENTS_DIR, "*.torrent"))):
+        ti = lt.torrent_info(path)
+        metas.append({"name": ti.name(), "info_hash": str(ti.info_hashes().v2)})
     return sorted(metas, key=lambda m: m["name"])
 
 
@@ -125,28 +114,21 @@ def make_torrent(source: str) -> dict:
 
     ti = lt.torrent_info(torrent_path)
     name = ti.name()
-    meta = {
-        "id": name,
-        "torrent": torrent_path,
-        "seed_save_path": seed_save_path,
-        "name": name,
-        "source": source,
-        "info_hash": str(ti.info_hashes().v2),
-    }
-    with open(catalog_meta_path(name), "w") as f:
-        json.dump(meta, f, indent=2)
+    info_hash = str(ti.info_hashes().v2)
 
     real_files = [(fs.file_path(i), fs.file_size(i)) for i in range(fs.num_files())
                   if not _is_pad(fs, i)]
     print(f"wrote {torrent_path}")
     print(f"  name         : {name}")
-    print(f"  v2 info-hash : {meta['info_hash']}")
+    print(f"  v2 info-hash : {info_hash}")
     print(f"  files        : {len(real_files)}  (total {ti.total_size()} bytes)")
     print(f"  pieces       : {ti.num_pieces()} x {ti.piece_length()} bytes")
-    print(f"  seed serves from: {seed_save_path}")
+    # A node on this host can serve the content in place by pointing --path at it
+    # (its parent becomes libtorrent's save_path).
+    print(f"  serve in place with: --mode serve --path {source}")
     for path, size in real_files:
         print(f"    - {path}  ({size} bytes)")
-    return meta
+    return {"name": name, "info_hash": info_hash}
 
 
 def main(sources=None) -> None:
