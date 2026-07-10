@@ -186,13 +186,19 @@ shareable, reloadable URL — and it refreshes itself every second:
   rarest-copies-first so the least-replicated float to the top.
 - **Drill-down** (`/dataset/<info_hash>`, click any row) — the full piece map for
   one dataset: per-node piece ownership, per-piece availability, the availability
-  histogram, the copies summary, and per-file replication. It reads the dataset's
-  detail from `/api/torrent/<info_hash>` only while that dataset is open. Each
-  per-node row links to that node's page (see Nodes), so you can pivot from "which
-  nodes hold this dataset" to "what else those nodes hold".
+  histogram, the copies summary, and per-file replication. Each per-node row also
+  shows that node's live connection status reconciled against the tracker —
+  meshing (`N peers`), `idle` (a complete seed nobody's pulling from), `stuck`
+  (incomplete with 0 peers), or `silent` (holding it but never announced) — with
+  any purely tracker-side gaps (external announcers, or a node announced but not
+  holding it) noted below the table. It reads the dataset's detail from
+  `/api/torrent/<info_hash>` only while that dataset is open. Each per-node row
+  links to that node's page (see Nodes), so you can pivot from "which nodes hold
+  this dataset" to "what else those nodes hold".
 - **Transfers** (`/transfers`) — what's moving right now: one row per incomplete
   (node, dataset) with a progress bar, live rate and ETA (stalled transfers show
-  too, without an ETA), soonest-done first. Reads `/api/transfers`.
+  too, without an ETA), soonest-done first; a transfer with 0 peers is flagged as
+  **stuck**. Reads `/api/transfers`.
 - **Nodes** (`/nodes`) — the infrastructure side of "where is the data": per node,
   how much it stores, how much disk it has free, how many datasets it
   holds/completes, and its throughput.
@@ -263,10 +269,10 @@ watch -n 2 python piece_map.py  # refresh every 2s (use the `watch` CLI tool)
 | `catalog.py` | Stdlib client the node/control use to fetch the catalog (list, `.torrent` bytes) from the tracker over HTTP, and to `subscribe` to newly added torrents. |
 | `node.py` | One node daemon (starts empty): libtorrent session (announces to the tracker; fetches torrents from its `/catalog`) + HTTP `/stats` (GET) and `/add` `/remove` (POST) control endpoints; pushes its snapshot to the collector (`--collector`). Has a persisted `node_key`. |
 | `control.py` | Operator-local CLI to list the catalog (from the tracker), subscribe to newly added torrents, inspect a local node, and tell nodes to serve/download torrents. |
-| `collector.py` | Central push endpoint: keeps the latest snapshot per node in memory (no persistence) and serves `/live` + `/stats` (operator views), the dashboard API under `/api/` (`overview` light per-dataset list, `torrent/<info_hash>` full drill-down detail, `transfers` in-flight transfers, `nodes` per-node storage, `node/<label>` one node's datasets, `swarm` tracker membership reconciled against node reports, `summary` legacy all-torrents), and the web UI from `webui/` (app shell served for any non-`/api/` path). Also polls the tracker's `/stats` in the background to feed `/api/swarm`. |
+| `collector.py` | Central push endpoint: keeps the latest snapshot per node in memory (no persistence) and serves `/live` + `/stats` (operator views), the dashboard API under `/api/` (`overview` light per-dataset list, `torrent/<info_hash>` full drill-down detail incl. each node's connection status reconciled against the tracker, `transfers` in-flight transfers, `nodes` per-node storage, `node/<label>` one node's datasets, `summary` legacy all-torrents), and the web UI from `webui/` (app shell served for any non-`/api/` path). Also polls the tracker's `/stats` in the background so the drill-down can reconcile announced membership against node reports. |
 | `piece_map.py` | Per torrent: which peer holds which pieces/files + how many copies of each file exist (reads the collector's `/live`). |
 | `swarm_stats.py` | Shared helpers that group node snapshots by torrent and aggregate per-piece/per-file copy stats (used by `collector.py` for `/api/overview` + `/api/torrent/<info_hash>` + `/api/summary`, and by `piece_map.py`). |
-| `webui/` | The browser dashboard: `index.html` + `app.js` (a [Tutuca](https://github.com/marianoguerra/tutuca) SPA, no build step) — History-API-routed screens Overview (`/`, with name search + status filter), per-dataset piece-map drill-down (`/dataset/<info_hash>`), Transfers (`/transfers`), Nodes (`/nodes`) and per-node drill-down (`/node/<label>`), and Swarm (`/swarm`, the tracker's announce-based membership reconciled against what nodes report), reading the `/api/*` endpoints — plus the vendored single-file `tutuca.js` framework. Served by `collector.py`. |
+| `webui/` | The browser dashboard: `index.html` + `app.js` (a [Tutuca](https://github.com/marianoguerra/tutuca) SPA, no build step) — History-API-routed screens Overview (`/`, with name search + status filter), per-dataset piece-map drill-down (`/dataset/<info_hash>`, whose per-node rows also show each node's live connection status reconciled against the tracker's membership), Transfers (`/transfers`, which flags stuck 0-peer transfers), and Nodes (`/nodes`) with a per-node drill-down (`/node/<label>`), reading the `/api/*` endpoints — plus the vendored single-file `tutuca.js` framework. Served by `collector.py`. |
 
 ## Ports
 

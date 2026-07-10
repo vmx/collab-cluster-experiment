@@ -22,7 +22,6 @@ const DETAIL_URL = "/api/torrent/"; // + info_hash
 const TRANSFERS_URL = "/api/transfers";
 const NODES_URL = "/api/nodes";
 const NODE_DETAIL_URL = "/api/node/"; // + label
-const SWARM_URL = "/api/swarm"; // tracker membership reconciled against nodes
 const RECENT_URL = "/api/catalog/recent"; // newly added catalog torrents
 const POLL_MS = 1000; // refresh once a second
 
@@ -34,7 +33,6 @@ const REQ_FOR_ROUTE = {
   transfers: "fetchTransfers",
   nodes: "fetchNodes",
   node: "fetchNodeDetail",
-  swarm: "fetchSwarm",
 };
 
 // --- pure presentation helpers -------------------------------------------------
@@ -113,11 +111,35 @@ const Cell = component({
   view: html`<span class="cell" :style=".style" :title=".title"></span>`,
 });
 
-// One node's ownership line: label/role/percent, the piece map, and bytes stored.
-// The label links to that node's drill-down (which other datasets it holds).
+// Compute a node's live connection status for a dataset, reconciled against the
+// tracker: whether it's stuck (incomplete + 0 peers), idle-seeding, meshing, and
+// whether it announced at all (a holder that didn't is "silent").
+function connStatus(r) {
+  let text, cls;
+  if (r.isolated) {
+    text = "stuck · 0 peers";
+    cls = "nstatus bad";
+  } else if (r.num_peers === 0) {
+    text = "idle";
+    cls = "nstatus muted";
+  } else {
+    text = `${r.num_peers} peer(s)`;
+    cls = "nstatus ok";
+  }
+  if (r.announced === false) {
+    text += " · silent";
+    if (!r.isolated) cls = "nstatus warn"; // holds it but never announced
+  }
+  return { text, cls };
+}
+
+// One node's ownership line: label/role/percent, the piece map, its live
+// connection status (reconciled against the tracker), and bytes stored. The label
+// links to that node's drill-down (which other datasets it holds).
 const NodeRow = component({
   name: "NodeRow",
-  fields: { label: "", href: "#", role: "", have: 0, numPieces: 0, stored: 0, cells: [] },
+  fields: { label: "", href: "#", role: "", have: 0, numPieces: 0, stored: 0,
+            statusText: "", statusClass: "nstatus", cells: [] },
   methods: {
     headText() {
       const pct = this.numPieces ? (100 * this.have) / this.numPieces : 0;
@@ -130,6 +152,7 @@ const NodeRow = component({
   statics: {
     fromData(r, numPieces) {
       const cells = r.cells.map((f) => Cell.make(cellForFrac(f)));
+      const status = connStatus(r);
       return this.make({
         label: r.label,
         href: `/node/${encodeURIComponent(r.label)}`,
@@ -137,6 +160,8 @@ const NodeRow = component({
         have: r.have,
         numPieces,
         stored: r.stored,
+        statusText: status.text,
+        statusClass: status.cls,
         cells,
       });
     },
@@ -144,6 +169,7 @@ const NodeRow = component({
   view: html`<div class="noderow">
     <a class="rowlabel nodelink" data-link="1" :href=".href" @text="$headText"></a>
     <span class="map"><x render-each=".cells"></x></span>
+    <span :class=".statusClass" @text=".statusText"></span>
     <span class="stored" @text="$storedText"></span>
   </div>`,
 });
@@ -206,6 +232,8 @@ const Torrent = component({
     availCells: [],
     histLines: [],
     files: [],
+    membershipNote: "",
+    hasMembershipNote: false,
   },
   methods: {
     metaText() {
@@ -236,6 +264,13 @@ const Torrent = component({
       const availCells = t.avail_cells.map((c) => Cell.make(cellForAvail(c, t.nodes_seen)));
       const files = t.files.map((f) => FileRow.Class.fromData(f, t.name));
       const s = t.summary;
+      // Tracker-side gaps that have no piece-map row of their own. (Holders that
+      // didn't announce are flagged inline as "silent" on their own row.)
+      const notes = [];
+      if ((t.external || []).length)
+        notes.push(`${t.external.length} external announcer(s): ${t.external.join(", ")}`);
+      if ((t.off_dataset || []).length)
+        notes.push(`announced but not holding it: ${t.off_dataset.map((l) => "n" + l).join(", ")}`);
       return this.make({
         name: t.name,
         infoHash: t.info_hash,
@@ -252,6 +287,8 @@ const Torrent = component({
         availCells,
         histLines: histogramLines(t.histogram),
         files,
+        membershipNote: notes.join("  ·  "),
+        hasMembershipNote: notes.length > 0,
       });
     },
   },
@@ -273,8 +310,12 @@ const Torrent = component({
       <div class="noderow avail">
         <span class="rowlabel">availability  (#holders)</span>
         <span class="map"><x render-each=".availCells"></x></span>
+        <span></span>
         <span class="stored"></span>
       </div>
+    </div>
+    <div class="muted small" @show="truthy? .hasMembershipNote">
+      Tracker also sees: <span @text=".membershipNote"></span>
     </div>
 
     <h3>Availability histogram</h3>
@@ -492,137 +533,6 @@ const NodeDetail = component({
   </section>`,
 });
 
-// --- swarm reconciliation view (backed by /api/swarm) --------------------------
-
-// One registered peer in a dataset's membership, as the tracker learned it from
-// announces, reconciled against what that node reports to the collector. The
-// status column is the whole point of this view: it names the gap between the two
-// sources — an incomplete node that announced but is meshing with no one
-// (isolated), one the collector hasn't heard from (no snapshot), or an announcer
-// we don't collect from at all (external).
-const MemberRow = component({
-  name: "MemberRow",
-  fields: {
-    addr: "",
-    nodeText: "",
-    roleText: "",
-    roleClass: "mbadge",
-    statusText: "",
-    statusClass: "mstatus",
-    ageText: "",
-  },
-  statics: {
-    fromData(m) {
-      const external = m.node == null;
-      let statusText, statusClass;
-      if (external) {
-        statusText = "external announcer";
-        statusClass = "mstatus muted";
-      } else if (!m.reporting) {
-        statusText = "announced · no snapshot";
-        statusClass = "mstatus warn";
-      } else if (m.isolated) {
-        statusText = "isolated · 0 peers";
-        statusClass = "mstatus bad";
-      } else if (m.reporting && m.num_peers === 0) {
-        // complete + 0 peers (isolated is false): nobody's pulling from it right
-        // now, which is a fine idle state for a seed, not a fault.
-        statusText = "idle · seeding";
-        statusClass = "mstatus muted";
-      } else {
-        statusText = `${m.num_peers} peer(s)`;
-        statusClass = "mstatus ok";
-      }
-      const seeder = m.role === "seeder";
-      return this.make({
-        addr: m.addr,
-        nodeText: external ? "—" : `n${m.node}`,
-        roleText: seeder ? "seed" : "leech",
-        roleClass: seeder ? "mbadge seed" : "mbadge leech",
-        statusText,
-        statusClass,
-        ageText: m.age == null ? "" : `${m.age}s ago`,
-      });
-    },
-  },
-  view: html`<div class="memberrow">
-    <span class="maddr" @text=".addr"></span>
-    <span class="mnode" @text=".nodeText"></span>
-    <span :class=".roleClass" @text=".roleText"></span>
-    <span :class=".statusClass" @text=".statusText"></span>
-    <span class="mage" @text=".ageText"></span>
-  </div>`,
-});
-
-// One dataset's membership panel: the tracker's registered peers reconciled row
-// by row against the nodes' reports, plus any "silent" holders (a node serving
-// the data but absent from the tracker — not announcing, or already reaped). The
-// health pill folds every gap into one signal. Backed by /api/swarm.
-const SwarmDataset = component({
-  name: "SwarmDataset",
-  fields: {
-    name: "",
-    infoHash: "",
-    registered: 0,
-    seeders: 0,
-    isolated: 0,
-    silentCount: 0,
-    healthText: "",
-    healthClass: "hpill ok",
-    members: [],
-    silentText: "",
-    hasSilent: false,
-  },
-  methods: {
-    subText() {
-      return `info ${this.infoHash.slice(0, 16)}…`;
-    },
-  },
-  statics: {
-    fromData(d) {
-      const members = d.members.map((m) => MemberRow.Class.fromData(m));
-      const isolated = d.members.filter((m) => m.isolated).length;
-      const unreported = d.members.filter((m) => m.node != null && !m.reporting).length;
-      const silentCount = d.silent.length;
-      // Isolated members and silent holders are hard faults (data stuck or a node
-      // off the tracker); a member that merely hasn't pushed a snapshot yet is a
-      // soft warning. No gaps at all is healthy.
-      const hard = isolated + silentCount;
-      const issues = hard + unreported;
-      return this.make({
-        name: d.name || `${d.info_hash.slice(0, 12)}…`,
-        infoHash: d.info_hash,
-        registered: d.registered,
-        seeders: d.seeders,
-        isolated,
-        silentCount,
-        healthText: issues === 0 ? "healthy" : `${issues} issue(s)`,
-        healthClass: issues === 0 ? "hpill ok" : hard ? "hpill bad" : "hpill warn",
-        members,
-        silentText: d.silent.map((l) => `n${l}`).join(", "),
-        hasSilent: silentCount > 0,
-      });
-    },
-  },
-  view: html`<section class="torrent">
-    <h2><span @text=".name"></span> <span :class=".healthClass" @text=".healthText"></span></h2>
-    <div class="muted small" @text="$subText"></div>
-    <div class="summary">
-      <div class="stat"><span class="num" @text=".registered"></span><span class="lbl">registered</span></div>
-      <div class="stat"><span class="num" @text=".seeders"></span><span class="lbl">seeders (tracker)</span></div>
-      <div class="stat"><span class="num" @text=".isolated"></span><span class="lbl">isolated</span></div>
-      <div class="stat"><span class="num" @text=".silentCount"></span><span class="lbl">silent (unannounced)</span></div>
-    </div>
-    <div class="memberrow mhead">
-      <span>address</span><span>node</span><span>role</span><span>status</span><span class="mage">announce</span>
-    </div>
-    <x render-each=".members"></x>
-    <div class="msilent" @show="truthy? .hasSilent">
-      Holding but not announced to the tracker: <span @text=".silentText"></span>
-    </div>
-  </section>`,
-});
-
 // The latest /api/overview datasets (already sorted rarest-first), kept here so
 // the search box and status filter can narrow the list client-side, instantly,
 // without re-fetching. Refreshed on every overview poll.
@@ -683,12 +593,6 @@ const Dashboard = component({
     nodesStoredText: "0 B",
     // node drill-down: 0 or 1 NodeDetail vm
     nodeDetail: [],
-    // swarm screen: tracker membership reconciled against node reports
-    swarm: [],
-    swarmDatasetsCount: 0,
-    swarmRegistered: 0,
-    swarmIssues: 0,
-    swarmIssuesClass: "num",
     trackerDown: false,
     // newly-added-torrent toast. catalogSeq is the highest catalog seq seen; -1
     // means "not yet baselined" so the initial catalog load doesn't toast.
@@ -721,9 +625,6 @@ const Dashboard = component({
     isNode() {
       return this.route === "node";
     },
-    isSwarm() {
-      return this.route === "swarm";
-    },
     // Empty states. On the list, distinguish "swarm has nothing yet" from "your
     // search/filter matched nothing", so the message is actionable.
     noDatasets() {
@@ -749,9 +650,6 @@ const Dashboard = component({
     nodeMissing() {
       return this.route === "node" && this.status === "live" && this.nodeDetail.size === 0;
     },
-    isEmptySwarm() {
-      return this.route === "swarm" && this.status === "live" && this.swarm.size === 0;
-    },
     // Status filter chip highlighting.
     chipAll() {
       return this.statusFilter === "all" ? "chip active" : "chip";
@@ -774,9 +672,6 @@ const Dashboard = component({
     },
     navNodes() {
       return this.route === "nodes" || this.route === "node" ? "tab active" : "tab";
-    },
-    navSwarm() {
-      return this.route === "swarm" ? "tab active" : "tab";
     },
     // Re-derive the visible dataset list from the latest poll for a new query or
     // status filter (instant, no re-fetch). Shared by the input + chip handlers.
@@ -853,6 +748,7 @@ const Dashboard = component({
       return this.setError("")
         .setStatus("live")
         .setTs(res.ts)
+        .setTrackerDown(res.tracker_ok === false)
         .refilter(this.query, this.statusFilter)
         .setTotalCount(lastDatasets.length)
         .setTotDatasets(lastDatasets.length)
@@ -904,27 +800,6 @@ const Dashboard = component({
         .setNodesCount(res.nodes.length)
         .setNodesStoredText(human(stored));
     },
-    fetchSwarm(res, err) {
-      if (err) return this.setStatus("error").setError(String((err && err.message) || err));
-      let registered = 0;
-      let issues = 0;
-      for (const d of res.datasets) {
-        registered += d.registered;
-        issues +=
-          d.members.filter((m) => m.isolated).length +
-          d.members.filter((m) => m.node != null && !m.reporting).length +
-          d.silent.length;
-      }
-      return this.setError("")
-        .setStatus("live")
-        .setTs(res.ts)
-        .setTrackerDown(!res.tracker_ok)
-        .setSwarm(res.datasets.map((d) => SwarmDataset.Class.fromData(d)))
-        .setSwarmDatasetsCount(res.datasets.length)
-        .setSwarmRegistered(registered)
-        .setSwarmIssues(issues)
-        .setSwarmIssuesClass(issues === 0 ? "num ok" : "num warn");
-    },
     // Newly added datasets (from the tracker via the collector). Best-effort: a
     // failed poll is ignored. The first successful poll only baselines the seq so
     // the existing catalog doesn't toast; later ones toast anything newer.
@@ -953,9 +828,11 @@ const Dashboard = component({
       <a :class="$navOverview" data-link="1" href="/">Overview</a>
       <a :class="$navTransfers" data-link="1" href="/transfers">Transfers</a>
       <a :class="$navNodes" data-link="1" href="/nodes">Nodes</a>
-      <a :class="$navSwarm" data-link="1" href="/swarm">Swarm</a>
     </nav>
     <div class="banner" @show="truthy? .error" @text=".error"></div>
+    <div class="banner" @show="truthy? .trackerDown">
+      Tracker unreachable — connection status may be stale.
+    </div>
     <div class="toast" @show="truthy? .toastShow">
       <span class="toast-dot"></span>
       <span @text=".toastText"></span>
@@ -1057,22 +934,6 @@ const Dashboard = component({
       </div>
       <x render-each=".nodeDetail"></x>
     </div>
-
-    <div @show="$isSwarm">
-      <div class="summary">
-        <div class="stat"><span class="num" @text=".swarmDatasetsCount"></span><span class="lbl">datasets</span></div>
-        <div class="stat"><span class="num" @text=".swarmRegistered"></span><span class="lbl">registered peers</span></div>
-        <div class="stat"><span :class=".swarmIssuesClass" @text=".swarmIssues"></span><span class="lbl">issues</span></div>
-      </div>
-      <div class="banner" @show="truthy? .trackerDown">
-        Tracker unreachable — the membership shown may be stale.
-      </div>
-      <x render-each=".swarm"></x>
-      <div class="empty" @show="$isEmptySwarm">
-        No swarm membership yet. Once the tracker is up and nodes announce, each
-        registration appears here reconciled against what its node reports.
-      </div>
-    </div>
   </div>`,
 });
 
@@ -1089,7 +950,6 @@ const ROUTES = [
   { pattern: new URLPattern({ pathname: "/node/:label" }), route: "node", key: "label" },
   { pattern: new URLPattern({ pathname: "/transfers" }), route: "transfers" },
   { pattern: new URLPattern({ pathname: "/nodes" }), route: "nodes" },
-  { pattern: new URLPattern({ pathname: "/swarm" }), route: "swarm" },
   { pattern: new URLPattern({ pathname: "/*" }), route: "list" },
 ];
 
@@ -1115,8 +975,6 @@ function main() {
     NodeStatRow,
     NodeDetail,
     NodeTorrentRow,
-    SwarmDataset,
-    MemberRow,
     Torrent,
     NodeRow,
     FileRow,
@@ -1135,11 +993,6 @@ function main() {
     },
     async fetchNodes() {
       const r = await fetch(NODES_URL, { cache: "no-store" });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return r.json();
-    },
-    async fetchSwarm() {
-      const r = await fetch(SWARM_URL, { cache: "no-store" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       return r.json();
     },
@@ -1205,8 +1058,6 @@ export function getComponents() {
     NodeStatRow,
     NodeDetail,
     NodeTorrentRow,
-    SwarmDataset,
-    MemberRow,
     Torrent,
     NodeRow,
     FileRow,

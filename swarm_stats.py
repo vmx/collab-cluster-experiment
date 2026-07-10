@@ -61,12 +61,13 @@ def collect_by_torrent(nodes: list) -> list:
 
     Returns a list of (meta, rows), one per distinct torrent, sorted by name:
       rows: [{"id", "label", "bits": list[bool] of length num_pieces,
-              "state", "progress", "dl", "ul"}]
+              "state", "progress", "dl", "ul", "num_peers"}]
             id = node_key (stable swarm-wide identity, used for the DB / holders);
             label = short human name for display;
-            state/progress/dl/ul = this node's live transfer activity for the
-            torrent (for the overview's aggregate throughput / "replicating"
-            signal). Ownership views ignore these; only `bits` matters there.
+            state/progress/dl/ul/num_peers = this node's live transfer activity
+            for the torrent (aggregate throughput / "replicating" signal, and the
+            live connection count the detail view shows). Ownership views ignore
+            these; only `bits` matters there.
       meta: {info_hash, name, num_pieces, piece_length, total_size, files}
     """
     groups: dict = {}  # info_hash -> {"meta", "rows"}
@@ -90,7 +91,8 @@ def collect_by_torrent(nodes: list) -> list:
                               "state": t.get("state", ""),
                               "progress": float(t.get("progress") or 0.0),
                               "dl": int(t.get("download_rate") or 0),
-                              "ul": int(t.get("upload_rate") or 0)})
+                              "ul": int(t.get("upload_rate") or 0),
+                              "num_peers": int(t.get("num_peers") or 0)})
     return [(g["meta"], g["rows"])
             for g in sorted(groups.values(), key=lambda g: g["meta"]["name"])]
 
