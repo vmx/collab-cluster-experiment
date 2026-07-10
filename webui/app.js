@@ -692,7 +692,7 @@ const Dashboard = component({
       return `pill ${this.status}`;
     },
     updatedText() {
-      return this.ts ? `updated ${new Date(this.ts * 1000).toLocaleTimeString()}` : "";
+      return this.ts ? `updated ${new Date(this.ts * 1000).toLocaleTimeString([], { hour12: false })}` : "";
     },
     isList() {
       return this.route === "list";
