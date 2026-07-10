@@ -332,7 +332,9 @@ def build_torrent_detail(info_hash: str) -> dict:
         if meta["info_hash"] == info_hash:
             held = {r["label"] for r in rows}
             membership = _reconcile_dataset(info_hash, snaps, held)
-            return torrent_detail(meta, rows, membership)
+            # Stamp the response time like the other endpoints so the dashboard's
+            # "updated" clock keeps ticking on the detail (merged swarm) view.
+            return {"ts": time.time(), **torrent_detail(meta, rows, membership)}
     return None
 
 
@@ -447,6 +449,7 @@ def build_node_detail(label: str) -> dict:
         torrents.sort(key=lambda x: x["name"])
         disk = snap.get("disk") or {}
         return {
+            "ts": time.time(),
             "label": label, "datasets": len(torrents),
             "complete": sum(1 for t in torrents if t["complete"]),
             "stored": sum(t["stored"] for t in torrents),
