@@ -46,7 +46,7 @@ Endpoints:
                    tracker's announce-based membership reconciled against what
                    nodes report: each registered peer resolved to a node (or shown
                    as external), whether it's reporting and how many peers it has
-                   (isolated => announced but meshing with no one), plus `silent`
+                   (isolated => an incomplete node meshing with no one), plus `silent`
                    nodes that hold the dataset without appearing in the tracker.
   GET  /api/catalog/recent - {"ts", "added": [...]} recently added catalog
                    torrents (name, info_hash, seq, added_at). A background
@@ -460,8 +460,8 @@ def build_swarm() -> dict:
 
     Two independent views of one swarm: the tracker learns members from announces;
     nodes report the datasets they hold and their live peer counts. Cross-checking
-    them surfaces gaps a single view can't — a node that announced but isn't
-    meshing (registered, num_peers 0), a member the collector never hears from
+    them surfaces gaps a single view can't — an incomplete node that announced
+    but isn't meshing (registered, num_peers 0), a member the collector never hears from
     (registered but not reporting), or a node holding data yet not announcing
     (silent). Per dataset, keyed by the 40-hex truncated v2 info-hash the tracker
     uses (nodes report the full 64-hex v2 hash, so we truncate to match)."""
@@ -496,6 +496,11 @@ def build_swarm() -> dict:
             if label:
                 matched.add(label)
             conn = held.get(label)
+            # 0 peers only means "stuck" for a node that still needs data. A
+            # complete node with 0 peers is just idle-seeding: libtorrent drops
+            # redundant (seed-to-seed) connections, so a fully-distributed swarm
+            # settles to 0 connections — that's healthy, not isolated.
+            incomplete = conn is not None and conn["progress"] < 1.0
             members.append({
                 "addr": swarm_stats.addr_key(p["ip"], p["port"]),
                 "node": label,               # None => an announcer we don't collect from
@@ -503,7 +508,7 @@ def build_swarm() -> dict:
                 "age": p.get("age"),
                 "reporting": conn is not None,
                 "num_peers": conn["num_peers"] if conn else None,
-                "isolated": conn is not None and conn["num_peers"] == 0,
+                "isolated": incomplete and conn["num_peers"] == 0,
             })
         datasets.append({
             "info_hash": ih, "name": names.get(ih, ""),

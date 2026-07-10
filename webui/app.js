@@ -347,7 +347,9 @@ const DatasetRow = component({
 });
 
 // One in-flight transfer (a (node, dataset) pair that isn't complete yet): a
-// progress bar, percent, live rate and ETA. Backed by /transfers.
+// progress bar, percent, live rate and ETA. An incomplete transfer with 0 peers
+// is stuck — it has nobody to pull from — so flag it in the peers cell. Backed
+// by /transfers.
 const TransferRow = component({
   name: "TransferRow",
   fields: {
@@ -360,11 +362,13 @@ const TransferRow = component({
     rateText: "",
     etaText: "",
     peersText: "",
+    peersClass: "nnum",
   },
   statics: {
     fromData(tr) {
       const pct = Math.round(tr.progress * 100);
       const active = tr.download_rate > 0;
+      const stuck = tr.num_peers === 0;
       return this.make({
         node: `n${tr.node}`,
         name: tr.name,
@@ -374,7 +378,8 @@ const TransferRow = component({
         barClass: active ? "pbar-fill" : "pbar-fill stalled",
         rateText: active ? `▼${human(tr.download_rate)}/s` : "—",
         etaText: formatEta(tr.eta),
-        peersText: String(tr.num_peers),
+        peersText: stuck ? "0 · stuck" : String(tr.num_peers),
+        peersClass: stuck ? "nnum bad" : "nnum",
       });
     },
   },
@@ -385,7 +390,7 @@ const TransferRow = component({
     <span class="nnum" @text=".pctText"></span>
     <span class="nnum" @text=".rateText"></span>
     <span class="nnum" @text=".etaText"></span>
-    <span class="nnum" @text=".peersText"></span>
+    <span :class=".peersClass" @text=".peersText"></span>
   </div>`,
 });
 
@@ -492,9 +497,9 @@ const NodeDetail = component({
 // One registered peer in a dataset's membership, as the tracker learned it from
 // announces, reconciled against what that node reports to the collector. The
 // status column is the whole point of this view: it names the gap between the two
-// sources — a node that announced but is meshing with no one (isolated), one the
-// collector hasn't heard from (no snapshot), or an announcer we don't collect
-// from at all (external).
+// sources — an incomplete node that announced but is meshing with no one
+// (isolated), one the collector hasn't heard from (no snapshot), or an announcer
+// we don't collect from at all (external).
 const MemberRow = component({
   name: "MemberRow",
   fields: {
@@ -519,6 +524,11 @@ const MemberRow = component({
       } else if (m.isolated) {
         statusText = "isolated · 0 peers";
         statusClass = "mstatus bad";
+      } else if (m.reporting && m.num_peers === 0) {
+        // complete + 0 peers (isolated is false): nobody's pulling from it right
+        // now, which is a fine idle state for a seed, not a fault.
+        statusText = "idle · seeding";
+        statusClass = "mstatus muted";
       } else {
         statusText = `${m.num_peers} peer(s)`;
         statusClass = "mstatus ok";
@@ -665,6 +675,8 @@ const Dashboard = component({
     transfers: [],
     transfersCount: 0,
     transfersDlText: "0 B/s",
+    transfersStuck: 0,
+    transfersStuckClass: "num",
     // nodes screen
     nodes: [],
     nodesCount: 0,
@@ -871,12 +883,15 @@ const Dashboard = component({
       if (err) return this.setStatus("error").setError(String((err && err.message) || err));
       let dl = 0;
       for (const tr of res.transfers) dl += tr.download_rate;
+      const stuck = res.transfers.filter((tr) => tr.num_peers === 0).length;
       return this.setError("")
         .setStatus("live")
         .setTs(res.ts)
         .setTransfers(res.transfers.map((tr) => TransferRow.Class.fromData(tr)))
         .setTransfersCount(res.transfers.length)
-        .setTransfersDlText(`${human(dl)}/s`);
+        .setTransfersDlText(`${human(dl)}/s`)
+        .setTransfersStuck(stuck)
+        .setTransfersStuckClass(stuck ? "num bad" : "num");
     },
     fetchNodes(res, err) {
       if (err) return this.setStatus("error").setError(String((err && err.message) || err));
@@ -1007,6 +1022,7 @@ const Dashboard = component({
       <div class="summary">
         <div class="stat"><span class="num" @text=".transfersCount"></span><span class="lbl">in-flight transfers</span></div>
         <div class="stat"><span class="num" @text=".transfersDlText"></span><span class="lbl">total download</span></div>
+        <div class="stat"><span :class=".transfersStuckClass" @text=".transfersStuck"></span><span class="lbl">stuck (0 peers)</span></div>
       </div>
       <h3>Transfers in flight</h3>
       <div class="transfer-head">
