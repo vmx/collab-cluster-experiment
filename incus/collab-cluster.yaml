@@ -1,0 +1,35 @@
+# Incus profile for the collab-cluster-experiment swarm.
+#
+# Provisions the optional env file that the bt-node / bt-collector systemd units
+# read (~/.config/collab-cluster-experiment/env), pointing them at the tracker
+# and collector by Incus DNS name. The SAME content works in every container:
+# the tracker ignores these vars, the collector uses SWARM_TRACKER, nodes use
+# both. So this one profile applies to every container in the swarm.
+#
+# Assumptions (edit if they don't hold):
+#   - Your tracker/collector containers are named `tracker` and `collector`, so
+#     `tracker.incus` / `collector.incus` resolve on the bridge. Rename below if
+#     you use different container names.
+#   - The services run under the image's default `debian` user's `systemd --user`
+#     instance (home /home/debian). For a different user, change the path/owner.
+#   - The image has cloud-init (use the images: '/cloud' variants).
+#
+# `defer: true` writes the file in cloud-init's config stage, i.e. after the
+# `debian` user exists, so the owner below resolves (write_files otherwise runs
+# before user creation).
+#
+# Load:   incus profile create collab-cluster
+#         incus profile edit   collab-cluster < incus/collab-cluster.yaml
+# Apply:  incus launch <image> <name> --profile default --profile collab-cluster
+description: collab-cluster-experiment swarm env (tracker/collector by .incus name)
+config:
+  cloud-init.user-data: |
+    #cloud-config
+    write_files:
+      - path: /home/debian/.config/collab-cluster-experiment/env
+        owner: 'debian:debian'
+        permissions: '0644'
+        defer: true
+        content: |
+          SWARM_TRACKER=tracker.incus
+          SWARM_COLLECTOR=collector.incus
