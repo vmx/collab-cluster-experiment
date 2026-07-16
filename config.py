@@ -64,7 +64,11 @@ STATS_PORT_BASE = 8001   # node i serves its /stats JSON on STATS_PORT_BASE + i
 # there is no node enumeration, the collector learns nodes as they push.
 COLLECTOR_HOST = "0.0.0.0"               # bind address (accept remote nodes)
 COLLECTOR_PORT = 8100
-COLLECTOR_BASE = f"http://{HOST}:{COLLECTOR_PORT}"   # where nodes/viewers reach it
+# Address nodes/viewers reach the collector at (its bind is COLLECTOR_HOST above).
+# Loopback for a single-host run; set SWARM_COLLECTOR to the routable address
+# (e.g. the host's bridge IP) when nodes push from other hosts or containers.
+COLLECTOR_REACH_HOST = os.environ.get("SWARM_COLLECTOR") or HOST
+COLLECTOR_BASE = f"http://{COLLECTOR_REACH_HOST}:{COLLECTOR_PORT}"   # where nodes/viewers reach it
 COLLECTOR_URL = f"{COLLECTOR_BASE}/api/ingest"       # node push target (--collector default)
 
 # Web UI /summary tuning. The collector buckets each torrent's pieces into at most
@@ -82,8 +86,14 @@ WEBUI_MAX_COLS = 120
 # serves the torrent catalog, so a node needs only this URL to obtain both peers
 # and the .torrent itself.
 TRACKER_PORT = 6969      # de-facto standard BitTorrent tracker port
-TRACKER_URL = f"http://{HOST}:{TRACKER_PORT}/announce"
-TRACKER_BASE = f"http://{HOST}:{TRACKER_PORT}"
+TRACKER_BIND = BIND_HOST # bind on all interfaces so remote nodes/containers reach it
+# Address nodes/control reach the tracker at, and the announce URL baked into
+# torrents at build time. On a distributed run set SWARM_TRACKER to the routable
+# address before building torrents; defaults to loopback for a single-host run.
+# (make_torrent.py's --tracker overrides the baked announce URL per build.)
+TRACKER_HOST = os.environ.get("SWARM_TRACKER") or HOST
+TRACKER_BASE = f"http://{TRACKER_HOST}:{TRACKER_PORT}"
+TRACKER_URL = f"{TRACKER_BASE}/announce"
 
 # --- Torrent (BitTorrent v2 only) --------------------------------------------
 PIECE_SIZE = 256 * 1024          # 256 KiB; power of two (v2 requires >= 16 KiB)
@@ -121,3 +131,17 @@ def bt_port(node_id: int) -> int:
 
 def stats_port(node_id: int) -> int:
     return STATS_PORT_BASE + node_id
+
+
+def parse_endpoint(endpoint: str, default_port: int = STATS_PORT_BASE) -> tuple:
+    """Parse a control endpoint "host" or "host:port" into (host, port).
+
+    Nodes are addressed by where they listen, not by an id: on separate hosts
+    (or containers) each node has its own IP and can share one control port, so
+    the port is optional and defaults to the standard control port. Only when
+    several nodes share one IP (a single-host dev run) do you spell out the port.
+    IPv4/hostname only — good enough for the private network control runs on."""
+    host, sep, port = endpoint.rpartition(":")
+    if not sep:
+        return endpoint, default_port
+    return host, int(port)

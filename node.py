@@ -491,7 +491,12 @@ def push_loop(ns: NodeState, collector_url: str) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="BitTorrent v2 prototype node daemon")
-    ap.add_argument("--id", type=int, required=True)
+    # A node-local slot number: picks this node's data dir (nodes/<id>/) and,
+    # so several nodes can share one host in a dev run, offsets its bt/control
+    # ports. It is not how the node is addressed or identified in the swarm
+    # (that's the node_key UUID). One node per host is the common case, so id
+    # is optional and defaults to 0.
+    ap.add_argument("--id", type=int, default=0)
     ap.add_argument("--collector", default=config.COLLECTOR_URL,
                     help="collector ingest URL to push stats to "
                          "(default: %(default)s; pass '' to run without reporting)")
@@ -513,7 +518,11 @@ def main() -> None:
         threading.Thread(target=push_loop, args=(ns, args.collector),
                          daemon=True).start()
 
-    srv = ThreadingHTTPServer((config.HOST, config.stats_port(args.id)), make_handler(ns))
+    # Bind the control/stats server on all interfaces (not loopback) so control
+    # and the collector can reach it at this node's routable address — e.g. from
+    # the host into a container, or across separate servers. The port is never
+    # exposed to the internet; it lives on the private/bridge network only.
+    srv = ThreadingHTTPServer((config.BIND_HOST, config.stats_port(args.id)), make_handler(ns))
     # Handler threads must be daemonic: with HTTP/1.1 keep-alive they otherwise sit
     # blocked reading the next request on a persistent connection, and as non-daemon
     # threads they'd keep the process alive after Ctrl-C, hanging shutdown.
@@ -522,7 +531,7 @@ def main() -> None:
              else "(empty; assign torrents with control.py)")
     reporting = f"-> collector {args.collector}" if args.collector else "(not reporting)"
     print(f"node {args.id} up [{node_key[:8]}] — bt:{config.bt_port(args.id)} "
-          f"control/stats:http://{config.HOST}:{config.stats_port(args.id)}/  "
+          f"control/stats:http://{config.ADVERTISE_IP}:{config.stats_port(args.id)}/  "
           f"{reporting}  {state}", flush=True)
     try:
         srv.serve_forever()

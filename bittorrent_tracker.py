@@ -328,11 +328,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    srv = ThreadingHTTPServer((config.HOST, config.TRACKER_PORT), Handler)
+    srv = ThreadingHTTPServer((config.TRACKER_BIND, config.TRACKER_PORT), Handler)
     srv.daemon_threads = True  # don't let keep-alive handler threads block Ctrl-C
     # Watch the catalog dir so /catalog/subscribe can push new torrents.
     threading.Thread(target=watch_catalog, daemon=True).start()
-    print(f"tracker on http://{config.HOST}:{config.TRACKER_PORT}/  "
+    print(f"tracker on {config.TRACKER_BASE}/  "
           f"(announce + catalog + subscribe)", flush=True)
     try:
         srv.serve_forever()

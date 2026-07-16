@@ -1,12 +1,16 @@
 """Drive the running swarm by hand: list the torrent catalog, inspect what each
 node holds, and tell nodes to serve or download specific torrents.
 
-    python control.py list                         # catalog + live peers per torrent
-    python control.py status                       # what every node holds now
-    python control.py add 0 media --mode serve --path /data/media  # serve in place
-    python control.py add 1 media --mode download                  # node 1 downloads
-    python control.py remove 1 media               # node 1 drops 'media'
-    python control.py subscribe                    # watch for newly added torrents
+    python control.py list                              # catalog + live peers per torrent
+    python control.py status 10.0.0.5                   # what that node holds now
+    python control.py add 10.0.0.5 media --mode serve --path /data/media  # serve in place
+    python control.py add 10.0.0.6 media --mode download                  # that node downloads
+    python control.py remove 10.0.0.6 media             # that node drops 'media'
+    python control.py subscribe                         # watch for newly added torrents
+
+Nodes are addressed by their control endpoint, "host[:port]" (port defaults to
+the standard control port, so on its own IP a node is just its address). Several
+nodes on one host in a dev run are told apart by port, e.g. 127.0.0.1:8002.
 
 Torrents are referred to by name (the basename of the shared file/dir), as shown
 by `list`. Build the catalog first with `python make_torrent.py [paths...]`.
@@ -21,18 +25,19 @@ import config
 import swarm_stats
 
 
-def _node_url(node_id: int, path: str) -> str:
-    return f"http://{config.HOST}:{config.stats_port(node_id)}{path}"
+def _node_url(endpoint: str, path: str) -> str:
+    host, port = config.parse_endpoint(endpoint)
+    return f"http://{host}:{port}{path}"
 
 
-def _get(node_id: int):
-    with urllib.request.urlopen(_node_url(node_id, "/stats"), timeout=2.0) as r:
+def _get(endpoint: str):
+    with urllib.request.urlopen(_node_url(endpoint, "/stats"), timeout=2.0) as r:
         return json.loads(r.read().decode())
 
 
-def _post(node_id: int, path: str, payload: dict):
+def _post(endpoint: str, path: str, payload: dict):
     data = json.dumps(payload).encode()
-    req = urllib.request.Request(_node_url(node_id, path), data=data,
+    req = urllib.request.Request(_node_url(endpoint, path), data=data,
                                  headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=5.0) as r:
@@ -72,18 +77,18 @@ def cmd_list(_args) -> None:
 
 
 def cmd_status(args) -> None:
-    # Control is operator-local: you ask the node you run (on this host) what it
-    # holds. Swarm-wide status across all nodes comes from the collector
-    # (piece_map / report), not by scanning every node.
-    nid = args.node
+    # Ask one node directly what it holds, by its control endpoint. Swarm-wide
+    # status across all nodes comes from the collector (piece_map / report),
+    # which every node pushes to, rather than by scanning each node here.
+    ep = args.endpoint
     try:
-        snap = _get(nid)
+        snap = _get(ep)
     except Exception:
-        print(f"node {nid}: (down)")
+        print(f"{ep}: (down)")
         return
     torrents = snap.get("torrents") or []
     if not torrents:
-        print(f"node {nid}: idle (no torrents)")
+        print(f"{ep}: idle (no torrents)")
         return
     parts = []
     for t in torrents:
@@ -91,22 +96,22 @@ def cmd_status(args) -> None:
         role = "seed" if complete else "leech"
         parts.append(f"{t.get('name', '?')}[{role} "
                      f"{(t.get('progress') or 0) * 100:.0f}% p{t.get('num_peers') or 0}]")
-    print(f"node {nid}: " + "  ".join(parts))
+    print(f"{ep}: " + "  ".join(parts))
 
 
 def cmd_add(args) -> None:
     if args.mode == "serve" and not args.path:
         sys.exit("--mode serve needs --path <the local file/dir to serve>")
-    res = _post(args.node, "/add",
+    res = _post(args.endpoint, "/add",
                 {"name": args.name, "mode": args.mode, "path": args.path})
-    print(f"node {args.node}: {json.dumps(res)}")
+    print(f"{args.endpoint}: {json.dumps(res)}")
     if res.get("error"):
         sys.exit(1)
 
 
 def cmd_remove(args) -> None:
-    res = _post(args.node, "/remove", {"name": args.name})
-    print(f"node {args.node}: {json.dumps(res)}")
+    res = _post(args.endpoint, "/remove", {"name": args.name})
+    print(f"{args.endpoint}: {json.dumps(res)}")
 
 
 def cmd_subscribe(args) -> None:
@@ -135,12 +140,17 @@ def main() -> None:
 
     sub.add_parser("list", help="list catalog torrents").set_defaults(func=cmd_list)
 
-    p_status = sub.add_parser("status", help="show what one (local) node holds")
-    p_status.add_argument("node", type=int, help="node id to query on this host")
+    ep_help = "node control endpoint host[:port] (port defaults to the standard " \
+              f"control port {config.STATS_PORT_BASE})"
+    default_ep = f"{config.HOST}:{config.STATS_PORT_BASE}"
+
+    p_status = sub.add_parser("status", help="show what one node holds")
+    p_status.add_argument("endpoint", nargs="?", default=default_ep,
+                          help=f"{ep_help} (default: {default_ep})")
     p_status.set_defaults(func=cmd_status)
 
     p_add = sub.add_parser("add", help="tell a node to serve/download a torrent")
-    p_add.add_argument("node", type=int)
+    p_add.add_argument("endpoint", help=ep_help)
     p_add.add_argument("name", help="catalog torrent name (see `list`)")
     p_add.add_argument("--mode", choices=["serve", "download"], default="download",
                        help="serve in place from --path, or download a copy")
@@ -149,7 +159,7 @@ def main() -> None:
     p_add.set_defaults(func=cmd_add)
 
     p_rm = sub.add_parser("remove", help="tell a node to drop a torrent")
-    p_rm.add_argument("node", type=int)
+    p_rm.add_argument("endpoint", help=ep_help)
     p_rm.add_argument("name")
     p_rm.set_defaults(func=cmd_remove)
 

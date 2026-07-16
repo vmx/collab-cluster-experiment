@@ -4,6 +4,7 @@ a small on-disk catalog the nodes can resolve by name.
 
     python make_torrent.py /path/to/dir-or-file [more paths...]
     python make_torrent.py                # no args: generate two sample torrents
+    python make_torrent.py --tracker http://10.0.0.1:6969/announce dir  # explicit announce URL
 
 Each torrent is written to the catalog as a single file under config.TORRENTS_DIR:
     <name>.torrent   the torrent itself
@@ -15,6 +16,7 @@ that already holds it the local directory to serve from (`control.py add …
 
 v2-only => SHA-256 merkle hashing, no v1/hybrid.
 """
+import argparse
 import glob
 import os
 import sys
@@ -84,7 +86,8 @@ def _is_pad(fs, i: int) -> bool:
     return "/.pad/" in fs.file_path(i).replace(os.sep, "/")
 
 
-def make_torrent(source: str) -> dict:
+def make_torrent(source: str, tracker_url: str = None) -> dict:
+    tracker_url = tracker_url or config.TRACKER_URL
     source = os.path.abspath(source)
     if not os.path.exists(source):
         sys.exit(f"error: content path does not exist: {source}")
@@ -97,7 +100,7 @@ def make_torrent(source: str) -> dict:
         sys.exit(f"error: no data found under {source}")
 
     ct = lt.create_torrent(fs, config.PIECE_SIZE, flags=lt.create_torrent.v2_only)
-    ct.add_tracker(config.TRACKER_URL)
+    ct.add_tracker(tracker_url)
     # Private => discovery is tracker-only: libtorrent disables PEX, DHT and LSD
     # for this torrent, so peers find each other purely by announcing to the
     # tracker. (The private flag lives in the info-dict, so it is part of the
@@ -131,14 +134,21 @@ def make_torrent(source: str) -> dict:
     return {"name": name, "info_hash": info_hash}
 
 
-def main(sources=None) -> None:
+def main(sources=None, tracker_url: str = None) -> None:
     if not sources:
         sources = build_sample(config.SAMPLE_DIR)
     elif isinstance(sources, str):
         sources = [sources]
     for src in sources:
-        make_torrent(src)
+        make_torrent(src, tracker_url)
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:] or None)
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("paths", nargs="*",
+                    help="files/dirs to make torrents from (default: sample content)")
+    ap.add_argument("--tracker", default=config.TRACKER_URL,
+                    help="announce URL to bake into the torrents (default: %(default)s)")
+    args = ap.parse_args()
+    main(args.paths or None, args.tracker)
