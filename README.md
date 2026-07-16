@@ -95,7 +95,7 @@ python make_torrent.py                       # built-in sample (two torrents)
 python make_torrent.py ~/photos ~/some/file  # or build your own catalog
 
 # 2. Start the tracker. It serves announces AND hosts the torrent catalog, so it
-#    should be up before nodes/control run. Listens on :8000.
+#    should be up before nodes/control run. Listens on :6969.
 python bittorrent_tracker.py
 
 # 3. Start the collector (start any time; nodes buffer nothing, they just push
@@ -250,9 +250,9 @@ curl -s http://127.0.0.1:8100/api/node/0    | python -m json.tool
 curl -s "http://127.0.0.1:8100/api/torrent/$(curl -s http://127.0.0.1:8100/api/overview | python -c 'import sys,json;print(json.load(sys.stdin)["datasets"][0]["info_hash"])')" | python -m json.tool
 
 # the tracker's view of the swarm, and the catalog it hosts
-curl -s http://127.0.0.1:8000/stats | python -m json.tool
-curl -s http://127.0.0.1:8000/catalog | python -m json.tool
-curl -sN http://127.0.0.1:8000/catalog/subscribe   # live stream of new torrents (SSE)
+curl -s http://127.0.0.1:6969/stats | python -m json.tool
+curl -s http://127.0.0.1:6969/catalog | python -m json.tool
+curl -sN http://127.0.0.1:6969/catalog/subscribe   # live stream of new torrents (SSE)
 
 # what one (local) node is doing right now
 python control.py status 0
@@ -279,7 +279,7 @@ watch -n 2 python piece_map.py  # refresh every 2s (use the `watch` CLI tool)
 
 ## Ports
 
-- Tracker (`bittorrent_tracker.py`): `8000`
+- Tracker (`bittorrent_tracker.py`): `6969`
 - Collector (`collector.py`): `8100`
 - Node *i* BitTorrent: `6881 + i`
 - Node *i* control/stats HTTP: `8001 + i`

@@ -81,7 +81,7 @@ WEBUI_MAX_COLS = 120
 # (bittorrent_tracker.py) — it accepts any info-hash (no whitelist) and also
 # serves the torrent catalog, so a node needs only this URL to obtain both peers
 # and the .torrent itself.
-TRACKER_PORT = 8000
+TRACKER_PORT = 6969      # de-facto standard BitTorrent tracker port
 TRACKER_URL = f"http://{HOST}:{TRACKER_PORT}/announce"
 TRACKER_BASE = f"http://{HOST}:{TRACKER_PORT}"
 
