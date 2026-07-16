@@ -1,0 +1,9 @@
+[Unit]
+Description=BitTorrent v2 prototype — node daemon (id 0), BT port 6881 / control 8001
+
+[Service]
+ExecStart=python3 node.py --id 0
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

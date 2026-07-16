@@ -1,0 +1,9 @@
+[Unit]
+Description=BitTorrent v2 prototype — stats collector + web UI, port 8100
+
+[Service]
+ExecStart=python3 collector.py
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
