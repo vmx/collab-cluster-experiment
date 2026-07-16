@@ -7,9 +7,9 @@ services — you still run those by hand.
 
 | Unit | Component | Listens on |
 | --- | --- | --- |
-| `bt-tracker.service`   | `bittorrent_tracker.py` — announce + catalog | `6969` |
-| `bt-collector.service` | `collector.py` — stats collector + web UI    | `8100` |
-| `bt-node.service`      | `node.py` — one node daemon                  | BT `6881`, control `8001` |
+| `collab-cluster-tracker.service`   | `bittorrent_tracker.py` — announce + catalog | `6969` |
+| `collab-cluster-collector.service` | `collector.py` — stats collector + web UI    | `8100` |
+| `collab-cluster-node.service`      | `node.py` — one node daemon                  | BT `6881`, control `8001` |
 
 No paths are hardcoded: the units run `python3` from `PATH` and, being user
 units, default their working directory to the user's home. So put the repo at
@@ -21,22 +21,22 @@ must have the `libtorrent` binding importable.
 
 ```sh
 mkdir -p ~/.config/systemd/user
-cp systemd/bt-*.service ~/.config/systemd/user/
+cp systemd/collab-cluster-*.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 
 # Build the catalog once (the tracker serves it; its :6969 announce URL is baked
 # into the torrents).
 python make_torrent.py
 
-systemctl --user enable --now bt-tracker bt-collector bt-node
+systemctl --user enable --now collab-cluster-tracker collab-cluster-collector collab-cluster-node
 ```
 
 ## Use
 
 ```sh
-systemctl --user status bt-tracker bt-collector bt-node
-journalctl --user -u bt-node -f      # follow one component's logs
-systemctl --user restart bt-node
+systemctl --user status collab-cluster-tracker collab-cluster-collector collab-cluster-node
+journalctl --user -u collab-cluster-node -f      # follow one component's logs
+systemctl --user restart collab-cluster-node
 ```
 
 Then drive the swarm as usual, e.g. `python control.py add 127.0.0.1:8001 media
@@ -47,7 +47,7 @@ endpoint `host[:port]`), and open the dashboard at <http://127.0.0.1:8100/>.
 
 The units carry no addresses. On a single host they need nothing — `config.py`
 defaults every service to loopback. When the tracker/collector run elsewhere,
-`bt-node` and `bt-collector` read an optional
+`collab-cluster-node` and `collab-cluster-collector` read an optional
 `~/.config/collab-cluster-experiment/env` (the tracker needs none — it only gets
 dialed):
 

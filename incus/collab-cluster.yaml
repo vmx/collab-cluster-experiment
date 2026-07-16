@@ -1,6 +1,6 @@
 # Incus profile for the collab-cluster-experiment swarm.
 #
-# Provisions the optional env file that the bt-node / bt-collector systemd units
+# Provisions the optional env file that the collab-cluster-node / collab-cluster-collector systemd units
 # read (~/.config/collab-cluster-experiment/env), pointing them at the tracker
 # and collector by Incus DNS name. The SAME content works in every container:
 # the tracker ignores these vars, the collector uses SWARM_TRACKER, nodes use

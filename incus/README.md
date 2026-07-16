@@ -64,10 +64,10 @@ that container plays. Run these as the `debian` user — `su - debian -c` opens 
 login session so `systemctl --user` finds its user bus (`XDG_RUNTIME_DIR`):
 
 ```sh
-incus exec tracker   -- su - debian -c 'systemctl --user enable --now bt-tracker'
-incus exec collector -- su - debian -c 'systemctl --user enable --now bt-collector'
-incus exec node0     -- su - debian -c 'systemctl --user enable --now bt-node'
-incus exec node1     -- su - debian -c 'systemctl --user enable --now bt-node'
+incus exec tracker   -- su - debian -c 'systemctl --user enable --now collab-cluster-tracker'
+incus exec collector -- su - debian -c 'systemctl --user enable --now collab-cluster-collector'
+incus exec node0     -- su - debian -c 'systemctl --user enable --now collab-cluster-node'
+incus exec node1     -- su - debian -c 'systemctl --user enable --now collab-cluster-node'
 ```
 
 `systemd --user` units only start at boot if lingering is on, so enable it once
