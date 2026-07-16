@@ -49,15 +49,16 @@ class NodeState:
     def __init__(self, node_id: int, node_key: str, ses: "lt.session"):
         self.node_id = node_id
         # Stable swarm-wide identity (a persisted UUID). The integer node_id is a
-        # local convenience (ports, resume dir, the human label); node_key is what
-        # the collector keys every metric by, so a restart keeps the same series.
+        # local convenience (ports, resume dir); node_key is what the collector
+        # keys every metric by, so a restart keeps the same series. The display
+        # label is the node's swarm address (see config.node_label).
         self.node_key = node_key
         self.ses = ses
         self.lock = threading.Lock()
         # info_hash(v2 str) -> {name, save_path, ti, files, handle}
         self.torrents: dict = {}
         self.session_stats: dict = {}
-        self.snapshot: dict = {"node_key": node_key, "label": str(node_id),
+        self.snapshot: dict = {"node_key": node_key, "label": config.node_label(node_id),
                                "torrents": [], "peers": []}
         self.stop = threading.Event()
 
@@ -390,7 +391,7 @@ def session_loop(ns: NodeState) -> None:
 
         snap = {
             "node_key": ns.node_key,    # stable swarm-wide identity
-            "label": str(ns.node_id),   # short, human (used for display)
+            "label": config.node_label(ns.node_id),  # swarm address, used for display
             "ts": time.time(),
             # The routable address this node announces to the tracker; the
             # collector matches tracker membership against (advertise_ip, bt_port)

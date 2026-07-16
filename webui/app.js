@@ -82,7 +82,7 @@ function cellForAvail(count, maxNodes) {
 // One node's tile in a dataset's spread strip: how much of the dataset it holds.
 function cellForNode(label, frac) {
   const base = cellForFrac(frac);
-  return { style: base.style, title: `n${label}: ${Math.round(frac * 100)}% of dataset` };
+  return { style: base.style, title: `${label}: ${Math.round(frac * 100)}% of dataset` };
 }
 
 // Copy count colouring. No replication policy is configured, so this is relative,
@@ -143,7 +143,7 @@ const NodeRow = component({
   methods: {
     headText() {
       const pct = this.numPieces ? (100 * this.have) / this.numPieces : 0;
-      return `n${this.label} ${this.role.padEnd(5)} ${pct.toFixed(1).padStart(5)}%  ${this.have}/${this.numPieces}`;
+      return `${this.label} ${this.role.padEnd(5)} ${pct.toFixed(1).padStart(5)}%  ${this.have}/${this.numPieces}`;
     },
     storedText() {
       return human(this.stored);
@@ -191,8 +191,8 @@ const FileRow = component({
       let disp = f.path;
       const prefix = `${torrentName}/`;
       if (torrentName && disp.startsWith(prefix)) disp = disp.slice(prefix.length);
-      const holders = f.full_holders.length ? f.full_holders.map((l) => `n${l}`).join(",") : "-";
-      const partial = f.partial.map((p) => `n${p.label}=${Math.round(p.pct)}%`).join(" ");
+      const holders = f.full_holders.length ? f.full_holders.join(",") : "-";
+      const partial = f.partial.map((p) => `${p.label}=${Math.round(p.pct)}%`).join(" ");
       return this.make({
         name: disp,
         size: f.size,
@@ -270,7 +270,7 @@ const Torrent = component({
       if ((t.external || []).length)
         notes.push(`${t.external.length} external announcer(s): ${t.external.join(", ")}`);
       if ((t.off_dataset || []).length)
-        notes.push(`announced but not holding it: ${t.off_dataset.map((l) => "n" + l).join(", ")}`);
+        notes.push(`announced but not holding it: ${t.off_dataset.join(", ")}`);
       return this.make({
         name: t.name,
         infoHash: t.info_hash,
@@ -443,7 +443,7 @@ const NodeStatRow = component({
   statics: {
     fromData(n) {
       return this.make({
-        label: `n${n.label}`,
+        label: n.label,
         href: `/node/${encodeURIComponent(n.label)}`,
         datasetsText: `${n.complete}/${n.datasets}`,
         storedText: human(n.stored),
@@ -514,7 +514,7 @@ const NodeDetail = component({
   statics: {
     fromData(n) {
       return this.make({
-        label: `n${n.label}`,
+        label: n.label,
         metaText: `${n.complete}/${n.datasets} complete  ·  ${diskFreeText(n.disk_free, n.disk_total)} free  ·  ▼${human(n.download_rate)}/s ▲${human(n.upload_rate)}/s  ·  ${n.num_peers} peers`,
         storedText: human(n.stored),
         rows: n.torrents.map((t) => NodeTorrentRow.Class.fromData(t)),

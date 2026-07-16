@@ -56,6 +56,7 @@ import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote
 
 import catalog
 import config
@@ -623,8 +624,10 @@ def make_handler():
                 self._send_cached_json(body, etag)
             elif path.startswith("/api/node/"):
                 # Drill-down for one node. Cached per label; None (node not
-                # reporting) is served as a 404 rather than cached empty.
-                label = path[len("/api/node/"):]
+                # reporting) is served as a 404 rather than cached empty. The
+                # label is a URL-encoded "ip:port" (the ':' is percent-escaped by
+                # the client), so decode it back before matching.
+                label = unquote(path[len("/api/node/"):])
                 body, etag = cached_payload(
                     "node:" + label,
                     lambda: build_node_detail(label) or {"error": "unknown"},

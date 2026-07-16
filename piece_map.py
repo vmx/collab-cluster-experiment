@@ -125,7 +125,7 @@ def render_torrent(meta: dict, rows: list, source: str) -> None:
         stored = sum(piece_size(i, piece_length, total_size, num_pieces)
                      for i, b in enumerate(r["bits"]) if b)
         role = "seed" if have == num_pieces else "leech"
-        label = f"  n{r['label']} {role:<5} {pct:5.1f}% {have:>4}/{num_pieces:<4}"
+        label = f"  {r['label']} {role:<5} {pct:5.1f}% {have:>4}/{num_pieces:<4}"
         print(f"{label:<{label_w}} {render_bits(r['bits'], num_pieces, cols)}  {human(stored)}")
     print(f"{'  availability  (#holders)':<{label_w}} {render_avail(avail, num_pieces, cols)}")
 
@@ -145,8 +145,8 @@ def render_torrent(meta: dict, rows: list, source: str) -> None:
             disp = f["path"]
             if name and disp.startswith(name + "/"):
                 disp = disp[len(name) + 1:]
-            holders = ",".join(f"n{labels.get(i, i)}" for i in f["full_holders"]) or "-"
-            partial = " ".join(f"n{labels.get(i, i)}={pct:.0f}%" for i, pct in f["partial"])
+            holders = ",".join(f"{labels.get(i, i)}" for i in f["full_holders"]) or "-"
+            partial = " ".join(f"{labels.get(i, i)}={pct:.0f}%" for i, pct in f["partial"])
             extra = ("  partial: " + partial) if partial else ""
             print(f"  {disp:<34} {human(f['size']):>9} {f['full_copies']:>5} "
                   f"{f['recon_copies']:>6}  {holders}{extra}")

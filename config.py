@@ -133,6 +133,15 @@ def stats_port(node_id: int) -> int:
     return STATS_PORT_BASE + node_id
 
 
+def node_label(node_id: int) -> str:
+    """A node's display label: its swarm address, advertise IP + BitTorrent port.
+    Same "ip:port" form as swarm_stats.addr_key (the address the tracker records),
+    so our own nodes and external announcers render alike in the swarm views, and
+    it stays unique whether nodes are on separate hosts or co-located (the port
+    disambiguates) — no hostname or node id needed."""
+    return f"{ADVERTISE_IP}:{bt_port(node_id)}"
+
+
 def parse_endpoint(endpoint: str, default_port: int = STATS_PORT_BASE) -> tuple:
     """Parse a control endpoint "host" or "host:port" into (host, port).
 
