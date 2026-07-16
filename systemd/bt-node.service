@@ -1,8 +1,13 @@
 [Unit]
-Description=BitTorrent v2 prototype — node daemon (id 0), BT port 6881 / control 8001
+Description=BitTorrent v2 prototype — node daemon (default BT 6881 / control 8001)
 
 [Service]
-ExecStart=python3 node.py --id 0
+# Optional per-deployment overrides (SWARM_TRACKER / SWARM_COLLECTOR). Absent on a
+# single-host run, where config.py's loopback defaults apply; provided (e.g. with
+# .incus names) when the tracker/collector live on other hosts. Leading '-' =
+# don't fail if the file is missing.
+EnvironmentFile=-%h/.config/collab-cluster-experiment/env
+ExecStart=python3 node.py
 Restart=on-failure
 
 [Install]

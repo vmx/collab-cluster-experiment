@@ -2,6 +2,10 @@
 Description=BitTorrent v2 prototype — stats collector + web UI, port 8100
 
 [Service]
+# The collector polls the tracker, so it needs SWARM_TRACKER when the tracker is
+# on another host. Optional: absent on a single-host run (loopback default).
+# Leading '-' = don't fail if the file is missing.
+EnvironmentFile=-%h/.config/collab-cluster-experiment/env
 ExecStart=python3 collector.py
 Restart=on-failure
 

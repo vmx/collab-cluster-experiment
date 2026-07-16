@@ -9,7 +9,7 @@ services — you still run those by hand.
 | --- | --- | --- |
 | `bt-tracker.service`   | `bittorrent_tracker.py` — announce + catalog | `6969` |
 | `bt-collector.service` | `collector.py` — stats collector + web UI    | `8100` |
-| `bt-node.service`      | `node.py --id 0` — one node daemon           | BT `6881`, control `8001` |
+| `bt-node.service`      | `node.py` — one node daemon                  | BT `6881`, control `8001` |
 
 No paths are hardcoded: the units run `python3` from `PATH` and, being user
 units, default their working directory to the user's home. So put the repo at
@@ -39,10 +39,25 @@ journalctl --user -u bt-node -f      # follow one component's logs
 systemctl --user restart bt-node
 ```
 
-Then drive the swarm as usual, e.g. `python control.py add 0 media --mode serve
---path data/sample/media`, and open the dashboard at <http://127.0.0.1:8100/>.
+Then drive the swarm as usual, e.g. `python control.py add 127.0.0.1:8001 media
+--mode serve --path data/sample/media` (nodes are addressed by their control
+endpoint `host[:port]`), and open the dashboard at <http://127.0.0.1:8100/>.
 
-Running each in its own container instead of one host? They reach each other by
-address, so point the node at the others' hosts (the tracker URL baked into the
-torrents and the node's `--collector` / `SWARM_ADVERTISE_IP`, all in
-`config.py`) rather than the `127.0.0.1` defaults.
+## Spread across hosts / containers
+
+The units carry no addresses. On a single host they need nothing — `config.py`
+defaults every service to loopback. When the tracker/collector run elsewhere,
+`bt-node` and `bt-collector` read an optional
+`~/.config/collab-cluster-experiment/env` (the tracker needs none — it only gets
+dialed):
+
+```sh
+# ~/.config/collab-cluster-experiment/env  — same content works in every container
+SWARM_TRACKER=<tracker-address>      # e.g. tracker.incus, or a host/IP
+SWARM_COLLECTOR=<collector-address>  # e.g. collector.incus
+```
+
+Build torrents with the matching announce URL so it's baked in correctly:
+`python make_torrent.py --tracker http://<tracker-address>:6969/announce …`
+(or export `SWARM_TRACKER` before running it). The peer layer needs nothing —
+each node auto-detects its own routable address (`SWARM_ADVERTISE_IP` overrides).
