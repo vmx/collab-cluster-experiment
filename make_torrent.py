@@ -5,7 +5,6 @@ a small on-disk catalog the nodes can resolve by name.
     python make_torrent.py /path/to/dir-or-file [more paths...]
     python make_torrent.py                # no args: generate two sample torrents
     python make_torrent.py --tracker http://10.0.0.1:6969/announce dir  # explicit announce URL
-    python make_torrent.py --publish dir  # also register it on the tracker over HTTP
 
 Each torrent is written to the catalog as a single file under config.TORRENTS_DIR:
     <name>.torrent   the torrent itself
@@ -15,9 +14,10 @@ parsing it, so there is no sidecar. To seed the content in place, hand the node
 that already holds it the local directory to serve from (`control.py add …
 --mode serve --path <dir>`); other nodes download into nodes/<id>/<name>/.
 
-With --publish, each built torrent is also POSTed to the tracker's catalog
-(catalog.publish -> POST /catalog/<name>.torrent), so you can build on a node and
-register it centrally without writing to the tracker's own data/torrents dir.
+The catalog on the tracker is normally populated as a side effect of the first
+node serving new content: `control.py add … --mode serve --path` has that node
+build the torrent (via build_torrent below) and publish it. This CLI is the
+standalone/offline way to build a .torrent into the local catalog dir.
 
 v2-only => SHA-256 merkle hashing, no v1/hybrid.
 """
@@ -28,7 +28,6 @@ import sys
 
 import libtorrent as lt
 
-import catalog
 import config
 
 # Built-in sample: two separate content roots => two separate torrents, so the
@@ -92,18 +91,25 @@ def _is_pad(fs, i: int) -> bool:
     return "/.pad/" in fs.file_path(i).replace(os.sep, "/")
 
 
-def make_torrent(source: str, tracker_url: str = None, publish: bool = False) -> dict:
+def build_torrent(source: str, tracker_url: str = None) -> tuple:
+    """Build a v2-only .torrent for `source` (a local file/dir) and return
+    (name, data): the torrent's own name and the bencoded .torrent bytes.
+
+    Pure — it neither writes to the catalog nor prints, so callers decide what to
+    do with the bytes: the CLI writes them into the local catalog dir; a node
+    (node.py's add path) publishes them to the tracker. Raises ValueError on bad
+    input rather than exiting, so it's safe to call from a long-running daemon."""
     tracker_url = tracker_url or config.TRACKER_URL
     source = os.path.abspath(source)
     if not os.path.exists(source):
-        sys.exit(f"error: content path does not exist: {source}")
+        raise ValueError(f"content path does not exist: {source}")
     seed_save_path = os.path.dirname(source)  # parent of the content root
 
     fs = lt.file_storage()
     # add_files recurses into directories and preserves the nested layout.
     lt.add_files(fs, source)
     if fs.total_size() == 0:
-        sys.exit(f"error: no data found under {source}")
+        raise ValueError(f"no data found under {source}")
 
     ct = lt.create_torrent(fs, config.PIECE_SIZE, flags=lt.create_torrent.v2_only)
     ct.add_tracker(tracker_url)
@@ -115,15 +121,21 @@ def make_torrent(source: str, tracker_url: str = None, publish: bool = False) ->
     ct.set_creator("bittorrent-prototype")
     ct.set_comment(f"v2-only prototype content: {os.path.basename(source)}")
     lt.set_piece_hashes(ct, seed_save_path)  # hash the files as they sit on disk
+    return fs.name(), lt.bencode(ct.generate())
 
-    data = lt.bencode(ct.generate())
+
+def make_torrent(source: str, tracker_url: str = None) -> dict:
+    """CLI/offline builder: build the torrent and write it into the local catalog
+    dir (config.TORRENTS_DIR), printing a human-readable summary. Returns
+    {"name", "info_hash"}."""
+    name, data = build_torrent(source, tracker_url)
     os.makedirs(config.TORRENTS_DIR, exist_ok=True)
-    torrent_path = catalog_torrent_path(fs.name())
+    torrent_path = catalog_torrent_path(name)
     with open(torrent_path, "wb") as f:
         f.write(data)
 
     ti = lt.torrent_info(torrent_path)
-    name = ti.name()
+    fs = ti.files()
     info_hash = str(ti.info_hashes().v2)
 
     real_files = [(fs.file_path(i), fs.file_size(i)) for i in range(fs.num_files())
@@ -135,26 +147,22 @@ def make_torrent(source: str, tracker_url: str = None, publish: bool = False) ->
     print(f"  pieces       : {ti.num_pieces()} x {ti.piece_length()} bytes")
     # A node on this host can serve the content in place by pointing --path at it
     # (its parent becomes libtorrent's save_path).
-    print(f"  serve in place with: --mode serve --path {source}")
+    print(f"  serve in place with: --mode serve --path {os.path.abspath(source)}")
     for path, size in real_files:
         print(f"    - {path}  ({size} bytes)")
-
-    if publish:
-        # Register it on the tracker over HTTP, so a node that built the torrent
-        # doesn't need filesystem access to the tracker's catalog dir. The tracker
-        # re-derives name/info-hash from the bytes; echo them back as confirmation.
-        echo = catalog.publish(name, data)
-        print(f"  published to : {config.TRACKER_BASE}/catalog/{echo['name']}.torrent")
     return {"name": name, "info_hash": info_hash}
 
 
-def main(sources=None, tracker_url: str = None, publish: bool = False) -> None:
+def main(sources=None, tracker_url: str = None) -> None:
     if not sources:
         sources = build_sample(config.SAMPLE_DIR)
     elif isinstance(sources, str):
         sources = [sources]
     for src in sources:
-        make_torrent(src, tracker_url, publish)
+        try:
+            make_torrent(src, tracker_url)
+        except ValueError as e:
+            sys.exit(f"error: {e}")
 
 
 if __name__ == "__main__":
@@ -164,8 +172,5 @@ if __name__ == "__main__":
                     help="files/dirs to make torrents from (default: sample content)")
     ap.add_argument("--tracker", default=config.TRACKER_URL,
                     help="announce URL to bake into the torrents (default: %(default)s)")
-    ap.add_argument("--publish", action="store_true",
-                    help="also upload each built torrent to the tracker's catalog "
-                         f"over HTTP ({config.TRACKER_BASE}/catalog/<name>.torrent)")
     args = ap.parse_args()
-    main(args.paths or None, args.tracker, args.publish)
+    main(args.paths or None, args.tracker)

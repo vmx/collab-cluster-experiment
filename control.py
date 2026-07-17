@@ -13,7 +13,11 @@ the standard control port, so on its own IP a node is just its address). Several
 nodes on one host in a dev run are told apart by port, e.g. 127.0.0.1:8002.
 
 Torrents are referred to by name (the basename of the shared file/dir), as shown
-by `list`. Build the catalog first with `python make_torrent.py [paths...]`.
+by `list`. Adding brand-new content is a single step: `add <node> <name> --mode
+serve --path <dir>` has the node build the torrent from `--path` and publish it to
+the tracker if `name` isn't in the catalog yet — so the catalog fills up as nodes
+start serving. (`make_torrent.py` remains a standalone way to build a .torrent
+offline.)
 """
 import argparse
 import json
@@ -57,7 +61,8 @@ def cmd_list(_args) -> None:
         print("can't reach the tracker catalog — is bittorrent_tracker.py running?")
         sys.exit(1)
     if not metas:
-        print("catalog empty — build one with: python make_torrent.py [paths...]")
+        print("catalog empty — add content with: "
+              "python control.py add <node> <name> --mode serve --path <dir>")
         return
     # The tracker holds no content — only the catalog and which peers announce it.
     # So show live seeders/leechers (where the data actually lives) rather than the
@@ -154,8 +159,9 @@ def main() -> None:
     p_add.add_argument("name", help="catalog torrent name (see `list`)")
     p_add.add_argument("--mode", choices=["serve", "download"], default="download",
                        help="serve in place from --path, or download a copy")
-    p_add.add_argument("--path", help="for --mode serve: the local file/dir to serve "
-                                      "(what you passed to make_torrent.py)")
+    p_add.add_argument("--path", help="for --mode serve: the local file/dir on the "
+                                      "node to serve; if the torrent isn't in the "
+                                      "catalog yet it's built from this and published")
     p_add.set_defaults(func=cmd_add)
 
     p_rm = sub.add_parser("remove", help="tell a node to drop a torrent")

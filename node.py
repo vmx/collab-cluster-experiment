@@ -8,7 +8,9 @@ endpoint. A node starts empty, holding no torrents; you tell it what to do at ru
                           "path": <local <name> file/dir, serve mode only>}
                           add a torrent from the catalog (serve hosts a copy already
                           on this host at `path`; download fetches it into
-                          nodes/<id>/<name>/).
+                          nodes/<id>/<name>/). If `name` isn't in the catalog yet,
+                          serve mode builds the torrent from `path` and publishes it
+                          to the tracker, registering the dataset in one step.
   POST /remove         -> body {"name": <torrent>} or {"info_hash": <v2 hash>}
 
 The session runs in a background thread that continuously refreshes the shared
@@ -32,6 +34,7 @@ import libtorrent as lt
 
 import catalog
 import config
+import make_torrent
 import swarm_stats
 
 # Persist torrents natively via libtorrent fast-resume. save_info_dict embeds the
@@ -242,18 +245,37 @@ def make_session(node_id: int) -> "lt.session":
 
 
 def add_torrent(ns: NodeState, name: str, mode: str, serve_path: str = None) -> dict:
-    """Add a catalog torrent to the running session. `mode` says where the data
-    comes from: "serve" hosts a copy already on this host — `serve_path` is the
-    local <name> file/dir itself (what was given to make_torrent.py) — while
-    "download" fetches a fresh copy into nodes/<id>/. Returns a status dict."""
+    """Add a torrent to the running session. `mode` says where the data comes
+    from: "serve" hosts a copy already on this host — `serve_path` is the local
+    <name> file/dir itself (what would be given to make_torrent.py) — while
+    "download" fetches a fresh copy into nodes/<id>/. Returns a status dict.
+
+    If the catalog has no torrent called `name` yet, serve mode builds it from
+    `serve_path` and publishes it to the tracker — so registering a brand-new
+    dataset is just a side effect of the first node serving it, no separate
+    publish step. Download mode has nothing to build from, so an unknown name
+    stays an error."""
     if mode not in ("serve", "download"):
         raise ValueError(f"mode must be 'serve' or 'download', got {mode!r}")
     if mode == "serve" and not serve_path:
         raise ValueError("serve mode needs a path to the local content directory")
     # The catalog holds only .torrent files; fetch and parse the one we want. Its
     # name and info-hash come from the torrent itself, the single source of truth.
-    # (fetch_torrent_bytes raises FileNotFoundError if the catalog has no `name`.)
-    ti = lt.torrent_info(lt.bdecode(catalog.fetch_torrent_bytes(name)))
+    try:
+        data = catalog.fetch_torrent_bytes(name)
+    except FileNotFoundError:
+        # Not in the catalog. In serve mode the content is right here, so build the
+        # torrent from it and publish it (build_torrent bakes config.TRACKER_URL as
+        # the announce URL; publish POSTs to config.TRACKER_BASE). Download mode
+        # can't build anything, so re-raise as the usual "unknown torrent".
+        if mode != "serve":
+            raise
+        built_name, data = make_torrent.build_torrent(serve_path)
+        if built_name != name:
+            raise ValueError(f"content at {serve_path} is named {built_name!r}, "
+                             f"not {name!r} — name must match the file/dir basename")
+        catalog.publish(built_name, data)
+    ti = lt.torrent_info(lt.bdecode(data))
     tname = ti.name()
     ih = str(ti.info_hashes().v2)
 
