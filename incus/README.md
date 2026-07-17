@@ -111,49 +111,29 @@ See the [proxy device docs](https://linuxcontainers.org/incus/docs/main/referenc
 
 ## 5. Drive the swarm from the host
 
-`control.py` addresses nodes by their control endpoint. From the host, use the
-container bridge IPs (the host is on the bridge, so it reaches them directly):
+`control.py` runs on the host and addresses each node by its bridge IP (the host
+is on the bridge, so it reaches them directly):
 
 ```sh
 incus list                                   # find node IPs
-python control.py status 10.x.x.5            # what that node holds
+python control.py status <node0-ip>          # what that node holds
 ```
 
-**Add new content.** Point one node at content it already has on disk with
-`--mode serve --path`. If that torrent isn't in the catalog yet, the node builds
-it from `--path` and publishes it to the tracker — so registering a dataset and
-starting to seed it are the same step. Real content is already on the node; the
-synthetic sample isn't, so generate it there first, then serve it:
+To add content, tell a node to `serve` a file/dir it has on disk. If that torrent
+isn't in the catalog yet, the node builds it and publishes it to the tracker, so
+registering and seeding are one step. The sample content isn't shipped, so
+generate it on the node first:
 
 ```sh
-# on node0: generate the sample content onto its disk
 incus exec node0 -- su --login debian --command 'python3 collab-cluster-experiment/make_torrent.py'
-# from the host: tell node0 (by its bridge IP) to serve that content
 python control.py add <node0-ip> media --mode serve --path /home/debian/collab-cluster-experiment/data/sample/media
 ```
 
-The two commands target the same node from different sides: `make_torrent.py`
-runs *inside* node0 to write the bytes; `control.py` runs on the host and reaches
-node0 over its control endpoint, so `<node0-ip>` must be node0's bridge IP (from
-`incus list`). `--path` is likewise a path *on node0* — that's why it's the
-container's absolute path (`/home/debian/collab-cluster-experiment/...`), the
-checkout that now holds the sample, not anything on your host.
+`--path` is a path *inside node0* — hence the container's absolute path — not one
+on your host.
 
-(With no paths, `make_torrent.py` writes the sample content roots — `media`,
-`documents` — into the node's checkout. It also builds local `.torrent` files
-there, but you can ignore them: the node rebuilds and publishes the torrent from
-`--path` when it serves, so the tracker's catalog is what counts.)
-
-The tracker validates the published torrent, stores it, and streams it to catalog
-subscribers, so any other node can now discover and download it:
+Once it's published, any other node can download it:
 
 ```sh
-python control.py add <node1-ip> media --mode download   # node1 fetches it
+python control.py add <node1-ip> media --mode download   # lands in nodes/0/media/
 ```
-
-(A relative `--path` would be resolved on the node against the node service's
-`WorkingDirectory` (the checkout), so `data/sample/media` also works — but the
-absolute path above is unambiguous about being on node0. A download instead lands
-in `nodes/<id>/media/` under the checkout. `control.py` itself runs from your host
-checkout. The node bakes `http://tracker.incus:6969/announce` into torrents it
-builds, from the `SWARM_TRACKER` in its env file.)
