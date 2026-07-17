@@ -115,20 +115,32 @@ incus config device add collector web proxy \
 
 See the [proxy device docs](https://linuxcontainers.org/incus/docs/main/reference/devices_proxy/).
 
-## 5. Build the catalog
+## 5. Build the catalog on a node and publish it
 
-The tracker serves the catalog from **its own** container's
-`collab-cluster-experiment/data/torrents`, so build the torrents there (running
-inside the container also means `tracker.incus` resolves for the baked announce
-URL):
+Build the torrents on a **node** — the container that actually holds the content
+and will seed it — then register them on the tracker over HTTP with `--publish`.
+Building on the tracker wouldn't make sense: the tracker isn't a peer, so content
+generated there can't be seeded.
+
+`make_torrent.py` reads the announce URL and the publish target from
+`SWARM_TRACKER`. The systemd unit gets that from its env file, but a manual
+command doesn't load it, so set it inline — it bakes
+`http://tracker.incus:6969/announce` into the torrents *and* points `--publish`
+at the tracker's catalog:
 
 ```sh
-incus exec tracker -- su --login debian --command 'python3 collab-cluster-experiment/make_torrent.py --tracker http://tracker.incus:6969/announce'
+incus exec node0 -- su --login debian --command 'SWARM_TRACKER=tracker.incus python3 collab-cluster-experiment/make_torrent.py --publish'
 ```
 
-(If you'd rather build elsewhere, push the resulting `.torrent` files into the
-tracker container's `collab-cluster-experiment/data/torrents`, or share that dir
-via an Incus disk device.)
+With no paths this generates the two sample content roots (`media`, `documents`)
+under `node0`'s checkout, builds a torrent for each, and POSTs them to the
+tracker. The tracker validates each one, stores it in its own
+`data/torrents`, and streams it to catalog subscribers — so nodes discover it
+without any shared filesystem. Point `make_torrent.py` at your own paths instead
+of the sample to publish real content.
+
+Because the sample bytes are random and live on `node0`, that's the node that can
+seed them (step 6, `--path data/sample/media`). Build wherever the content is.
 
 ## 6. Drive the swarm from the host
 
@@ -140,6 +152,10 @@ incus list                                   # find node IPs
 python control.py status 10.x.x.5            # what that node holds
 python control.py add    10.x.x.5 media --mode serve --path data/sample/media
 ```
+
+Seed from the node that built the content in step 5 (`node0` for the sample) —
+that's the only one whose disk has those exact bytes. Point another node at the
+same torrent without `--path` and it downloads into `nodes/<id>/media/`.
 
 (`--path` is resolved on the node relative to the node service's
 `WorkingDirectory` — the repo checkout — so it's just `data/sample/media`.
