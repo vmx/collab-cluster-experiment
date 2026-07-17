@@ -3,8 +3,9 @@
 # On first boot (via cloud-init) this profile makes a container ready to run a
 # swarm component:
 #   - installs git and the libtorrent python binding,
-#   - clones this repo into the `debian` user's home (/home/debian), where the
-#     systemd --user units expect to find the scripts (WorkingDirectory is ~),
+#   - clones this repo into /home/debian/collab-cluster-experiment; the
+#     systemd --user units set WorkingDirectory to it, so their scripts and data
+#     all resolve inside that checkout,
 #   - installs the units into ~/.config/systemd/user/ (you enable the right one
 #     per container — see the incus README, step 3),
 #   - writes the optional env file the collab-cluster-node / collab-cluster-collector

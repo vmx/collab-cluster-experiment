@@ -7,6 +7,7 @@ Description=BitTorrent v2 prototype — node daemon (default BT 6881 / control 8
 # .incus names) when the tracker/collector live on other hosts. Leading '-' =
 # don't fail if the file is missing.
 EnvironmentFile=-%h/.config/collab-cluster-experiment/env
+WorkingDirectory=%h/collab-cluster-experiment
 ExecStart=python3 node.py
 Restart=on-failure
 

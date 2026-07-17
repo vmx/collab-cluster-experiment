@@ -11,11 +11,12 @@ services — you still run those by hand.
 | `collab-cluster-collector.service` | `collector.py` — stats collector + web UI    | `8100` |
 | `collab-cluster-node.service`      | `node.py` — one node daemon                  | BT `6881`, control `8001` |
 
-No paths are hardcoded: the units run `python3` from `PATH` and, being user
-units, default their working directory to the user's home. So put the repo at
-the home directory of the user that runs the service (the natural container
-layout) — or add a `WorkingDirectory=` line if it lives elsewhere. `python3`
-must have the `libtorrent` binding importable.
+The units run `python3` from `PATH` and set
+`WorkingDirectory=%h/collab-cluster-experiment`, so check the repo out at
+`~/collab-cluster-experiment` (the natural container layout) — or change that
+`WorkingDirectory=` if it lives elsewhere. Scripts, `data/`, and `nodes/` are all
+resolved relative to that dir. `python3` must have the `libtorrent` binding
+importable.
 
 ## Install
 

@@ -26,8 +26,10 @@ everything else is reachable only on the bridge, i.e. by SSHing to the host.
 - Containers can reach the git URL in the profile (clone happens at first boot).
 
 The profile provisions the rest per container: it clones this repo into
-`/home/debian` (the image's default user, which runs the services), installs
-`python3-libtorrent`, and copies the units into `~/.config/systemd/user/`.
+`/home/debian/collab-cluster-experiment` (owned by the image's default `debian`
+user, which runs the services), installs `python3-libtorrent`, and copies the
+units into `~/.config/systemd/user/`. The units set `WorkingDirectory` to that
+checkout, so their scripts and data (`data/`, `nodes/`) all resolve inside it.
 
 ## 1. Load the profile
 
@@ -115,16 +117,18 @@ See the [proxy device docs](https://linuxcontainers.org/incus/docs/main/referenc
 
 ## 5. Build the catalog
 
-The tracker serves the catalog from **its own** container's `data/torrents`, so
-build the torrents there (running inside the container also means `tracker.incus`
-resolves for the baked announce URL):
+The tracker serves the catalog from **its own** container's
+`collab-cluster-experiment/data/torrents`, so build the torrents there (running
+inside the container also means `tracker.incus` resolves for the baked announce
+URL):
 
 ```sh
-incus exec tracker -- su --login debian --command 'python3 make_torrent.py --tracker http://tracker.incus:6969/announce'
+incus exec tracker -- su --login debian --command 'python3 collab-cluster-experiment/make_torrent.py --tracker http://tracker.incus:6969/announce'
 ```
 
 (If you'd rather build elsewhere, push the resulting `.torrent` files into the
-tracker container's `data/torrents`, or share that dir via an Incus disk device.)
+tracker container's `collab-cluster-experiment/data/torrents`, or share that dir
+via an Incus disk device.)
 
 ## 6. Drive the swarm from the host
 
@@ -136,6 +140,10 @@ incus list                                   # find node IPs
 python control.py status 10.x.x.5            # what that node holds
 python control.py add    10.x.x.5 media --mode serve --path data/sample/media
 ```
+
+(`--path` is resolved on the node relative to the node service's
+`WorkingDirectory` — the repo checkout — so it's just `data/sample/media`.
+`control.py` itself runs from your host checkout.)
 
 Optional: to type `.incus` names on the host instead of IPs
 (`control.py status node0.incus`), teach the host resolver about the bridge —

@@ -2,6 +2,7 @@
 Description=BitTorrent v2 prototype — tracker (announce + catalog), port 6969
 
 [Service]
+WorkingDirectory=%h/collab-cluster-experiment
 ExecStart=python3 bittorrent_tracker.py
 Restart=on-failure
 
