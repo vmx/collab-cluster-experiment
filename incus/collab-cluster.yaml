@@ -54,8 +54,7 @@ config:
           SWARM_TRACKER=tracker.incus
           SWARM_COLLECTOR=collector.incus
     runcmd:
-      # - git clone --depth 1 https://github.com/ipfsfoundation/collab-cluster-experiment.git
-      - git clone --depth 1 vmx@hana:src/ipfsfoundation/collab-cluster-experiment
+      - git clone --depth 1 https://github.com/vmx/collab-cluster-experiment.git
       # Install the systemd --user units (copies all three; enable one later).
       - mkdir --parents /home/debian/.config/systemd/user
       - cp /home/debian/collab-cluster-experiment/systemd/collab-cluster-*.service /home/debian/.config/systemd/user/
