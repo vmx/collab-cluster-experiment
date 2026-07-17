@@ -41,6 +41,9 @@ config:
     packages:
       - git
       - python3-libtorrent
+      # Full terminfo database so `incus exec` sessions work with terminals
+      # whose TERM (e.g. alacritty, kitty, foot) the base image doesn't ship.
+      - ncurses-term
     write_files:
       - path: /home/debian/.config/collab-cluster-experiment/env
         owner: 'debian:debian'
