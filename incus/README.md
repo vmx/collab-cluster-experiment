@@ -104,13 +104,7 @@ An Incus proxy device on the `collector` container — the only thing on the pub
 interface:
 
 ```sh
-# non-NAT (wildcard listen ok), fine for a web UI:
-incus config device add collector web proxy \
-  listen=tcp:0.0.0.0:8100 connect=tcp:127.0.0.1:8100
-
-# or NAT mode (kernel-forwarded, faster) — listen must be a concrete host IP:
-incus config device add collector web proxy \
-  listen=tcp:<host-ip>:8100 connect=tcp:0.0.0.0:8100 nat=true
+incus config device add collector web proxy listen=tcp:0.0.0.0:8100 connect=tcp:127.0.0.1:8100
 ```
 
 See the [proxy device docs](https://linuxcontainers.org/incus/docs/main/reference/devices_proxy/).
@@ -160,15 +154,3 @@ same torrent without `--path` and it downloads into `nodes/<id>/media/`.
 (`--path` is resolved on the node relative to the node service's
 `WorkingDirectory` — the repo checkout — so it's just `data/sample/media`.
 `control.py` itself runs from your host checkout.)
-
-Optional: to type `.incus` names on the host instead of IPs
-(`control.py status node0.incus`), teach the host resolver about the bridge —
-see [integrate with systemd-resolved](https://linuxcontainers.org/incus/docs/main/howto/network_bridge_resolved/):
-
-```sh
-resolvectl dns incusbr0 "$(incus network get incusbr0 ipv4.address | cut --delimiter=/ --fields=1)"
-resolvectl domain incusbr0 '~incus'
-```
-
-This isn't persistent across reboots / Incus restarts on its own — the howto
-shows a small unit to reapply it. Not needed if you address nodes by IP.
