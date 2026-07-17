@@ -5,6 +5,7 @@ a small on-disk catalog the nodes can resolve by name.
     python make_torrent.py /path/to/dir-or-file [more paths...]
     python make_torrent.py                # no args: generate two sample torrents
     python make_torrent.py --tracker http://10.0.0.1:6969/announce dir  # explicit announce URL
+    python make_torrent.py --publish dir  # also register it on the tracker over HTTP
 
 Each torrent is written to the catalog as a single file under config.TORRENTS_DIR:
     <name>.torrent   the torrent itself
@@ -13,6 +14,10 @@ torrent is the only source of truth — its name and info-hash are read back by
 parsing it, so there is no sidecar. To seed the content in place, hand the node
 that already holds it the local directory to serve from (`control.py add …
 --mode serve --path <dir>`); other nodes download into nodes/<id>/<name>/.
+
+With --publish, each built torrent is also POSTed to the tracker's catalog
+(catalog.publish -> POST /catalog/<name>.torrent), so you can build on a node and
+register it centrally without writing to the tracker's own data/torrents dir.
 
 v2-only => SHA-256 merkle hashing, no v1/hybrid.
 """
@@ -23,6 +28,7 @@ import sys
 
 import libtorrent as lt
 
+import catalog
 import config
 
 # Built-in sample: two separate content roots => two separate torrents, so the
@@ -86,7 +92,7 @@ def _is_pad(fs, i: int) -> bool:
     return "/.pad/" in fs.file_path(i).replace(os.sep, "/")
 
 
-def make_torrent(source: str, tracker_url: str = None) -> dict:
+def make_torrent(source: str, tracker_url: str = None, publish: bool = False) -> dict:
     tracker_url = tracker_url or config.TRACKER_URL
     source = os.path.abspath(source)
     if not os.path.exists(source):
@@ -110,10 +116,11 @@ def make_torrent(source: str, tracker_url: str = None) -> dict:
     ct.set_comment(f"v2-only prototype content: {os.path.basename(source)}")
     lt.set_piece_hashes(ct, seed_save_path)  # hash the files as they sit on disk
 
+    data = lt.bencode(ct.generate())
     os.makedirs(config.TORRENTS_DIR, exist_ok=True)
     torrent_path = catalog_torrent_path(fs.name())
     with open(torrent_path, "wb") as f:
-        f.write(lt.bencode(ct.generate()))
+        f.write(data)
 
     ti = lt.torrent_info(torrent_path)
     name = ti.name()
@@ -131,16 +138,23 @@ def make_torrent(source: str, tracker_url: str = None) -> dict:
     print(f"  serve in place with: --mode serve --path {source}")
     for path, size in real_files:
         print(f"    - {path}  ({size} bytes)")
+
+    if publish:
+        # Register it on the tracker over HTTP, so a node that built the torrent
+        # doesn't need filesystem access to the tracker's catalog dir. The tracker
+        # re-derives name/info-hash from the bytes; echo them back as confirmation.
+        echo = catalog.publish(name, data)
+        print(f"  published to : {config.TRACKER_BASE}/catalog/{echo['name']}.torrent")
     return {"name": name, "info_hash": info_hash}
 
 
-def main(sources=None, tracker_url: str = None) -> None:
+def main(sources=None, tracker_url: str = None, publish: bool = False) -> None:
     if not sources:
         sources = build_sample(config.SAMPLE_DIR)
     elif isinstance(sources, str):
         sources = [sources]
     for src in sources:
-        make_torrent(src, tracker_url)
+        make_torrent(src, tracker_url, publish)
 
 
 if __name__ == "__main__":
@@ -150,5 +164,8 @@ if __name__ == "__main__":
                     help="files/dirs to make torrents from (default: sample content)")
     ap.add_argument("--tracker", default=config.TRACKER_URL,
                     help="announce URL to bake into the torrents (default: %(default)s)")
+    ap.add_argument("--publish", action="store_true",
+                    help="also upload each built torrent to the tracker's catalog "
+                         f"over HTTP ({config.TRACKER_BASE}/catalog/<name>.torrent)")
     args = ap.parse_args()
-    main(args.paths or None, args.tracker)
+    main(args.paths or None, args.tracker, args.publish)

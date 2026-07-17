@@ -16,10 +16,17 @@ Endpoints:
   GET /catalog           - JSON list of catalog torrents ({name, info_hash},
                            derived from each .torrent)
   GET /catalog/<name>.torrent - one torrent's .torrent bytes
+  POST /catalog/<name>.torrent - publish a .torrent into the catalog. The body is
+                           the raw .torrent bytes; the tracker validates them and
+                           writes the file into TORRENTS_DIR, where the watcher
+                           picks it up like any other addition. Lets a node that
+                           built a torrent register it without filesystem access
+                           to the tracker.
   GET /catalog/subscribe - Server-Sent Events stream of newly added torrents.
                            A background thread watches TORRENTS_DIR, so anything
-                           that drops a torrent into the catalog (make_torrent.py)
-                           is pushed to subscribers without polling. By default a
+                           that drops a torrent into the catalog (make_torrent.py
+                           offline, or a POST above) is pushed to subscribers
+                           without polling. By default a
                            subscriber only sees torrents added after it connects;
                            pass ?since=<seq> to resume (each event carries a seq),
                            or ?since=0 to replay the whole catalog then stream.
@@ -27,6 +34,7 @@ Endpoints:
 import json
 import os
 import socket
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -55,6 +63,9 @@ CATALOG_EVENTS: list = []
 SUBSCRIBE_HEARTBEAT = 15.0
 # How often the watcher rescans the catalog directory for new torrents.
 CATALOG_SCAN_INTERVAL = 1.0
+# Cap on a POST /catalog upload. A .torrent is just metadata (piece hashes), so
+# even a huge payload's torrent is tiny; this only bounds abuse.
+MAX_TORRENT_BYTES = 5 * 1024 * 1024
 
 
 def watch_catalog(interval: float = CATALOG_SCAN_INTERVAL) -> None:
@@ -167,6 +178,11 @@ class Handler(BaseHTTPRequestHandler):
     def _failure(self, msg: str) -> None:
         self._send(lt.bencode({b"failure reason": msg.encode()}))
 
+    def _reject(self, code: int, msg: str) -> None:
+        """Plain-text error for the non-BitTorrent endpoints (e.g. POST /catalog),
+        where a bencoded failure dict would be meaningless."""
+        self._send(msg.encode(), "text/plain", code=code)
+
     def do_GET(self):
         parts = urlsplit(self.path)
         if parts.path == "/announce":
@@ -181,6 +197,14 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_catalog_subscribe(parse_query(parts.query))
         elif parts.path.startswith("/catalog/"):
             self.handle_catalog_file(parts.path[len("/catalog/"):])
+        else:
+            self._send(b"", code=404)
+
+    def do_POST(self):
+        parts = urlsplit(self.path)
+        # Only the catalog is writable; /catalog and /catalog/subscribe are not.
+        if parts.path.startswith("/catalog/") and parts.path != "/catalog/subscribe":
+            self.handle_catalog_upload(parts.path[len("/catalog/"):])
         else:
             self._send(b"", code=404)
 
@@ -325,6 +349,58 @@ class Handler(BaseHTTPRequestHandler):
         with open(path, "rb") as f:
             body = f.read()
         self._send(body, "application/x-bittorrent")
+
+    def handle_catalog_upload(self, name: str) -> None:
+        """Publish a .torrent into the catalog. The body is the raw .torrent; we
+        validate it, then write it into TORRENTS_DIR so the watcher publishes it
+        exactly as if make_torrent.py had dropped it there. `name` is
+        "<torrent>.torrent" and must match the torrent's own name, keeping the
+        on-disk filename in sync with what /catalog derives by parsing it."""
+        # Same path-safety as the GET side: no traversal, must be a .torrent.
+        if "/" in name or "\\" in name or name.startswith(".") \
+                or not name.endswith(".torrent"):
+            return self._reject(400, "bad torrent name")
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            length = 0
+        if length <= 0:
+            return self._reject(411, "Content-Length required")
+        if length > MAX_TORRENT_BYTES:
+            return self._reject(413, "torrent too large")
+        data = self.rfile.read(length)
+
+        # The torrent is the source of truth: parse it, require a v2 info-hash (the
+        # catalog is v2-only), and pin the filename to its own name.
+        try:
+            ti = lt.torrent_info(lt.bdecode(data))
+        except Exception:
+            return self._reject(400, "not a valid .torrent")
+        ihs = ti.info_hashes()
+        if hasattr(ihs, "has_v2") and not ihs.has_v2():
+            return self._reject(400, "torrent has no v2 info-hash")
+        if name != f"{ti.name()}.torrent":
+            return self._reject(400, f"name must be {ti.name()}.torrent")
+
+        # Write via a temp file + atomic rename so the watcher (and concurrent
+        # GETs) never observe a half-written .torrent. The temp name doesn't end
+        # in .torrent, so list_catalog's *.torrent glob ignores it in flight.
+        os.makedirs(config.TORRENTS_DIR, exist_ok=True)
+        path = os.path.join(config.TORRENTS_DIR, name)
+        fd, tmp = tempfile.mkstemp(dir=config.TORRENTS_DIR, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+        self._send(json.dumps({"name": ti.name(), "info_hash": str(ihs.v2)}).encode(),
+                   "application/json", code=201)
 
 
 def main() -> None:

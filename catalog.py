@@ -44,6 +44,21 @@ def fetch_torrent_bytes(name: str) -> bytes:
         raise
 
 
+def publish(name: str, data: bytes, timeout: float = 5.0) -> dict:
+    """Upload the raw .torrent bytes for `name` to the tracker's catalog (POST
+    /catalog/<name>.torrent), so a node that built a torrent can register it
+    without filesystem access to the tracker. The tracker validates and stores
+    it; its watcher then serves it via fetch_torrent_bytes and streams it to
+    subscribers. Returns the tracker's {"name", "info_hash"} echo. Raises
+    urllib.error.HTTPError on rejection (e.g. 400 if the bytes aren't a valid
+    v2 torrent, or `name` doesn't match the torrent's own name)."""
+    req = urllib.request.Request(
+        f"{config.TRACKER_BASE}/catalog/{name}.torrent", data=data, method="POST",
+        headers={"Content-Type": "application/x-bittorrent"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode())
+
+
 def subscribe(on_torrent, since: int = None) -> None:
     """Stream newly added catalog torrents from the tracker, calling
     `on_torrent(meta)` for each (meta is {"name", "info_hash", "seq"}).
