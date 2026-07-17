@@ -22,24 +22,28 @@ everything else is reachable only on the bridge, i.e. by SSHing to the host.
 ## Prerequisites
 
 - Incus with a managed bridge (default `incusbr0`) providing DNS.
-- A cloud-init-enabled image for the profile, e.g. `images:debian/12/cloud`.
-- In each container: this repo at `/home/debian` (the image's default user, which
-  runs the services) and `python3` with the `libtorrent` binding importable (see
-  [`../systemd/README.md`](../systemd/README.md)).
+- A cloud-init-enabled image for the profile, e.g. `images:debian/14/cloud`.
+- Containers can reach the git URL in the profile (clone happens at first boot).
+
+The profile provisions the rest per container: it clones this repo into
+`/home/debian` (the image's default user, which runs the services), installs
+`python3-libtorrent`, and copies the units into `~/.config/systemd/user/`.
 
 ## 1. Load the profile
 
-[`collab-cluster.yaml`](collab-cluster.yaml) writes the env file the units read,
-pointing them at `tracker.incus` / `collector.incus`. Same content for every
-container (the tracker just ignores it).
+[`collab-cluster.yaml`](collab-cluster.yaml) provisions each container at first
+boot — clones the repo, installs `python3-libtorrent`, copies the units into
+place, and writes the env file pointing the units at `tracker.incus` /
+`collector.incus`. Same content for every container (the tracker just ignores the
+env vars).
 
 ```sh
 incus profile create collab-cluster
-incus profile edit   collab-cluster < incus/collab-cluster.yaml
+incus profile edit collab-cluster < incus/collab-cluster.yaml
 ```
 
-If your service containers aren't named `tracker` and `collector`, edit the names
-in the profile first.
+Edit the profile first if your service containers aren't named `tracker` and
+`collector`, or to point the clone at your own fork/mirror of the repo.
 
 ## 2. Launch the containers
 
@@ -47,34 +51,49 @@ Names matter — `tracker` and `collector` must match the `.incus` names in the 
 file.
 
 ```sh
-for name in tracker collector node0 node1; do
-  incus launch images:debian/12/cloud "$name" --profile default --profile collab-cluster
-done
+incus launch images:debian/14/cloud tracker --profile default --profile collab-cluster
+incus launch images:debian/14/cloud collector --profile default --profile collab-cluster
+incus launch images:debian/14/cloud node0 --profile default --profile collab-cluster
+incus launch images:debian/14/cloud node1 --profile default --profile collab-cluster
 ```
 
 All nodes run the default `--id 0`; they stay distinct because each has its own
 IP and its own persisted `node_key` (and the dashboard labels them by their
 `ip:port` address).
 
-## 3. Install and enable the right unit per container
+## 3. Enable the right unit per container
 
-Follow [`../systemd/README.md`](../systemd/README.md) to copy the units into
-`/home/debian/.config/systemd/user/` in each container, then enable only the one
-that container plays. Run these as the `debian` user — `su - debian -c` opens a
-login session so `systemctl --user` finds its user bus (`XDG_RUNTIME_DIR`):
+The profile already copied all three units (listed in
+[`../systemd/README.md`](../systemd/README.md)) into
+`/home/debian/.config/systemd/user/`, so here you just enable the one that
+container plays. First make sure provisioning has finished:
 
 ```sh
-incus exec tracker   -- su - debian -c 'systemctl --user enable --now collab-cluster-tracker'
-incus exec collector -- su - debian -c 'systemctl --user enable --now collab-cluster-collector'
-incus exec node0     -- su - debian -c 'systemctl --user enable --now collab-cluster-node'
-incus exec node1     -- su - debian -c 'systemctl --user enable --now collab-cluster-node'
+incus exec tracker -- cloud-init status --wait
+incus exec collector -- cloud-init status --wait
+incus exec node0 -- cloud-init status --wait
+incus exec node1 -- cloud-init status --wait
+```
+
+Then enable each container's unit. Run these as the `debian` user — `su --login
+debian --command` opens a login session so `systemctl --user` finds its user bus
+(`XDG_RUNTIME_DIR`):
+
+```sh
+incus exec tracker -- su --login debian --command 'systemctl --user enable --now collab-cluster-tracker'
+incus exec collector -- su --login debian --command 'systemctl --user enable --now collab-cluster-collector'
+incus exec node0 -- su --login debian --command 'systemctl --user enable --now collab-cluster-node'
+incus exec node1 -- su --login debian --command 'systemctl --user enable --now collab-cluster-node'
 ```
 
 `systemd --user` units only start at boot if lingering is on, so enable it once
 per container (run as root, hence no `su`):
 
 ```sh
-incus exec <name> -- loginctl enable-linger debian
+incus exec tracker -- loginctl enable-linger debian
+incus exec collector -- loginctl enable-linger debian
+incus exec node0 -- loginctl enable-linger debian
+incus exec node1 -- loginctl enable-linger debian
 ```
 
 ## 4. Expose the web UI to the internet
@@ -101,8 +120,7 @@ build the torrents there (running inside the container also means `tracker.incus
 resolves for the baked announce URL):
 
 ```sh
-incus exec tracker -- su - debian -c \
-  'python3 make_torrent.py --tracker http://tracker.incus:6969/announce'
+incus exec tracker -- su --login debian --command 'python3 make_torrent.py --tracker http://tracker.incus:6969/announce'
 ```
 
 (If you'd rather build elsewhere, push the resulting `.torrent` files into the
@@ -124,7 +142,7 @@ Optional: to type `.incus` names on the host instead of IPs
 see [integrate with systemd-resolved](https://linuxcontainers.org/incus/docs/main/howto/network_bridge_resolved/):
 
 ```sh
-resolvectl dns    incusbr0 "$(incus network get incusbr0 ipv4.address | cut -d/ -f1)"
+resolvectl dns incusbr0 "$(incus network get incusbr0 ipv4.address | cut --delimiter=/ --fields=1)"
 resolvectl domain incusbr0 '~incus'
 ```
 

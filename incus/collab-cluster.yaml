@@ -1,30 +1,46 @@
 # Incus profile for the collab-cluster-experiment swarm.
 #
-# Provisions the optional env file that the collab-cluster-node / collab-cluster-collector systemd units
-# read (~/.config/collab-cluster-experiment/env), pointing them at the tracker
-# and collector by Incus DNS name. The SAME content works in every container:
-# the tracker ignores these vars, the collector uses SWARM_TRACKER, nodes use
-# both. So this one profile applies to every container in the swarm.
+# On first boot (via cloud-init) this profile makes a container ready to run a
+# swarm component:
+#   - installs git and the libtorrent python binding,
+#   - clones this repo into the `debian` user's home (/home/debian), where the
+#     systemd --user units expect to find the scripts (WorkingDirectory is ~),
+#   - installs the units into ~/.config/systemd/user/ (you enable the right one
+#     per container — see the incus README, step 3),
+#   - writes the optional env file the collab-cluster-node / collab-cluster-collector
+#     units read (~/.config/collab-cluster-experiment/env), pointing them at the
+#     tracker and collector by Incus DNS name.
+#
+# The SAME content works in every container: the tracker ignores the env vars,
+# the collector uses SWARM_TRACKER, nodes use both. So this one profile applies
+# to every container in the swarm.
 #
 # Assumptions (edit if they don't hold):
 #   - Your tracker/collector containers are named `tracker` and `collector`, so
 #     `tracker.incus` / `collector.incus` resolve on the bridge. Rename below if
 #     you use different container names.
 #   - The services run under the image's default `debian` user's `systemd --user`
-#     instance (home /home/debian). For a different user, change the path/owner.
+#     instance (home /home/debian). For a different user, change the paths/owner.
 #   - The image has cloud-init (use the images: '/cloud' variants).
+#   - The container can reach the git URL below. Point it at your fork/mirror if
+#     needed.
 #
-# `defer: true` writes the file in cloud-init's config stage, i.e. after the
+# `defer: true` writes the env file in cloud-init's config stage, i.e. after the
 # `debian` user exists, so the owner below resolves (write_files otherwise runs
-# before user creation).
+# before user creation). `runcmd` runs later still, so the clone/copy see the
+# user's home already in place.
 #
 # Load:   incus profile create collab-cluster
 #         incus profile edit   collab-cluster < incus/collab-cluster.yaml
 # Apply:  incus launch <image> <name> --profile default --profile collab-cluster
-description: collab-cluster-experiment swarm env (tracker/collector by .incus name)
+description: collab-cluster-experiment swarm (repo + units + env, tracker/collector by .incus name)
 config:
   cloud-init.user-data: |
     #cloud-config
+    package_update: true
+    packages:
+      - git
+      - python3-libtorrent
     write_files:
       - path: /home/debian/.config/collab-cluster-experiment/env
         owner: 'debian:debian'
@@ -33,3 +49,11 @@ config:
         content: |
           SWARM_TRACKER=tracker.incus
           SWARM_COLLECTOR=collector.incus
+    runcmd:
+      # - git clone --depth 1 https://github.com/ipfsfoundation/collab-cluster-experiment.git
+      - git clone --depth 1 vmx@hana:src/ipfsfoundation/collab-cluster-experiment
+      # Install the systemd --user units (copies all three; enable one later).
+      - mkdir --parents /home/debian/.config/systemd/user
+      - cp /home/debian/collab-cluster-experiment/systemd/collab-cluster-*.service /home/debian/.config/systemd/user/
+      # The clone/copy ran as root, so hand the whole home back to `debian`.
+      - chown --recursive debian:debian /home/debian
