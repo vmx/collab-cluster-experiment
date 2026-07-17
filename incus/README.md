@@ -115,8 +115,10 @@ See the [proxy device docs](https://linuxcontainers.org/incus/docs/main/referenc
 is on the bridge, so it reaches them directly):
 
 ```sh
-incus list                                   # find node IPs
-python control.py status <node0-ip>          # what that node holds
+# find node IPs
+incus list
+# what that node holds
+python control.py status <node0-ip>
 ```
 
 To add content, tell a node to `serve` a file/dir it has on disk. If that torrent
@@ -125,7 +127,9 @@ registering and seeding are one step. The sample content isn't shipped, so
 generate it on the node first:
 
 ```sh
+# on node0: generate the sample content onto its disk
 incus exec node0 -- su --login debian --command 'python3 collab-cluster-experiment/make_torrent.py'
+# from the host: have node0 serve it (builds + publishes the torrent)
 python control.py add <node0-ip> media --mode serve --path /home/debian/collab-cluster-experiment/data/sample/media
 ```
 
@@ -135,5 +139,6 @@ on your host.
 Once it's published, any other node can download it:
 
 ```sh
-python control.py add <node1-ip> media --mode download   # lands in nodes/0/media/
+# lands in nodes/0/media/ on that node
+python control.py add <node1-ip> media --mode download
 ```
