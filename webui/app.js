@@ -22,7 +22,6 @@ const DETAIL_URL = "/api/torrent/"; // + info_hash
 const TRANSFERS_URL = "/api/transfers";
 const NODES_URL = "/api/nodes";
 const NODE_DETAIL_URL = "/api/node/"; // + label
-const RECENT_URL = "/api/catalog/recent"; // newly added catalog torrents
 const POLL_MS = 1000; // refresh once a second
 
 // Which collector endpoint each screen polls. routeTo + tick look the request up
@@ -111,9 +110,9 @@ const Cell = component({
   view: html`<span class="cell" :style=".style" :title=".title"></span>`,
 });
 
-// Compute a node's live connection status for a dataset, reconciled against the
-// tracker: whether it's stuck (incomplete + 0 peers), idle-seeding, meshing, and
-// whether it announced at all (a holder that didn't is "silent").
+// A node's live connection status for a dataset: stuck (incomplete + 0 peers),
+// idle-seeding, or meshing. Derived from what the node itself reports — with no
+// tracker there is no second opinion to reconcile against.
 function connStatus(r) {
   let text, cls;
   if (r.isolated) {
@@ -126,15 +125,11 @@ function connStatus(r) {
     text = `${r.num_peers} peer(s)`;
     cls = "nstatus ok";
   }
-  if (r.announced === false) {
-    text += " · silent";
-    if (!r.isolated) cls = "nstatus warn"; // holds it but never announced
-  }
   return { text, cls };
 }
 
 // One node's ownership line: label/role/percent, the piece map, its live
-// connection status (reconciled against the tracker), and bytes stored. The label
+// connection status, and bytes stored. The label
 // links to that node's drill-down (which other datasets it holds).
 const NodeRow = component({
   name: "NodeRow",
@@ -232,8 +227,6 @@ const Torrent = component({
     availCells: [],
     histLines: [],
     files: [],
-    membershipNote: "",
-    hasMembershipNote: false,
   },
   methods: {
     metaText() {
@@ -264,13 +257,6 @@ const Torrent = component({
       const availCells = t.avail_cells.map((c) => Cell.make(cellForAvail(c, t.nodes_seen)));
       const files = t.files.map((f) => FileRow.Class.fromData(f, t.name));
       const s = t.summary;
-      // Tracker-side gaps that have no piece-map row of their own. (Holders that
-      // didn't announce are flagged inline as "silent" on their own row.)
-      const notes = [];
-      if ((t.external || []).length)
-        notes.push(`${t.external.length} external announcer(s): ${t.external.join(", ")}`);
-      if ((t.off_dataset || []).length)
-        notes.push(`announced but not holding it: ${t.off_dataset.join(", ")}`);
       return this.make({
         name: t.name,
         infoHash: t.info_hash,
@@ -287,8 +273,6 @@ const Torrent = component({
         availCells,
         histLines: histogramLines(t.histogram),
         files,
-        membershipNote: notes.join("  ·  "),
-        hasMembershipNote: notes.length > 0,
       });
     },
   },
@@ -314,10 +298,6 @@ const Torrent = component({
         <span class="stored"></span>
       </div>
     </div>
-    <div class="muted small" @show="truthy? .hasMembershipNote">
-      Tracker also sees: <span @text=".membershipNote"></span>
-    </div>
-
     <h3>Availability histogram</h3>
     <ul class="hist"><li @each=".histLines"><x text="@value"></x></li></ul>
 
@@ -537,6 +517,11 @@ const NodeDetail = component({
 // the search box and status filter can narrow the list client-side, instantly,
 // without re-fetching. Refreshed on every overview poll.
 let lastDatasets = [];
+// Datasets we've already told the operator about, so the toast fires once per
+// dataset. `toastBaselined` keeps the first poll silent: opening the dashboard on
+// an established swarm shouldn't announce everything that already existed.
+const seenDatasets = new Set();
+let toastBaselined = false;
 
 // Pure: narrow a raw /api/overview dataset list by name search + status filter.
 // Status: "all" | "replicating" | "incomplete". Exported for unit testing.
@@ -593,10 +578,7 @@ const Dashboard = component({
     nodesStoredText: "0 B",
     // node drill-down: 0 or 1 NodeDetail vm
     nodeDetail: [],
-    trackerDown: false,
-    // newly-added-torrent toast. catalogSeq is the highest catalog seq seen; -1
-    // means "not yet baselined" so the initial catalog load doesn't toast.
-    catalogSeq: -1,
+    // newly-appeared-dataset toast (see fetchOverview).
     toastText: "",
     toastShow: false,
   },
@@ -718,9 +700,6 @@ const Dashboard = component({
     },
     tick(ctx) {
       ctx.request(REQ_FOR_ROUTE[this.route]);
-      // Poll for newly added datasets on every screen, not just the overview,
-      // so a new torrent toasts wherever the operator happens to be.
-      ctx.request("fetchCatalogRecent");
       return this;
     },
   },
@@ -745,10 +724,20 @@ const Dashboard = component({
         rarest = Math.min(rarest, d.durable_copies);
         for (const s of d.spread) nodes.add(s.label);
       }
-      return this.setError("")
+      // Anything that wasn't in the previous poll is new to this swarm — which
+      // is all "a dataset was published somewhere" means now that every node
+      // converges on the same catalog.
+      const fresh = [];
+      for (const d of lastDatasets) {
+        if (seenDatasets.has(d.info_hash)) continue;
+        seenDatasets.add(d.info_hash);
+        if (toastBaselined) fresh.push(d.name);
+      }
+      toastBaselined = true;
+
+      const vm = this.setError("")
         .setStatus("live")
         .setTs(res.ts)
-        .setTrackerDown(res.tracker_ok === false)
         .refilter(this.query, this.statusFilter)
         .setTotalCount(lastDatasets.length)
         .setTotDatasets(lastDatasets.length)
@@ -758,6 +747,10 @@ const Dashboard = component({
         .setReplicatingText(String(replicating))
         .setRarest(rarest)
         .setRarestClass(lastDatasets.length ? copiesClass(rarest, rarest) : "num");
+      if (!fresh.length) return vm;
+      const text =
+        fresh.length === 1 ? `New dataset: ${fresh[0]}` : `${fresh.length} new datasets: ${fresh.join(", ")}`;
+      return vm.setToastText(text).setToastShow(true);
     },
     fetchDetail(res, err) {
       // A 404 (dataset no longer reported) surfaces as an error; show the
@@ -800,21 +793,6 @@ const Dashboard = component({
         .setNodesCount(res.nodes.length)
         .setNodesStoredText(human(stored));
     },
-    // Newly added datasets (from the tracker via the collector). Best-effort: a
-    // failed poll is ignored. The first successful poll only baselines the seq so
-    // the existing catalog doesn't toast; later ones toast anything newer.
-    fetchCatalogRecent(res, err) {
-      if (err) return this;
-      const added = res.added || [];
-      const maxSeq = added.reduce((m, a) => Math.max(m, a.seq || 0), 0);
-      if (this.catalogSeq < 0) return this.setCatalogSeq(maxSeq); // baseline only
-      if (maxSeq <= this.catalogSeq) return this;
-      const fresh = added.filter((a) => (a.seq || 0) > this.catalogSeq);
-      const names = fresh.map((a) => a.name).join(", ");
-      const text =
-        fresh.length === 1 ? `New dataset added: ${fresh[0].name}` : `${fresh.length} new datasets: ${names}`;
-      return this.setCatalogSeq(maxSeq).setToastText(text).setToastShow(true);
-    },
   },
   view: html`<div class="dash">
     <header class="topbar">
@@ -830,9 +808,6 @@ const Dashboard = component({
       <a :class="$navNodes" data-link="1" href="/nodes">Nodes</a>
     </nav>
     <div class="banner" @show="truthy? .error" @text=".error"></div>
-    <div class="banner" @show="truthy? .trackerDown">
-      Tracker unreachable — connection status may be stale.
-    </div>
     <div class="toast" @show="truthy? .toastShow">
       <span class="toast-dot"></span>
       <span @text=".toastText"></span>
@@ -879,7 +854,7 @@ const Dashboard = component({
       </div>
       <x render-each=".datasets"></x>
       <div class="empty" @show="$noDatasets">
-        No datasets reported yet. Start the tracker, the nodes, and assign torrents
+        No datasets reported yet. Start some nodes and publish something
         (see the README); this view updates on its own.
       </div>
       <div class="empty" @show="$noMatches">
@@ -908,8 +883,8 @@ const Dashboard = component({
       </div>
       <x render-each=".transfers"></x>
       <div class="empty" @show="$isEmptyTransfers">
-        Nothing transferring right now — every node holds a complete copy of what it
-        was assigned.
+        Nothing transferring right now — every node holds a complete copy of
+        everything it wants.
       </div>
     </div>
 
@@ -1009,11 +984,6 @@ function main() {
       const label = matchRoute().param;
       if (!label) throw new Error("no node selected");
       const r = await fetch(NODE_DETAIL_URL + encodeURIComponent(label), { cache: "no-store" });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return r.json();
-    },
-    async fetchCatalogRecent() {
-      const r = await fetch(RECENT_URL, { cache: "no-store" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       return r.json();
     },

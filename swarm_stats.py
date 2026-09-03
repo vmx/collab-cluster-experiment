@@ -8,8 +8,9 @@ import math
 
 # libtorrent peer_info.source bit flags -> label. These are stable library
 # values; we keep them here (plain ints) so viewers without a libtorrent import
-# can decode the `source` a node reports. With tracker-only discovery, "tracker"
-# and "incoming" are how peers are expected to be learned.
+# can decode the `source` a node reports. Nodes hand libtorrent its peers
+# directly (connect_peer), with every discovery mechanism disabled, so in
+# practice only "incoming" and the manual-add source ever show up.
 PEER_SOURCE_FLAGS = [
     (0x1, "tracker"),
     (0x2, "dht"),
@@ -29,31 +30,8 @@ def peer_addr(ip: str, port) -> dict:
     """The canonical shape for a peer's network address in any stats payload.
 
     Kept structured (not a joined "ip:port" string) so consumers compare and
-    aggregate addresses without re-parsing. Both sources of peer data emit this:
-    the tracker (addresses learned from announces) and each node (the endpoints
-    libtorrent is actually connected to)."""
+    aggregate addresses without re-parsing."""
     return {"ip": ip, "port": int(port)}
-
-
-def addr_key(ip: str, port) -> str:
-    """A hashable "ip:port" key for matching the same address across sources
-    (e.g. reconciling tracker membership against node-reported connections)."""
-    return f"{ip}:{int(port)}"
-
-
-# A peer is in exactly one of these states per torrent, decided solely by whether
-# it still has bytes left to fetch. The two are mutually exclusive — a peer that
-# holds every piece is a seeder, anything else is a leecher — so stats carry this
-# closed set as a role string rather than a boolean that could read as "neither"
-# or "both".
-PEER_ROLE_SEEDER = "seeder"
-PEER_ROLE_LEECHER = "leecher"
-
-
-def peer_role(complete: bool) -> str:
-    """A peer's role for a torrent: seeder if it holds the whole torrent (nothing
-    left to download), otherwise leecher."""
-    return PEER_ROLE_SEEDER if complete else PEER_ROLE_LEECHER
 
 
 def collect_by_torrent(nodes: list) -> list:

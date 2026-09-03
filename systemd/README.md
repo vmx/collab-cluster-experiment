@@ -1,15 +1,13 @@
 # systemd services
 
-One `systemd --user` unit per long-running server component. Each is standalone
-(no dependency on the others) so it can run on its own in a container; the
-one-shot tools (`control.py`, `make_torrent.py`, `piece_map.py`) are not
-services — you still run those by hand.
+One `systemd --user` unit per long-running component. Both are standalone (no
+dependency on each other) so either can run alone in a container; `control.py`,
+`make_torrent.py` and `piece_map.py` are one-shot tools, not services.
 
 | Unit | Component | Listens on |
 | --- | --- | --- |
-| `collab-cluster-tracker.service`   | `bittorrent_tracker.py` — announce + catalog | `6969` |
-| `collab-cluster-collector.service` | `collector.py` — stats collector + web UI    | `8100` |
-| `collab-cluster-node.service`      | `node.py` — one node daemon                  | BT `6881`, control `8001` |
+| `collab-cluster-node.service`      | `node.py` — a node        | BT `6881`, HTTP `8001`, beacon `6772/udp` |
+| `collab-cluster-collector.service` | `collector.py` — the optional dashboard | `8100` |
 
 The units run `python3` from `PATH` and set
 `WorkingDirectory=%h/collab-cluster-experiment`, so check the repo out at
@@ -25,40 +23,64 @@ mkdir -p ~/.config/systemd/user
 cp systemd/collab-cluster-*.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 
-# Build the catalog once (the tracker serves it; its :6969 announce URL is baked
-# into the torrents).
-python make_torrent.py
+systemctl --user enable --now collab-cluster-node
+```
 
-systemctl --user enable --now collab-cluster-tracker collab-cluster-collector collab-cluster-node
+That is the whole install on every machine. A node needs no configuration and no
+addresses — it discovers its peers on the local network.
+
+As shipped, the unit stores nothing it wasn't asked for: the node joins, tracks
+the whole catalog and serves what it holds, and you name the datasets it should
+keep. To have a machine mirror everything instead, add the flag:
+
+```ini
+ExecStart=python3 node.py --replicate all
 ```
 
 ## Use
 
 ```sh
-systemctl --user status collab-cluster-tracker collab-cluster-collector collab-cluster-node
-journalctl --user -u collab-cluster-node -f      # follow one component's logs
-systemctl --user restart collab-cluster-node
+systemctl --user status collab-cluster-node
+journalctl --user -u collab-cluster-node -f      # follow its log
+systemctl --user restart collab-cluster-node     # resumes with progress intact
 ```
 
-Then drive the swarm as usual, e.g. `python control.py add 127.0.0.1:8001 media
---mode serve --path data/sample/media` (nodes are addressed by their control
-endpoint `host[:port]`), and open the dashboard at <http://127.0.0.1:8100/>.
-
-## Spread across hosts / containers
-
-The units carry no addresses. On a single host they need nothing — `config.py`
-defaults every service to loopback. When the tracker/collector run elsewhere,
-`collab-cluster-node` and `collab-cluster-collector` read an optional
-`~/.config/collab-cluster-experiment/env` (the tracker needs none — it only gets
-dialed):
+Then put some data in, from wherever you can reach a node:
 
 ```sh
-# ~/.config/collab-cluster-experiment/env  — same content works in every container
-SWARM_TRACKER=<tracker-address>      # e.g. tracker.incus, or a host/IP
-SWARM_COLLECTOR=<collector-address>  # e.g. collector.incus
+python control.py peers   <node-address>       # confirm they found each other
+python control.py publish <node-address> /path/to/data
+python control.py list    <other-node>         # every node now knows about it
+python control.py add     <other-node> <name>  # ...and this one keeps a copy
 ```
 
-Build torrents with the matching announce URL so it's baked in correctly:
-`python make_torrent.py --tracker http://<tracker-address>:6969/announce …`
-(or export `SWARM_TRACKER` before running it). The peer layer needs nothing —
-each node auto-detects its own routable address (`SWARM_ADVERTISE_IP` overrides).
+The last step is only needed on nodes that aren't running `--replicate all`.
+
+## The optional dashboard
+
+Only if you want the web UI. Run the collector somewhere:
+
+```sh
+systemctl --user enable --now collab-cluster-collector    # serves :8100
+```
+
+and point nodes at it by writing one line to the env file the node unit reads
+(`-` on the `EnvironmentFile=` line means it's fine for this to be absent, which
+is the normal case):
+
+```sh
+# ~/.config/collab-cluster-experiment/env
+SWARM_COLLECTOR=<collector-address>      # e.g. collector.incus, or a host/IP
+```
+
+Nothing else needs it. Nodes that never hear of a collector replicate exactly the
+same.
+
+## Spread across hosts
+
+Nothing to do — that's the point. Nodes advertise nothing and are told nothing;
+each learns its peers' addresses from the beacons it receives.
+
+The one prerequisite is that multicast reaches between them (same segment,
+TTL 1). Where it doesn't, give a node one address to start from and it learns the
+rest by gossip — add `--peer <a-known-node>` to the unit's `ExecStart=`.

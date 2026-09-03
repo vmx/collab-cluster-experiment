@@ -1,4 +1,4 @@
-# Incus profile for the collab-cluster-experiment swarm.
+# Incus profile for a collab-cluster swarm.
 #
 # On first boot (via cloud-init) this profile makes a container ready to run a
 # swarm component:
@@ -8,18 +8,19 @@
 #     all resolve inside that checkout,
 #   - installs the units into ~/.config/systemd/user/ (you enable the right one
 #     per container — see the incus README, step 3),
-#   - writes the optional env file the collab-cluster-node / collab-cluster-collector
-#     units read (~/.config/collab-cluster-experiment/env), pointing them at the
-#     tracker and collector by Incus DNS name.
+#   - writes the env file the collab-cluster-node units read
+#     (~/.config/collab-cluster-experiment/env), pointing them at the collector
+#     by Incus DNS name.
 #
-# The SAME content works in every container: the tracker ignores the env vars,
-# the collector uses SWARM_TRACKER, nodes use both. So this one profile applies
-# to every container in the swarm.
+# Only that last part is configuration, and only for the optional dashboard:
+# nodes need NO configuration to find each other — they discover peers with a
+# multicast beacon on the container bridge. The env file is harmless in every
+# container (the collector ignores it), so this one profile applies to the whole
+# swarm.
 #
 # Assumptions (edit if they don't hold):
-#   - Your tracker/collector containers are named `tracker` and `collector`, so
-#     `tracker.incus` / `collector.incus` resolve on the bridge. Rename below if
-#     you use different container names.
+#   - Your dashboard container is named `collector`, so `collector.incus`
+#     resolves on the bridge. Rename below if you use a different name.
 #   - The services run under the image's default `debian` user's `systemd --user`
 #     instance (home /home/debian). For a different user, change the paths/owner.
 #   - The image has cloud-init (use the images: '/cloud' variants).
@@ -34,7 +35,7 @@
 # Load:   incus profile create collab-cluster
 #         incus profile edit   collab-cluster < incus/collab-cluster.yaml
 # Apply:  incus launch <image> <name> --profile default --profile collab-cluster
-description: collab-cluster-experiment swarm (repo + units + env, tracker/collector by .incus name)
+description: collab-cluster swarm (repo + units + env, collector by .incus name)
 config:
   cloud-init.user-data: |
     #cloud-config
@@ -51,11 +52,10 @@ config:
         permissions: '0644'
         defer: true
         content: |
-          SWARM_TRACKER=tracker.incus
           SWARM_COLLECTOR=collector.incus
     runcmd:
       - git clone --depth 1 https://github.com/vmx/collab-cluster-experiment.git /home/debian/collab-cluster-experiment
-      # Install the systemd --user units (copies all three; enable one later).
+      # Install the systemd --user units (copies both; enable one later).
       - mkdir --parents /home/debian/.config/systemd/user
       - cp /home/debian/collab-cluster-experiment/systemd/collab-cluster-*.service /home/debian/.config/systemd/user/
       # The clone/copy ran as root, so hand the whole home back to `debian`.

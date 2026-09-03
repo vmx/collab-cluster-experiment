@@ -1,50 +1,48 @@
-"""Drive the running swarm by hand: list the torrent catalog, inspect what each
-node holds, and tell nodes to serve or download specific torrents.
+"""Talk to a node.
 
-    python control.py list                              # catalog + live peers per torrent
-    python control.py status 10.0.0.5                   # what that node holds now
-    python control.py add 10.0.0.5 media --mode serve --path /data/media  # serve in place
-    python control.py add 10.0.0.6 media --mode download                  # that node downloads
-    python control.py remove 10.0.0.6 media             # that node drops 'media'
-    python control.py subscribe                         # watch for newly added torrents
+    python control.py publish 10.0.0.5 ~/photos   # put local data into the swarm
+    python control.py list     10.0.0.5           # datasets that node knows of
+    python control.py peers    10.0.0.5           # nodes it can see
+    python control.py status   10.0.0.5           # datasets it actually holds
+    python control.py add      10.0.0.6 photos    # manual mode: take that one
+    python control.py remove   10.0.0.6 photos    # drop it
 
-Nodes are addressed by their control endpoint, "host[:port]" (port defaults to
-the standard control port, so on its own IP a node is just its address). Several
+Nodes are addressed by their HTTP endpoint, "host[:port]" (port defaults to the
+standard control port, so on its own IP a node is just its address). Several
 nodes on one host in a dev run are told apart by port, e.g. 127.0.0.1:8002.
 
-Torrents are referred to by name (the basename of the shared file/dir), as shown
-by `list`. Adding brand-new content is a single step: `add <node> <name> --mode
-serve --path <dir>` has the node build the torrent from `--path` and publish it to
-the tracker if `name` isn't in the catalog yet — so the catalog fills up as nodes
-start serving. (`make_torrent.py` remains a standalone way to build a .torrent
-offline.)
+There is nothing central to talk to: every node answers for itself, and any node
+will do for `list` — they converge on the same catalog. Datasets are named by the
+basename of whatever was published; where a name is ambiguous (two nodes
+published different content under the same one), use the info-hash instead.
 """
 import argparse
 import json
+import re
 import sys
+import urllib.error
 import urllib.request
 
 import catalog
 import config
-import swarm_stats
+
+# A dataset reference that looks like hex is treated as an info-hash, in full or
+# shortened to any unique leading portion — so the 16-character forms `list` and
+# the ambiguity errors print can be pasted straight back in. Below 8 characters
+# it's too collision-prone to be worth guessing at, and reads as a name.
+HEXREF = re.compile(r"^[0-9a-f]{8,64}$", re.I)
+
+# Publishing hashes the content before returning, which takes as long as it takes
+# on a big tree — so this deliberately isn't the short timeout the other calls use.
+PUBLISH_TIMEOUT = 3600.0
 
 
-def _node_url(endpoint: str, path: str) -> str:
-    host, port = config.parse_endpoint(endpoint)
-    return f"http://{host}:{port}{path}"
-
-
-def _get(endpoint: str):
-    with urllib.request.urlopen(_node_url(endpoint, "/stats"), timeout=2.0) as r:
-        return json.loads(r.read().decode())
-
-
-def _post(endpoint: str, path: str, payload: dict):
-    data = json.dumps(payload).encode()
-    req = urllib.request.Request(_node_url(endpoint, path), data=data,
+def _post(endpoint: str, path: str, payload: dict, timeout: float = 5.0):
+    base = catalog.base_url(endpoint)
+    req = urllib.request.Request(f"{base}{path}", data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=5.0) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
         raw = e.read().decode("utf-8", "replace")
@@ -54,46 +52,74 @@ def _post(endpoint: str, path: str, payload: dict):
             return {"error": f"HTTP {e.code}: {raw[:200]}"}
 
 
-def cmd_list(_args) -> None:
+def _dataset_ref(ref: str) -> dict:
+    """Address a dataset the way the user typed it. The node resolves either
+    form, and falls back to matching a name if a hex-looking ref matches no
+    hash — so a dataset that happens to be named like one still works."""
+    return {"info_hash": ref.lower()} if HEXREF.match(ref) else {"name": ref}
+
+
+def _unreachable(endpoint: str) -> None:
+    print(f"{endpoint}: unreachable — is `python node.py` running there?")
+    sys.exit(1)
+
+
+def cmd_list(args) -> None:
+    base = catalog.base_url(args.endpoint)
     try:
-        metas = catalog.fetch_list()
+        metas = catalog.fetch_list(base)
     except Exception:
-        print("can't reach the tracker catalog — is bittorrent_tracker.py running?")
-        sys.exit(1)
+        _unreachable(args.endpoint)
     if not metas:
-        print("catalog empty — add content with: "
-              "python control.py add <node> <name> --mode serve --path <dir>")
+        print("no datasets yet — publish one with: "
+              "python control.py publish <node> <path>")
         return
-    # The tracker holds no content — only the catalog and which peers announce it.
-    # So show live seeders/leechers (where the data actually lives) rather than the
-    # local path the torrent happened to be built from. Tracker keys torrents by the
-    # 40-hex truncated v2 info-hash, so match on meta['info_hash'][:40].
+    # Which of them this node actually holds, and how far along.
     try:
-        live = {t["info_hash"]: t.get("peers", [])
-                for t in catalog.fetch_stats().get("torrents", [])}
+        held = {t.get("info_hash_v2"): t
+                for t in (catalog.fetch_stats(base).get("torrents") or [])}
     except Exception:
-        live = {}
-    print(f"{'name':<20} {'v2 info-hash':<20} peers")
+        held = {}
+    print(f"{'name':<24} {'v2 info-hash':<18} on this node")
     for m in metas:
-        peers = live.get(m["info_hash"][:40], [])
-        seeders = sum(1 for p in peers if p.get("role") == swarm_stats.PEER_ROLE_SEEDER)
-        print(f"{m['name']:<20} {m['info_hash'][:18]:<20} "
-              f"{seeders} seed / {len(peers) - seeders} leech")
+        t = held.get(m["info_hash"])
+        if not t:
+            state = "-"
+        elif t.get("is_seeding") or (t.get("progress") or 0) >= 1.0:
+            state = "complete"
+        else:
+            state = f"{(t.get('progress') or 0) * 100:.0f}%"
+        print(f"{m['name']:<24} {m['info_hash'][:16]:<18} {state}")
+
+
+def cmd_peers(args) -> None:
+    try:
+        view = catalog.fetch_peers(catalog.base_url(args.endpoint))
+    except Exception:
+        _unreachable(args.endpoint)
+    me = view.get("self") or {}
+    print(f"this node  {me.get('node','?')[:8]}  {me.get('label','')}  "
+          f"({me.get('held',0)} held / {me.get('known',0)} known)")
+    peers = view.get("peers") or []
+    if not peers:
+        print("\nno peers seen yet. If they're on another segment, start the node "
+              "with --peer <a-known-node>.")
+        return
+    print(f"\n{'node':<10} {'address':<22} {'catalog':<13} last seen")
+    for p in peers:
+        addr = f"{p.get('ip')}:{p.get('bt')}"
+        print(f"{(p.get('node') or '?')[:8]:<10} {addr:<22} "
+              f"{(p.get('cat') or '-'):<13} {p.get('age', '?')}s ago")
 
 
 def cmd_status(args) -> None:
-    # Ask one node directly what it holds, by its control endpoint. Swarm-wide
-    # status across all nodes comes from the collector (piece_map / report),
-    # which every node pushes to, rather than by scanning each node here.
-    ep = args.endpoint
     try:
-        snap = _get(ep)
+        snap = catalog.fetch_stats(catalog.base_url(args.endpoint))
     except Exception:
-        print(f"{ep}: (down)")
-        return
+        _unreachable(args.endpoint)
     torrents = snap.get("torrents") or []
     if not torrents:
-        print(f"{ep}: idle (no torrents)")
+        print(f"{args.endpoint}: holding nothing yet")
         return
     parts = []
     for t in torrents:
@@ -101,40 +127,37 @@ def cmd_status(args) -> None:
         role = "seed" if complete else "leech"
         parts.append(f"{t.get('name', '?')}[{role} "
                      f"{(t.get('progress') or 0) * 100:.0f}% p{t.get('num_peers') or 0}]")
-    print(f"{ep}: " + "  ".join(parts))
+    print(f"{args.endpoint}: " + "  ".join(parts))
+
+
+def cmd_publish(args) -> None:
+    res = _post(args.endpoint, "/publish", {"path": args.path},
+                timeout=PUBLISH_TIMEOUT)
+    if res.get("error"):
+        print(f"{args.endpoint}: {res['error']}")
+        sys.exit(1)
+    if not res.get("published"):
+        print(f"{args.endpoint}: already published {res['name']!r} "
+              f"[{res['info_hash'][:16]}] — nothing to do")
+        return
+    print(f"{args.endpoint}: published {res['name']!r} [{res['info_hash'][:16]}]")
+    print(f"every node learns about it within a tick (~{config.BEACON_INTERVAL:.0f}s). "
+          "Nodes running --replicate all\nfetch it on their own; tell any other "
+          "node to keep a copy with:")
+    print(f"  python control.py add <node> {res['info_hash'][:16]}")
 
 
 def cmd_add(args) -> None:
-    if args.mode == "serve" and not args.path:
-        sys.exit("--mode serve needs --path <the local file/dir to serve>")
-    res = _post(args.endpoint, "/add",
-                {"name": args.name, "mode": args.mode, "path": args.path})
+    res = _post(args.endpoint, "/add", _dataset_ref(args.dataset))
     print(f"{args.endpoint}: {json.dumps(res)}")
     if res.get("error"):
         sys.exit(1)
 
 
 def cmd_remove(args) -> None:
-    res = _post(args.endpoint, "/remove", {"name": args.name})
+    res = _post(args.endpoint, "/remove", _dataset_ref(args.dataset))
     print(f"{args.endpoint}: {json.dumps(res)}")
-
-
-def cmd_subscribe(args) -> None:
-    # A tail -f-style watch: block on the tracker's stream and print each newly
-    # added torrent as it appears, in the same columns as `list`.
-    print(f"{'name':<20} v2 info-hash")
-    print("(watching for new torrents — Ctrl-C to stop)")
-
-    def on_torrent(meta: dict) -> None:
-        print(f"{meta.get('name', '?'):<20} {meta.get('info_hash', '')[:18]}",
-              flush=True)
-
-    try:
-        catalog.subscribe(on_torrent, since=args.since)
-    except KeyboardInterrupt:
-        pass
-    except Exception:
-        print("subscription ended — is bittorrent_tracker.py running?")
+    if res.get("error"):
         sys.exit(1)
 
 
@@ -143,38 +166,32 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("list", help="list catalog torrents").set_defaults(func=cmd_list)
-
-    ep_help = "node control endpoint host[:port] (port defaults to the standard " \
-              f"control port {config.STATS_PORT_BASE})"
     default_ep = f"{config.HOST}:{config.STATS_PORT_BASE}"
+    ep_help = ("node endpoint host[:port] (port defaults to the standard control "
+               f"port {config.STATS_PORT_BASE}; default: {default_ep})")
 
-    p_status = sub.add_parser("status", help="show what one node holds")
-    p_status.add_argument("endpoint", nargs="?", default=default_ep,
-                          help=f"{ep_help} (default: {default_ep})")
-    p_status.set_defaults(func=cmd_status)
+    def with_endpoint(name, help_text, func, required=False):
+        p = sub.add_parser(name, help=help_text)
+        if required:
+            p.add_argument("endpoint", help=ep_help)
+        else:
+            p.add_argument("endpoint", nargs="?", default=default_ep, help=ep_help)
+        p.set_defaults(func=func)
+        return p
 
-    p_add = sub.add_parser("add", help="tell a node to serve/download a torrent")
-    p_add.add_argument("endpoint", help=ep_help)
-    p_add.add_argument("name", help="catalog torrent name (see `list`)")
-    p_add.add_argument("--mode", choices=["serve", "download"], default="download",
-                       help="serve in place from --path, or download a copy")
-    p_add.add_argument("--path", help="for --mode serve: the local file/dir on the "
-                                      "node to serve; if the torrent isn't in the "
-                                      "catalog yet it's built from this and published")
-    p_add.set_defaults(func=cmd_add)
+    with_endpoint("list", "datasets a node knows of", cmd_list)
+    with_endpoint("peers", "nodes a node can see", cmd_peers)
+    with_endpoint("status", "datasets a node actually holds", cmd_status)
 
-    p_rm = sub.add_parser("remove", help="tell a node to drop a torrent")
-    p_rm.add_argument("endpoint", help=ep_help)
-    p_rm.add_argument("name")
-    p_rm.set_defaults(func=cmd_remove)
+    p_pub = with_endpoint("publish", "put a local file/dir into the swarm",
+                          cmd_publish, required=True)
+    p_pub.add_argument("path", help="the file/dir to publish, local to that node")
 
-    p_sub = sub.add_parser("subscribe",
-                           help="watch for newly added catalog torrents (blocks)")
-    p_sub.add_argument("--since", type=int, default=None,
-                       help="resume from this event seq (0 replays the whole "
-                            "catalog first); default: only torrents added from now")
-    p_sub.set_defaults(func=cmd_subscribe)
+    for name, help_text, func in [
+            ("add", "tell a node to take a dataset (manual mode)", cmd_add),
+            ("remove", "tell a node to drop a dataset", cmd_remove)]:
+        p = with_endpoint(name, help_text, func, required=True)
+        p.add_argument("dataset", help="dataset name, or its v2 info-hash")
 
     args = ap.parse_args()
     args.func(args)

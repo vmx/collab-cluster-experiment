@@ -1,25 +1,20 @@
-"""Create BitTorrent v2-only .torrent files from arbitrary local files or
-directories (nested directories are included recursively) and register them in
-a small on-disk catalog the nodes can resolve by name.
+"""Build BitTorrent v2-only .torrent files from arbitrary local files or
+directories, and read back a node's catalog directory.
 
-    python make_torrent.py /path/to/dir-or-file [more paths...]
-    python make_torrent.py                # no args: generate two sample torrents
-    python make_torrent.py --tracker http://10.0.0.1:6969/announce dir  # explicit announce URL
+This is a **library** first: `build()` is what a node calls when you publish a
+local path to it (`control.py publish`), and `list_catalog()` is how a node reads
+the catalog it keeps on disk. Torrents are:
 
-Each torrent is written to the catalog as a single file under config.TORRENTS_DIR:
-    <name>.torrent   the torrent itself
-where <name> is the torrent's name (the basename of the shared file/dir). The
-torrent is the only source of truth — its name and info-hash are read back by
-parsing it, so there is no sidecar. To seed the content in place, hand the node
-that already holds it the local directory to serve from (`control.py add …
---mode serve --path <dir>`); other nodes download into nodes/<id>/<name>/.
+  - **v2-only** => SHA-256 merkle hashing, no v1/hybrid.
+  - **trackerless** => no announce URL at all; there is no tracker in this system.
+  - **private** => libtorrent disables DHT, PEX and LSD for them, so the *only*
+    peers a torrent ever sees are the ones the node injects from its beacon-
+    discovered peer table (see node.py). Discovery is entirely ours.
 
-The catalog on the tracker is normally populated as a side effect of the first
-node serving new content: `control.py add … --mode serve --path` has that node
-build the torrent (via build_torrent below) and publish it. This CLI is the
-standalone/offline way to build a .torrent into the local catalog dir.
+Run as a script it does one thing — generate the built-in sample content, so
+there's something to publish:
 
-v2-only => SHA-256 merkle hashing, no v1/hybrid.
+    python make_torrent.py            # writes data/sample/{media,documents}
 """
 import argparse
 import glob
@@ -30,8 +25,8 @@ import libtorrent as lt
 
 import config
 
-# Built-in sample: two separate content roots => two separate torrents, so the
-# multi-torrent machinery is exercised out of the box. (relative path, size).
+# Built-in sample: two separate content roots => two separate datasets, so the
+# multi-dataset machinery is exercised out of the box. (relative path, size).
 SAMPLE_GROUPS = {
     "media": [
         ("photo_a.bin", 5 * 1024 * 1024),
@@ -46,23 +41,89 @@ SAMPLE_GROUPS = {
 }
 
 
-# --- catalog helpers (used by node.py and control.py) ------------------------
-
-def catalog_torrent_path(name: str) -> str:
-    return os.path.join(config.TORRENTS_DIR, f"{name}.torrent")
-
-
-def list_catalog() -> list:
-    """All registered torrents as {"name", "info_hash"} dicts, sorted by name,
-    derived by parsing each .torrent in the catalog (its single source of truth)."""
-    metas = []
-    for path in sorted(glob.glob(os.path.join(config.TORRENTS_DIR, "*.torrent"))):
-        ti = lt.torrent_info(path)
-        metas.append({"name": ti.name(), "info_hash": str(ti.info_hashes().v2)})
-    return sorted(metas, key=lambda m: m["name"])
+def _is_pad(fs, i: int) -> bool:
+    if hasattr(fs, "pad_file_at"):
+        try:
+            return fs.pad_file_at(i)
+        except Exception:
+            pass
+    return "/.pad/" in fs.file_path(i).replace(os.sep, "/")
 
 
 # --- building ----------------------------------------------------------------
+
+def build(source: str) -> tuple:
+    """Hash a local file/dir into a .torrent. Returns (name, info_hash, blob).
+
+    Returns the bencoded bytes rather than writing them: the caller decides where
+    they live (a node drops them in its own catalog, then gossips them to peers).
+    Raises ValueError on bad input — this runs inside a node's HTTP handler, so
+    it must not exit the process.
+    """
+    source = os.path.abspath(source)
+    if not os.path.exists(source):
+        raise ValueError(f"content path does not exist: {source}")
+
+    fs = lt.file_storage()
+    # add_files recurses into directories and preserves the nested layout.
+    lt.add_files(fs, source)
+    if fs.total_size() == 0:
+        raise ValueError(f"no data found under {source}")
+
+    ct = lt.create_torrent(fs, config.PIECE_SIZE, flags=lt.create_torrent.v2_only)
+    # No add_tracker(): there is no tracker. Peers arrive only via node.py's
+    # beacon-driven connect_peer(), so private costs us nothing and keeps
+    # libtorrent from reaching for DHT/PEX/LSD. (The private flag lives in the
+    # info-dict, so it is part of the info-hash.)
+    ct.set_priv(True)
+    ct.set_creator("collab-cluster-experiment")
+    ct.set_comment(f"v2-only dataset: {os.path.basename(source)}")
+    # Hash the files as they sit on disk; save_path is the content root's parent.
+    lt.set_piece_hashes(ct, os.path.dirname(source))
+
+    blob = lt.bencode(ct.generate())
+    ti = lt.torrent_info(lt.bdecode(blob))
+    return ti.name(), str(ti.info_hashes().v2), blob
+
+
+def serve_save_path(ti, source: str) -> str:
+    """Where libtorrent must look to find `source`'s data already on disk.
+
+    Usually a torrent's root *is* the content directory, so the save path is its
+    parent. But libtorrent collapses a directory holding exactly one file into a
+    single-file torrent named after that file, dropping the directory level — for
+    those, the save path is the directory we were handed. So derive it from the
+    torrent we actually built rather than assuming a shape.
+    """
+    source = os.path.abspath(source)
+    if os.path.isdir(source) and ti.name() != os.path.basename(source):
+        return source
+    return os.path.dirname(source)
+
+
+# --- catalog -----------------------------------------------------------------
+
+def list_catalog(dirpath: str) -> list:
+    """Every .torrent in a catalog directory, as {"name", "info_hash", "path"}.
+
+    The .torrent is the only source of truth — name and info-hash come from
+    parsing it, never from the filename (which carries a readable slug purely for
+    humans; see node.slug). Sorted by name, then hash, so two datasets that share
+    a name still have a stable order.
+    """
+    metas = []
+    for path in sorted(glob.glob(os.path.join(dirpath, "*.torrent"))):
+        try:
+            ti = lt.torrent_info(path)
+        except Exception as exc:
+            print(f"catalog: skipping {os.path.basename(path)}: {exc}", flush=True)
+            continue
+        metas.append({"name": ti.name(), "info_hash": str(ti.info_hashes().v2),
+                      "path": path})
+    return sorted(metas, key=lambda m: (m["name"], m["info_hash"]))
+
+
+# --- sample content ----------------------------------------------------------
 
 def build_sample(root: str) -> list:
     """Generate the nested sample content roots; return their paths."""
@@ -82,95 +143,17 @@ def build_sample(root: str) -> list:
     return roots
 
 
-def _is_pad(fs, i: int) -> bool:
-    if hasattr(fs, "pad_file_at"):
-        try:
-            return fs.pad_file_at(i)
-        except Exception:
-            pass
-    return "/.pad/" in fs.file_path(i).replace(os.sep, "/")
-
-
-def build_torrent(source: str, tracker_url: str = None) -> tuple:
-    """Build a v2-only .torrent for `source` (a local file/dir) and return
-    (name, data): the torrent's own name and the bencoded .torrent bytes.
-
-    Pure — it neither writes to the catalog nor prints, so callers decide what to
-    do with the bytes: the CLI writes them into the local catalog dir; a node
-    (node.py's add path) publishes them to the tracker. Raises ValueError on bad
-    input rather than exiting, so it's safe to call from a long-running daemon."""
-    tracker_url = tracker_url or config.TRACKER_URL
-    source = os.path.abspath(source)
-    if not os.path.exists(source):
-        raise ValueError(f"content path does not exist: {source}")
-    seed_save_path = os.path.dirname(source)  # parent of the content root
-
-    fs = lt.file_storage()
-    # add_files recurses into directories and preserves the nested layout.
-    lt.add_files(fs, source)
-    if fs.total_size() == 0:
-        raise ValueError(f"no data found under {source}")
-
-    ct = lt.create_torrent(fs, config.PIECE_SIZE, flags=lt.create_torrent.v2_only)
-    ct.add_tracker(tracker_url)
-    # Private => discovery is tracker-only: libtorrent disables PEX, DHT and LSD
-    # for this torrent, so peers find each other purely by announcing to the
-    # tracker. (The private flag lives in the info-dict, so it is part of the
-    # info-hash — rebuild torrents after changing it.)
-    ct.set_priv(True)
-    ct.set_creator("bittorrent-prototype")
-    ct.set_comment(f"v2-only prototype content: {os.path.basename(source)}")
-    lt.set_piece_hashes(ct, seed_save_path)  # hash the files as they sit on disk
-    return fs.name(), lt.bencode(ct.generate())
-
-
-def make_torrent(source: str, tracker_url: str = None) -> dict:
-    """CLI/offline builder: build the torrent and write it into the local catalog
-    dir (config.TORRENTS_DIR), printing a human-readable summary. Returns
-    {"name", "info_hash"}."""
-    name, data = build_torrent(source, tracker_url)
-    os.makedirs(config.TORRENTS_DIR, exist_ok=True)
-    torrent_path = catalog_torrent_path(name)
-    with open(torrent_path, "wb") as f:
-        f.write(data)
-
-    ti = lt.torrent_info(torrent_path)
-    fs = ti.files()
-    info_hash = str(ti.info_hashes().v2)
-
-    real_files = [(fs.file_path(i), fs.file_size(i)) for i in range(fs.num_files())
-                  if not _is_pad(fs, i)]
-    print(f"wrote {torrent_path}")
-    print(f"  name         : {name}")
-    print(f"  v2 info-hash : {info_hash}")
-    print(f"  files        : {len(real_files)}  (total {ti.total_size()} bytes)")
-    print(f"  pieces       : {ti.num_pieces()} x {ti.piece_length()} bytes")
-    # A node on this host can serve the content in place by pointing --path at it
-    # (its parent becomes libtorrent's save_path).
-    print(f"  serve in place with: --mode serve --path {os.path.abspath(source)}")
-    for path, size in real_files:
-        print(f"    - {path}  ({size} bytes)")
-    return {"name": name, "info_hash": info_hash}
-
-
-def main(sources=None, tracker_url: str = None) -> None:
-    if not sources:
-        sources = build_sample(config.SAMPLE_DIR)
-    elif isinstance(sources, str):
-        sources = [sources]
-    for src in sources:
-        try:
-            make_torrent(src, tracker_url)
-        except ValueError as e:
-            sys.exit(f"error: {e}")
+def main() -> None:
+    argparse.ArgumentParser(
+        description="Generate the built-in sample content to publish.",
+        epilog="Nothing is catalogued here: hand a path to a node with "
+               "`control.py publish` and the swarm takes it from there.",
+    ).parse_args()
+    roots = build_sample(config.SAMPLE_DIR)
+    rel = os.path.relpath(roots[0], config.BASE_DIR)
+    print("\nnow publish it to any running node, e.g.:")
+    print(f"  python control.py publish {config.HOST}:{config.STATS_PORT_BASE} {rel}")
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("paths", nargs="*",
-                    help="files/dirs to make torrents from (default: sample content)")
-    ap.add_argument("--tracker", default=config.TRACKER_URL,
-                    help="announce URL to bake into the torrents (default: %(default)s)")
-    args = ap.parse_args()
-    main(args.paths or None, args.tracker)
+    sys.exit(main())

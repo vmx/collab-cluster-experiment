@@ -1,6 +1,6 @@
 #!/bin/sh
-# Provision and run the whole swarm on Incus: a tracker, a collector (web UI)
-# and N nodes, one container each. This is the scripted form of the steps in
+# Provision and run the whole swarm on Incus: N nodes and an optional collector
+# (web UI), one container each. This is the scripted form of the steps in
 # incus/README.md, and it is idempotent — re-running it skips what already
 # exists, so it doubles as a "bring everything back up" command.
 #
@@ -11,9 +11,11 @@
 #   PROFILE=collab-cluster         profile name to create/update
 #   WEB_PORT=8100                  host port for the collector's web UI
 #   EXPOSE_WEB=1                   0 = don't add the public proxy device
+#   COLLECTOR=1                    0 = nodes only, no dashboard container
 #
-# The tracker/collector container names are fixed: nodes reach them by the
-# `tracker.incus` / `collector.incus` names baked into the profile's env file.
+# Node names don't matter — nodes are told no addresses and discover each other
+# by multicast. Only the collector's name is fixed, since nodes reach it by the
+# `collector.incus` name baked into the profile's env file.
 set -eu
 
 IMAGE=${IMAGE:-images:debian/14/cloud}
@@ -21,9 +23,9 @@ NODES=${NODES:-3}
 PROFILE=${PROFILE:-collab-cluster}
 WEB_PORT=${WEB_PORT:-8100}
 EXPOSE_WEB=${EXPOSE_WEB:-1}
+COLLECTOR_ENABLED=${COLLECTOR:-1}
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-TRACKER=tracker
 COLLECTOR=collector
 
 say() {
@@ -43,9 +45,11 @@ node_names() {
 	done
 }
 
-# Every container: tracker, collector, then the nodes.
+# Every container: the nodes, plus the collector when the dashboard is wanted.
 all_names() {
-	printf '%s\n%s\n' "$TRACKER" "$COLLECTOR"
+	if [ "$COLLECTOR_ENABLED" = 1 ]; then
+		printf '%s\n' "$COLLECTOR"
+	fi
 	node_names
 }
 
@@ -105,13 +109,14 @@ enable_unit() {
 	# systemd --user units only come back at boot if the user lingers.
 	incus exec "$name" -- loginctl enable-linger debian
 }
-enable_unit "$TRACKER" collab-cluster-tracker
-enable_unit "$COLLECTOR" collab-cluster-collector
+if [ "$COLLECTOR_ENABLED" = 1 ]; then
+	enable_unit "$COLLECTOR" collab-cluster-collector
+fi
 for name in $(node_names); do
 	enable_unit "$name" collab-cluster-node
 done
 
-if [ "$EXPOSE_WEB" = 1 ]; then
+if [ "$COLLECTOR_ENABLED" = 1 ] && [ "$EXPOSE_WEB" = 1 ]; then
 	say "Exposing the web UI on tcp:0.0.0.0:$WEB_PORT"
 	if incus config device get "$COLLECTOR" web listen >/dev/null 2>&1; then
 		echo 'proxy device already present'
@@ -133,18 +138,26 @@ done
 
 first_node=$(node_names | sed -n 1p)
 second_node=$(node_names | sed -n 2p)
-cat <<EOF
+
+if [ "$COLLECTOR_ENABLED" = 1 ]; then
+	cat <<EOF
 
 Dashboard: http://$(ip_of "$COLLECTOR"):8100/  (also http://<this-host>:$WEB_PORT/)
+EOF
+fi
+
+cat <<EOF
 
 Drive the swarm from here, addressing nodes by the IPs above, e.g.:
 
+  # confirm the nodes found each other
+  python control.py peers $(ip_of "$first_node")
   # generate the sample content on $first_node
   incus exec $first_node -- su --login debian --command \\
       'python3 collab-cluster-experiment/make_torrent.py'
-  # have $first_node serve it (builds + publishes the torrent)
-  python control.py add $(ip_of "$first_node") media --mode serve \\
-      --path /home/debian/collab-cluster-experiment/data/sample/media
-  # have $second_node fetch it
-  python control.py add $(ip_of "$second_node") media --mode download
+  # hash it into a dataset and seed it in place
+  python control.py publish $(ip_of "$first_node") \\
+      /home/debian/collab-cluster-experiment/data/sample/media
+  # every node learns about it; have $second_node keep a copy
+  python control.py add $(ip_of "$second_node") media
 EOF
