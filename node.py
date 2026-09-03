@@ -444,6 +444,16 @@ def make_handler(ns: NodeState):
         def log_message(self, *args):
             pass
 
+        def handle_one_request(self):
+            # Peers and CLI clients come and go mid-request — a timed-out
+            # /catalog fetch, an interrupted `control.py status`. socketserver
+            # would print a traceback for each one, which in a service log looks
+            # like the node is failing when it is only being read from.
+            try:
+                super().handle_one_request()
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
+
         def _send_json(self, obj, code=200):
             body = json.dumps(obj).encode()
             self.send_response(code)

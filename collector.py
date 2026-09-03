@@ -539,6 +539,17 @@ def make_handler():
         def log_message(self, *args):
             pass
 
+        def handle_one_request(self):
+            # A client that goes away mid-response — a browser navigating off
+            # the page, a reload, a curl piped into head — leaves us writing to
+            # a closed socket. That is normal traffic, not an error, but
+            # socketserver's default is to print a full traceback per dropped
+            # request, which buries anything real in the log.
+            try:
+                super().handle_one_request()
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
+
         def _send(self, body: bytes, ctype: str = "text/plain", code: int = 200,
                   extra_headers: dict = None) -> None:
             self.send_response(code)
