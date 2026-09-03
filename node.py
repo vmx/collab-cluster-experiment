@@ -36,7 +36,6 @@ import struct
 import threading
 import time
 import traceback
-import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
@@ -83,8 +82,7 @@ class NodeState:
         # a node can join where multicast doesn't reach.
         self.static: list = []
         self.session_stats: dict = {}
-        self.snapshot: dict = {"node_key": node_key, "label": config.node_label(node_id),
-                               "torrents": [], "peers": []}
+        self.snapshot: dict = {"node_key": node_key, "torrents": [], "peers": []}
         self.stop = threading.Event()
 
 
@@ -540,9 +538,7 @@ def session_loop(ns: NodeState) -> None:
 
         snap = {
             "node_key": ns.node_key,    # stable swarm-wide identity
-            "label": config.node_label(ns.node_id),  # used for display
             "ts": time.time(),
-            "advertise_ip": config.ADVERTISE_IP,
             "bt_port": config.bt_port(ns.node_id),
             "session": ns.session_stats,
             "disk": node_disk(ns.node_id),
@@ -893,8 +889,7 @@ def make_handler(ns: NodeState):
                 held = len(ns.torrents)
                 known = len(ns.catalog)
             me = self_beacon(ns)
-            me.update({"label": config.node_label(ns.node_id),
-                       "held": held, "known": known})
+            me.update({"held": held, "known": known})
             return {"self": me, "peers": sorted(peers, key=lambda p: p["node"])}
 
         def _catalog_file(self, name: str):
@@ -941,25 +936,6 @@ def make_handler(ns: NodeState):
     return Handler
 
 
-def push_loop(ns: NodeState, collector_url: str) -> None:
-    """Best-effort: POST the node's latest snapshot to the optional collector
-    every PUSH_INTERVAL. A failed POST is ignored — it just shows up as this node
-    briefly going stale in the collector's view. The node dials out, so it needs
-    no inbound reachability of its own."""
-    while not ns.stop.wait(config.PUSH_INTERVAL):
-        with ns.lock:
-            snap = ns.snapshot
-        if not snap.get("torrents") and not snap.get("session"):
-            continue  # nothing meaningful to report yet
-        try:
-            req = urllib.request.Request(
-                collector_url, data=json.dumps(snap).encode(),
-                headers={"Content-Type": "application/json"}, method="POST")
-            urllib.request.urlopen(req, timeout=3).close()
-        except Exception:
-            pass
-
-
 def run(target, *args):
     try:
         target(*args)
@@ -986,15 +962,6 @@ def main() -> None:
                     help="bootstrap from a known node instead of relying on the "
                          "multicast beacon; repeatable. One is enough — the rest "
                          "of the swarm is learned by gossip.")
-    # The dashboard is opt-in: a node reports only if you point it at a
-    # collector, either with this flag or by setting SWARM_COLLECTOR (which is
-    # what the systemd/Incus deployments do, so one env var turns reporting on
-    # for a whole fleet).
-    ap.add_argument("--collector",
-                    default=config.COLLECTOR_URL if os.environ.get("SWARM_COLLECTOR") else "",
-                    help="collector ingest URL to push stats to for the optional "
-                         f"dashboard (e.g. {config.COLLECTOR_URL}); defaults to "
-                         "SWARM_COLLECTOR if set, otherwise no reporting")
     args = ap.parse_args()
 
     # Treat SIGTERM like Ctrl-C (raise KeyboardInterrupt) so the node shuts down
@@ -1011,9 +978,6 @@ def main() -> None:
     threads = [threading.Thread(target=run, args=(session_loop, ns), daemon=True)]
     sock = make_beacon_socket()
     threads.append(threading.Thread(target=run, args=(sync_loop, ns, sock), daemon=True))
-    if args.collector:
-        threads.append(threading.Thread(target=run, args=(push_loop, ns, args.collector),
-                                        daemon=True))
     for t in threads:
         t.start()
 

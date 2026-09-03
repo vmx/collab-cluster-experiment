@@ -13,8 +13,9 @@ The units run `python3` from `PATH` and set
 `WorkingDirectory=%h/collab-cluster-experiment`, so check the repo out at
 `~/collab-cluster-experiment` (the natural container layout) — or change that
 `WorkingDirectory=` if it lives elsewhere. Scripts, `data/`, and `nodes/` are all
-resolved relative to that dir. `python3` must have the `libtorrent` binding
-importable.
+resolved relative to that dir. On a machine running a node, `python3` must have
+the `libtorrent` binding importable; the dashboard and the one-shot tools speak
+only HTTP and don't need it.
 
 ## Install
 
@@ -27,7 +28,8 @@ systemctl --user enable --now collab-cluster-node
 ```
 
 That is the whole install on every machine. A node needs no configuration and no
-addresses — it discovers its peers on the local network.
+addresses at all — it discovers its peers on the local network, and nothing,
+including the optional dashboard, has to be pointed at it.
 
 As shipped, the unit stores nothing it wasn't asked for: the node joins, tracks
 the whole catalog and serves what it holds, and you name the datasets it should
@@ -37,44 +39,53 @@ keep. To have a machine mirror everything instead, add the flag:
 ExecStart=python3 node.py --replicate all
 ```
 
+Editing a unit after it is running takes a `systemctl --user daemon-reload` and a
+`restart` of it to take effect.
+
 ## Use
 
 ```sh
 systemctl --user status collab-cluster-node
-journalctl --user -u collab-cluster-node -f      # follow its log
-systemctl --user restart collab-cluster-node     # resumes with progress intact
+# follow its log
+journalctl --user -u collab-cluster-node -f
+# resumes with progress intact
+systemctl --user restart collab-cluster-node
 ```
 
 Then put some data in, from wherever you can reach a node:
 
 ```sh
-python control.py peers   <node-address>       # confirm they found each other
+# confirm they found each other
+python control.py peers   <node-address>
 python control.py publish <node-address> /path/to/data
-python control.py list    <other-node>         # every node now knows about it
-python control.py add     <other-node> <name>  # ...and this one keeps a copy
+# every node now knows about it
+python control.py list    <other-node>
+# ...and this one keeps a copy
+python control.py add     <other-node> <name>
 ```
 
 The last step is only needed on nodes that aren't running `--replicate all`.
 
 ## The optional dashboard
 
-Only if you want the web UI. Run the collector somewhere:
+Only if you want the web UI. It reads the swarm through one node, and the unit as
+shipped uses a node on the same machine. Running it somewhere without one means
+naming a node in the unit's `ExecStart=` first:
 
-```sh
-systemctl --user enable --now collab-cluster-collector    # serves :8100
+```ini
+ExecStart=python3 collector.py node0.example:8001
 ```
 
-and point nodes at it by writing one line to the env file the node unit reads
-(`-` on the `EnvironmentFile=` line means it's fine for this to be absent, which
-is the normal case):
+Any node will do — it is a way in, not a destination. Nothing is configured on
+the nodes: they have no dashboard setting and cannot tell whether anyone is
+watching.
 
 ```sh
-# ~/.config/collab-cluster-experiment/env
-SWARM_COLLECTOR=<collector-address>      # e.g. collector.incus, or a host/IP
+# only if you edited the unit after the daemon-reload above
+systemctl --user daemon-reload
+# serves :8100
+systemctl --user enable --now collab-cluster-collector
 ```
-
-Nothing else needs it. Nodes that never hear of a collector replicate exactly the
-same.
 
 ## Spread across hosts
 

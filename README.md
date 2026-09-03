@@ -105,10 +105,10 @@ datasets as they appear, and keeps ignoring them.
 
 Which nodes hold what is entirely up to you, and nothing has to agree: one
 dataset can live on every node, another on two, another on none at all. Nothing
-keeps track of that for you. `control.py status <node>` is the per-node answer;
-the swarm-wide one — including how many copies of each file exist, which is the
-number that matters when you place datasets by hand — needs the optional
-collector, see [the optional dashboard](#the-optional-dashboard).
+keeps track of that for you: `control.py status <node>` is the per-node answer,
+and `piece_map.py <node>` is the swarm-wide one — including how many copies of
+each file exist, which is the number that matters when you place datasets by
+hand.
 
 ### Dropping a dataset
 
@@ -236,7 +236,8 @@ node never states its own address — the receiver takes it from the packet — 
 there is nothing to configure on a multi-homed or NAT'd host.
 
 Beacons and gossip are the only sources of peers. Torrents are built private and
-trackerless, and DHT, PEX and LSD are disabled at the session level, so a node
+trackerless — the private flag is what keeps libtorrent from using PEX — and DHT,
+LSD, UPnP and NAT-PMP are switched off at the session level as well, so a node
 talks only to peers it heard from directly or was handed with `--peer`.
 `control.py peers` shows you exactly what a node believes, which is where to look
 when something isn't replicating.
@@ -257,22 +258,27 @@ it goes on to publish.
 The swarm replicates with this switched off; run it to *see* what's happening.
 
 ```bash
-python collector.py                                    # then open http://127.0.0.1:8100/
-python node.py --collector http://127.0.0.1:8100/api/ingest
+python collector.py 127.0.0.1:8001    # then open http://127.0.0.1:8100/
 ```
 
-Nodes push their snapshot to it and only ever dial out, so the collector is the
-one component that needs inbound reachability. It shows an overview sorted
-rarest-copies-first, a per-dataset piece map, in-flight transfers, and per-node
-storage. Setting `SWARM_COLLECTOR=<host>` turns reporting on without the flag,
-which is how the systemd and Incus deployments do it fleet-wide.
+That address is a way in, not a destination: the dashboard asks that node who
+else exists and reads every node's `/stats` itself. Any node will do, and
+nothing has to be configured — a node has no dashboard setting, and cannot tell
+whether anyone is watching. It shows an overview sorted rarest-copies-first, a
+per-dataset piece map, in-flight transfers, and per-node storage.
 
-The same data in the terminal (`piece_map.py` reads the collector, so it has to
-be running; `/stats` doesn't):
+Nodes appear under the address the dashboard reached them at, so what you read
+there is what you can paste into `control.py`. A node is never labelled by
+itself: it doesn't know its own address, which is the point of the beacon.
+
+The nodes are read at most once a second no matter how many browsers are open,
+and not at all while none is.
+
+The same data in the terminal, the same way:
 
 ```bash
-python piece_map.py             # who has which pieces, and how many copies exist
-watch -n 2 python piece_map.py
+python piece_map.py 127.0.0.1:8001    # who has which pieces, and how many copies exist
+watch -n 2 python piece_map.py 127.0.0.1:8001
 curl -s http://127.0.0.1:8001/stats | python -m json.tool     # one node, directly
 ```
 
@@ -295,11 +301,11 @@ POST /remove   {"name"|"info_hash"}  drop one
 | `node.py` | **The system.** libtorrent session + the sync tick (beacon, peers, catalog, want, mesh) + the HTTP API. Run one per machine. |
 | `control.py` | CLI to talk to a node: publish, list, peers, status, add, remove. |
 | `make_torrent.py` | Builds v2-only, private, trackerless torrents (`build()`), reads a catalog directory (`list_catalog()`). As a script, generates the sample content. |
-| `catalog.py` | Stdlib client for another node's HTTP API. No libtorrent, so `control.py` doesn't need it. |
+| `catalog.py` | Stdlib client for another node's HTTP API, including `fetch_swarm()` — every node's stats, gathered through one node's peer table. No libtorrent, so `control.py` doesn't need it. |
 | `config.py` | Ports, beacon group, timing, paths, the default replication policy. |
 | `swarm_stats.py` | Groups node snapshots by dataset and aggregates per-piece/per-file copy counts. Shared by `piece_map.py` and `collector.py`. |
-| `piece_map.py` | Terminal view: who holds which pieces, and how many copies of each file exist. |
-| `collector.py` | *Optional.* Receives node snapshots, serves the `/api/*` dashboard endpoints and the web UI. |
+| `piece_map.py` | Terminal view, through any node: who holds which pieces, and how many copies of each file exist. |
+| `collector.py` | *Optional.* Stateless: reads the swarm through any one node and serves the `/api/*` dashboard endpoints and the web UI. |
 | `webui/` | *Optional.* Zero-build [Tutuca](https://github.com/marianoguerra/tutuca) SPA, framework vendored as one file. Served by `collector.py`. |
 
 Python standard library only, plus the `libtorrent` binding (tested with
@@ -313,7 +319,7 @@ runtime.
 | Beacon (multicast, all nodes) | `239.255.42.1:6772` |
 | Node *i* BitTorrent | `6881 + i` |
 | Node *i* HTTP API | `8001 + i` |
-| Collector (optional) | `8100` |
+| Dashboard (optional) | `8100` |
 
 `--id` matters only when several nodes share a host: it picks `nodes/<id>/` and
 offsets the ports. One node per machine is the normal case, and `--id` defaults

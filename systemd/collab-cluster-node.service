@@ -2,11 +2,8 @@
 Description=collab-cluster node (BT 6881 / HTTP 8001, multicast beacon on 6772)
 
 [Service]
-# A node needs no configuration: it finds its peers on the local network. The
-# optional env file only turns on reporting to the dashboard, by setting
-# SWARM_COLLECTOR=<host> (see collab-cluster.yaml / the README). Leading '-' =
-# don't fail if the file is missing, which is the normal case.
-EnvironmentFile=-%h/.config/collab-cluster-experiment/env
+# A node needs no configuration at all: it finds its peers on the local network,
+# and nothing — not even the optional dashboard — has to be pointed at it.
 WorkingDirectory=%h/collab-cluster-experiment
 ExecStart=python3 node.py
 Restart=on-failure

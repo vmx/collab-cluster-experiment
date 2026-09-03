@@ -2,27 +2,25 @@
 peers each piece is stored on. Works on partial downloads, so you can see how
 many copies of the file currently exist across the swarm.
 
-Each node reports its own piece-ownership bitfield, which it pushes to the
-collector; this script reads the collector's live view, aggregates those
-bitfields and renders:
+Each node's /stats carries its own piece-ownership bitfield. Point this at any
+node: it reads that node's peer table, collects every node's bitfield and
+renders:
   * a per-node ownership map  (peer -> pieces)
   * a per-piece availability row + histogram  (piece -> peers)
   * a "copies of the file" summary
 
-It reads the collector's /api/live: the latest snapshot of every node still
-reporting.
+Nothing else has to be running — no collector, no dashboard.
 
 Usage:
-    python piece_map.py                  # live, from the collector, once
-    python piece_map.py --collector URL  # a non-default collector
+    python piece_map.py             # through the node on this machine
+    python piece_map.py <node>      # through any other node, host[:port]
 
 To refresh continuously, wrap it with the `watch` CLI tool:
     watch -n 2 python piece_map.py
 """
 import argparse
-import json
-import urllib.request
 
+import catalog
 import config
 import swarm_stats
 
@@ -36,12 +34,6 @@ def human(n: float) -> str:
         if n < 1024 or unit == "GiB":
             return f"{n:.1f} {unit}" if unit != "B" else f"{int(n)} B"
         n /= 1024
-
-
-def fetch_collector(base: str) -> list:
-    """The collector's live view: latest snapshot of every node still reporting."""
-    with urllib.request.urlopen(f"{base}/api/live", timeout=2.0) as r:
-        return json.loads(r.read().decode()).get("nodes", [])
 
 
 def piece_size(i: int, piece_length: int, total_size: int, num_pieces: int) -> int:
@@ -78,8 +70,8 @@ def render_avail(avail: list, num_pieces: int, cols: int) -> str:
 def report(nodes: list, source: str) -> None:
     torrents = swarm_stats.collect_by_torrent(nodes)
     if not torrents:
-        print("No torrents reported (is the collector running and are nodes pushing "
-              "with torrents assigned? check the collector's /api/health).")
+        print("No node is holding anything yet "
+              "(check: python control.py peers, then status).")
         return
     for i, (meta, rows) in enumerate(torrents):
         if i:
@@ -155,11 +147,14 @@ def render_torrent(meta: dict, rows: list, source: str) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--collector", default=config.COLLECTOR_BASE, metavar="URL",
-                    help="collector base URL to read /api/live from (default: %(default)s)")
+    ap.add_argument("node", nargs="?",
+                    default=f"{config.HOST}:{config.STATS_PORT_BASE}",
+                    help="any node's endpoint host[:port]; its peer table is the "
+                         "way to all the others (default: %(default)s)")
     args = ap.parse_args()
 
-    report(fetch_collector(args.collector), "live")
+    snaps, _ = catalog.fetch_swarm(catalog.base_url(args.node))
+    report(snaps, "live")
 
 
 if __name__ == "__main__":

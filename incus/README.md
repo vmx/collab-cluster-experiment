@@ -6,7 +6,8 @@ the whole point, and what makes Incus a good place to watch it work.
 
 Optionally add a `collector` container for the web UI. Only that one is ever
 exposed to the internet (via an Incus proxy device); everything else lives on the
-bridge, reachable by SSHing to the host.
+bridge, reachable by SSHing to the host. The node containers know nothing about
+it — the dashboard reads them, not the other way round.
 
 [`provision.sh`](provision.sh) does everything below in one idempotent command,
 if you'd rather not run the steps by hand.
@@ -26,55 +27,53 @@ checkout, so their scripts and data (`data/`, `nodes/`) all resolve inside it.
 ## 1. Load the profile
 
 [`collab-cluster.yaml`](collab-cluster.yaml) provisions each container at first
-boot — clones the repo, installs `python3-libtorrent`, copies the units into
-place, and writes the env file pointing nodes at `collector.incus`. The same
-content works in every container; a node that never reaches a collector simply
-reports to nothing.
+boot — installs `python3-libtorrent`, clones the repo, and copies the units into
+place. It sets nothing swarm-specific, so the identical profile applies to every
+container and names no other container.
+
+The only line worth changing is the `git clone`: it decides which repo and branch
+every container ends up with.
 
 ```sh
 incus profile create collab-cluster
 incus profile edit collab-cluster < incus/collab-cluster.yaml
 ```
 
-Edit the profile first if your dashboard container isn't named `collector`, or to
-point the clone at your own fork/mirror of the repo.
-
 ## 2. Launch the containers
 
-Node names don't matter — nodes are told no addresses and announce none, so you
-can add and remove them freely. Only `collector` has to match the `.incus` name
-in the env file.
+Names don't matter to the swarm — nodes are told no addresses and announce none,
+so you can add and remove them freely. They're only how *you* refer to the
+containers (and what `.incus` DNS name you'd type below).
 
 ```sh
-incus launch images:debian/14/cloud collector --profile default --profile collab-cluster
 for name in node0 node1 node2; do
   incus launch images:debian/14/cloud "$name" --profile default --profile collab-cluster
 done
 ```
 
-The collector is optional — skip it and the swarm replicates exactly the same,
-you just don't get the web UI.
+The profile only provisions each container — it configures nothing, because
+there is nothing swarm-wide to configure. That is the whole swarm; the dashboard
+in step 5 is optional and separate.
 
-## 3. Enable the right unit per container
+## 3. Start the nodes
 
 The profile already copied both units (listed in
 [`../systemd/README.md`](../systemd/README.md)) into
-`/home/debian/.config/systemd/user/`, so here you just enable the one that
-container plays. First make sure provisioning has finished:
+`/home/debian/.config/systemd/user/`, so here you just enable the one this
+container plays — `collab-cluster-node`. First make sure provisioning has
+finished:
 
 ```sh
-incus exec collector -- cloud-init status --wait
 for name in node0 node1 node2; do
   incus exec "$name" -- cloud-init status --wait
 done
 ```
 
-Then enable each container's unit. Run these as the `debian` user — `su --login
-debian --command` opens a login session so `systemctl --user` finds its user bus
+Then enable the node unit. Run these as the `debian` user — `su --login debian
+--command` opens a login session so `systemctl --user` finds its user bus
 (`XDG_RUNTIME_DIR`):
 
 ```sh
-incus exec collector -- su --login debian --command 'systemctl --user enable --now collab-cluster-collector'
 for name in node0 node1 node2; do
   incus exec "$name" -- su --login debian --command 'systemctl --user enable --now collab-cluster-node'
 done
@@ -84,68 +83,88 @@ done
 per container (as root, hence no `su`):
 
 ```sh
-for name in collector node0 node1 node2; do
+for name in node0 node1 node2; do
   incus exec "$name" -- loginctl enable-linger debian
 done
 ```
 
 ## 4. Use it
 
-`control.py` addresses nodes by their HTTP endpoint. From the host, use the
-container bridge IPs — the host is on the bridge, so it reaches them directly:
+`control.py` addresses nodes by their HTTP endpoint. Run it from your checkout on
+the host — it only speaks HTTP, so unlike the containers the host needs no
+`libtorrent`. Use the container bridge IPs; the host is on the bridge, so it
+reaches them directly:
 
 ```sh
 # find the IPs
 incus list
 # each node should see the others
-python control.py peers   10.x.x.5
-python control.py publish 10.x.x.5 /home/debian/some-data
-# every node knows about it
-python control.py list    10.x.x.6
-# ...and this one keeps a copy
-python control.py add     10.x.x.6 some-data
-python control.py status  10.x.x.6
+python control.py peers 10.x.x.5
 ```
 
-The path given to `publish` is a path *inside* that node, not one on your host.
-The sample content isn't shipped, so generate it on the node first if you want
-something to publish:
+Now give the swarm something to replicate. `publish` reads the path on the node
+itself, not on your host, so the data has to be there first — the sample content
+isn't shipped, so generate it inside `node0`:
 
 ```sh
+# writes data/sample/ into node0's checkout
 incus exec node0 -- su --login debian --command 'python3 collab-cluster-experiment/make_torrent.py'
 python control.py publish 10.x.x.5 /home/debian/collab-cluster-experiment/data/sample/media
+```
+
+Within a tick every node knows the dataset exists. Storing it is a separate
+decision, made per node:
+
+```sh
+# node1 knows about it...
+python control.py list   10.x.x.6
+# ...and now keeps a copy
+python control.py add    10.x.x.6 media
+python control.py status 10.x.x.6
 ```
 
 Nodes store only what they're told to unless their unit passes `--replicate all`,
 in which case the `add` step is unnecessary and the data arrives on its own.
 
-Optional: to type `.incus` names on the host instead of IPs
-(`control.py peers node0.incus`), teach the host resolver about the bridge — see
-[integrate with systemd-resolved](https://linuxcontainers.org/incus/docs/main/howto/network_bridge_resolved/):
+## 5. Optional: the dashboard
+
+Launch one more container the same way:
 
 ```sh
-resolvectl dns    incusbr0 "$(incus network get incusbr0 ipv4.address | cut -d/ -f1)"
-resolvectl domain incusbr0 '~incus'
+incus launch images:debian/14/cloud collector --profile default --profile collab-cluster
+incus exec collector -- cloud-init status --wait
 ```
 
-This isn't persistent across reboots / Incus restarts on its own — the howto
-shows a small unit to reapply it. Not needed if you address nodes by IP.
+The unit defaults to a node on its own machine, and this container has none — so
+tell it where one is. Create
+`~/.config/systemd/user/collab-cluster-collector.service.d/node.conf` in the
+collector container:
 
-## 5. Optional: expose the dashboard
+```ini
+[Service]
+ExecStart=
+ExecStart=python3 collector.py node0.incus:8001
+```
 
-The collector serves the web UI on `8100`, reachable on the bridge already. To
-publish just that one port off the host:
+The empty `ExecStart=` clears the one the unit ships; a drop-in leaves the unit
+itself untouched. Any node will do — it's a way in, not a destination — and the
+node containers are not touched either: they are read, and have no setting for
+this.
 
 ```sh
+incus exec collector -- su --login debian --command 'systemctl --user daemon-reload'
+incus exec collector -- su --login debian --command 'systemctl --user enable --now collab-cluster-collector'
+incus exec collector -- loginctl enable-linger debian
+```
+
+Then expose just the UI:
+
+```sh
+# non-NAT (wildcard listen ok), fine for a web UI:
 incus config device add collector web proxy listen=tcp:0.0.0.0:8100 connect=tcp:127.0.0.1:8100
+
+# or NAT mode (kernel-forwarded, faster) — listen must be a concrete host IP:
+incus config device add collector web proxy listen=tcp:<host-ip>:8100 connect=tcp:0.0.0.0:8100 nat=true
 ```
 
 See the [proxy device docs](https://linuxcontainers.org/incus/docs/main/reference/devices_proxy/).
-
-## If nodes don't see each other
-
-Check `python control.py peers <node>` first. Discovery is multicast on
-`239.255.42.1:6772` with TTL 1; a Linux bridge normally floods that, but if
-IGMP snooping is enabled without a querier it can be dropped. The fallback needs
-one address, not a fix to the network — add `--peer node0.incus` to the node
-unit's `ExecStart=` and gossip does the rest, in both directions.

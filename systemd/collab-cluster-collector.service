@@ -2,8 +2,10 @@
 Description=collab-cluster dashboard (optional stats collector + web UI, port 8100)
 
 [Service]
-# Needs no configuration: it binds all interfaces and waits for nodes to push.
-# Nothing in the swarm depends on it — it is purely a view.
+# Reads the swarm through one node, defaulting to a node on this machine. If
+# the dashboard runs somewhere without one, append any node's address:
+#   ExecStart=python3 collector.py node0.example:8001
+# Nothing in the swarm depends on it, or knows it exists — it is purely a view.
 WorkingDirectory=%h/collab-cluster-experiment
 ExecStart=python3 collector.py
 Restart=on-failure

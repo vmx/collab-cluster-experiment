@@ -34,9 +34,11 @@ def primary_ip() -> str:
     is the routable interface even on a multi-homed host. Falls back to loopback
     when the host is offline, e.g. a self-contained single-machine dev run.
 
-    Only used to *label* a node in the dashboard. Connectivity never depends on
-    it: a peer's address is read off the source of its beacon datagram, so
-    nothing has to guess or declare its own routable address.
+    Only used to print a node's reachable URL when it starts, as a convenience
+    for whoever is looking at the log. Connectivity never depends on it: a
+    peer's address is read off the source of its beacon datagram, so nothing has
+    to guess or declare its own routable address, and viewers label a node by
+    the address they reached it at.
     """
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -89,7 +91,6 @@ PEER_STALE_AFTER = 3 * BEACON_INTERVAL
 GOSSIP_EVERY = 5
 
 NODE_LOOP_INTERVAL = 1.0   # how often a node refreshes its stats snapshot
-PUSH_INTERVAL = 1.0        # how often a node POSTs its snapshot to the collector
 
 # What a node does with a dataset it discovers but doesn't hold. "manual" takes
 # nothing unless an operator asks for it with control.py add; "all" mirrors
@@ -97,21 +98,17 @@ PUSH_INTERVAL = 1.0        # how often a node POSTs its snapshot to the collecto
 # commits disk that wasn't asked for. See node.make_want().
 REPLICATE_DEFAULT = "manual"
 
-# --- Metrics collector (optional) --------------------------------------------
-# Purely observability: the swarm runs without it. Nodes POST their snapshot to
-# it, and it serves the dashboard. Nodes only ever dial out, so the collector is
-# the one thing that needs inbound reachability.
-COLLECTOR_HOST = "0.0.0.0"               # bind address (accept remote nodes)
+# --- Dashboard (optional) ----------------------------------------------------
+# Purely observability, and purely a client: it reads the swarm through any one
+# node's /peers and /stats. Nodes are not configured for it and never report to
+# it, so nothing here is a node setting.
+COLLECTOR_HOST = "0.0.0.0"               # bind address (accept browsers)
 COLLECTOR_PORT = 8100
-COLLECTOR_REACH_HOST = os.environ.get("SWARM_COLLECTOR") or HOST
-COLLECTOR_BASE = f"http://{COLLECTOR_REACH_HOST}:{COLLECTOR_PORT}"
-COLLECTOR_URL = f"{COLLECTOR_BASE}/api/ingest"       # node push target
 
-# Drop a node from the live view after this much silence (it stopped pushing).
-NODE_STALE_AFTER = 3 * PUSH_INTERVAL
-# Cache the built summary for one push interval: new node data only lands that
-# often, so recomputing more often than this just burns CPU on identical input.
-SUMMARY_TTL = PUSH_INTERVAL
+# How long a fan-out over the nodes is reused. This is the whole rate limit: the
+# nodes are read at most this often no matter how many browsers are watching,
+# and not at all while none is.
+POLL_TTL = 1.0
 # The collector buckets each torrent's pieces into at most this many columns
 # before sending (the dashboard only draws that many), so the payload stays small
 # no matter how many pieces a torrent has.
@@ -124,13 +121,6 @@ def bt_port(node_id: int) -> int:
 
 def stats_port(node_id: int) -> int:
     return STATS_PORT_BASE + node_id
-
-
-def node_label(node_id: int) -> str:
-    """A node's display label: its address, advertise IP + BitTorrent port. Stays
-    unique whether nodes are on separate hosts or co-located (the port
-    disambiguates) — no hostname or node id needed."""
-    return f"{ADVERTISE_IP}:{bt_port(node_id)}"
 
 
 def parse_endpoint(endpoint: str, default_port: int = STATS_PORT_BASE) -> tuple:

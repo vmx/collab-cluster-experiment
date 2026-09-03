@@ -98,7 +98,7 @@ def cmd_peers(args) -> None:
     except Exception:
         _unreachable(args.endpoint)
     me = view.get("self") or {}
-    print(f"this node  {me.get('node','?')[:8]}  {me.get('label','')}  "
+    print(f"this node  {me.get('node','?')[:8]}  {args.endpoint}  "
           f"({me.get('held',0)} held / {me.get('known',0)} known)")
     peers = view.get("peers") or []
     if not peers:
@@ -107,7 +107,9 @@ def cmd_peers(args) -> None:
         return
     print(f"\n{'node':<10} {'address':<22} {'catalog':<13} last seen")
     for p in peers:
-        addr = f"{p.get('ip')}:{p.get('bt')}"
+        # Its control address, not its BitTorrent one: this is the column you
+        # copy into the next command.
+        addr = f"{p.get('ip')}:{p.get('http')}"
         print(f"{(p.get('node') or '?')[:8]:<10} {addr:<22} "
               f"{(p.get('cat') or '-'):<13} {p.get('age', '?')}s ago")
 

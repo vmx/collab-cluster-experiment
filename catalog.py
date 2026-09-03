@@ -8,6 +8,7 @@ control.py inspects a node.
 Kept free of libtorrent so control.py works without that dependency; callers
 that need to parse a .torrent bdecode the bytes themselves.
 """
+import concurrent.futures
 import json
 import urllib.error
 import urllib.parse
@@ -65,5 +66,42 @@ def fetch_peers(base: str, me: dict = None, timeout: float = 5.0) -> dict:
 
 
 def fetch_stats(base: str, timeout: float = 2.0) -> dict:
-    """A node's live snapshot (the same payload it pushes to the collector)."""
+    """A node's live snapshot: session metrics, per-torrent status, per-peer info."""
     return json.loads(_get(base, "/stats", timeout).decode())
+
+
+def fetch_swarm(base: str, timeout: float = 2.0) -> tuple:
+    """Every node's snapshot, gathered through one node's peer table.
+
+    Returns (snapshots, addresses). One /peers call names the whole swarm, then
+    each node is asked for its own /stats — the same payload it would have to
+    publish anyway. This is all any swarm-wide view needs, which is why neither
+    piece_map.py nor collector.py has to be told about nodes, or nodes about it.
+
+    A node that doesn't answer is simply absent: liveness is "responded", not a
+    staleness timer. `addresses` is every endpoint we tried, so a caller can
+    fall back to one of them when `base` itself stops answering.
+    """
+    view = fetch_peers(base, timeout=timeout)
+    # The node we asked doesn't know its own address — we do, we just dialled it.
+    bases = [base] + [f"http://{p['ip']}:{p['http']}"
+                      for p in view.get("peers") or []
+                      if p.get("ip") and p.get("http")]
+    snaps = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+        for base_i, snap in zip(bases, pool.map(lambda b: _stats_or_none(b, timeout),
+                                                bases)):
+            if snap and snap.get("node_key"):
+                # Label a node by the address we reached it at — the address you
+                # would type into control.py. A node cannot do this itself: it
+                # never learns its own address (that is the point of the beacon).
+                snap["label"] = base_i.split("//", 1)[-1]
+                snaps.setdefault(snap["node_key"], snap)
+    return list(snaps.values()), bases
+
+
+def _stats_or_none(base: str, timeout: float):
+    try:
+        return fetch_stats(base, timeout)
+    except Exception:
+        return None

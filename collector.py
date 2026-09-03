@@ -1,19 +1,17 @@
-"""Optional dashboard for the swarm (push model).
+"""Optional dashboard for the swarm.
 
-Purely observability: the swarm replicates without it, and a node runs happily
-with no --collector at all. Nodes POST their /stats snapshot here instead of
-being polled, so the collector is the one service that accepts inbound
-connections — nodes only ever dial out, which works across data centers / NAT.
-Nodes are independent and identified by a per-node UUID (node_key); there is no
-enumeration, the collector learns nodes as they push.
+Purely observability, and entirely a client: point it at any node and it reads
+the swarm through that node's peer table (catalog.fetch_swarm). Nodes are not
+configured for it, do not report to it, and cannot tell whether anyone is
+watching — the same relationship control.py and piece_map.py have.
 
 Everything shown is derived from node snapshots alone. There is nothing else to
-ask: the nodes are the only thing that knows who holds what.
+ask: the nodes are the only thing that knows who holds what. A node's /stats is
+already public, so there is nothing for a collector to be *sent*.
 
-State is in memory only — the collector keeps just the latest snapshot per node
-and serves a live view; nothing is persisted. A node silent past NODE_STALE_AFTER
-drops out until it reports again; on restart the collector rebuilds within one
-push interval.
+Stateless: snapshots are pulled on demand and cached for POLL_TTL, so the nodes
+are read at most once a second however many browsers are open — and not at all
+while none is. A node that doesn't answer is simply absent.
 
 Endpoints:
   Every machine endpoint lives under /api/ so it never collides with the SPA's
@@ -21,11 +19,6 @@ Endpoints:
   /dataset/<info_hash>, /transfers, /nodes). The rule is simply: a GET that is
   not a static asset or an /api/ endpoint is served the app shell (index.html),
   so those page routes deep-link and reload correctly.
-
-  POST /api/ingest - receive one node's snapshot JSON; keep it as that node's latest
-  GET  /api/live   - {"ts", "nodes": [...]} latest snapshot of each fresh node,
-                   the live input for piece_map and any other viewer
-  GET  /api/health - the collector's own health: nodes seen + last-seen ages
 
   GET  /api/overview - {"ts", "datasets": [...]} the list view: one light row per
                    dataset (size, copy counts, live throughput, a per-node
@@ -43,11 +36,9 @@ Endpoints:
   GET  /api/node/<label>
                  - one node's held datasets (drill-down from /nodes): per torrent
                    completion, stored, rate + info_hash. 404 if not reporting.
-  GET  /api/summary - {"ts", "torrents": [...]} the full detail of EVERY torrent
-                   at once (the original payload). Retained as a convenience; the
-                   tiered /api/overview + /api/torrent split supersedes it.
   GET  /          - the web UI; any other GET path also serves the app shell.
 """
+import argparse
 import hashlib
 import json
 import os
@@ -56,6 +47,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote
 
+import catalog
 import config
 import swarm_stats
 
@@ -71,18 +63,38 @@ STATIC_FILES = {
     "/tutuca.js": ("tutuca.js", "text/javascript; charset=utf-8"),
 }
 
-LOCK = threading.Lock()
-# node_key -> (received_ts, snapshot). The freshest state of every node, in
-# memory; the live input for /api/live.
-LATEST: dict = {}
+# The node we read the swarm through. Any node will do: it is a way in, not a
+# source of truth — every node knows the whole peer table.
+SEED = ""
+
+_SNAP_LOCK = threading.Lock()
+# {"at", "snaps", "bases"} — the last fan-out. `bases` is every node address it
+# reached, which is what lets us carry on when SEED itself goes away.
+_SNAPS: dict = {"at": 0.0, "snaps": [], "bases": []}
 
 def fresh_snapshots(now: float = None) -> list:
-    """Latest snapshot of every node still reporting. Nodes silent past
-    NODE_STALE_AFTER drop out."""
+    """Every node's current snapshot, pulled through SEED at most once per
+    POLL_TTL. Every view in this file is a pure function of this list.
+
+    A node that doesn't answer is absent: liveness is "responded", not a timer.
+    If SEED stops answering we retry through the addresses the last successful
+    fan-out found, so restarting the node the dashboard was pointed at doesn't
+    blank it."""
     now = now if now is not None else time.time()
-    with LOCK:
-        return [snap for (seen, snap) in LATEST.values()
-                if now - seen < config.NODE_STALE_AFTER]
+    with _SNAP_LOCK:
+        if now - _SNAPS["at"] < config.POLL_TTL:
+            return _SNAPS["snaps"]
+        for base in [SEED] + [b for b in _SNAPS["bases"] if b != SEED]:
+            try:
+                snaps, bases = catalog.fetch_swarm(base)
+            except Exception:
+                continue
+            _SNAPS.update({"at": now, "snaps": snaps, "bases": bases})
+            return snaps
+        # Nothing answered: report an empty swarm rather than stale data, but
+        # keep `bases` so the next poll can try them again.
+        _SNAPS.update({"at": now, "snaps": []})
+        return []
 
 
 def piece_size(i: int, piece_length: int, total_size: int, num_pieces: int) -> int:
@@ -251,17 +263,6 @@ def build_torrent_detail(info_hash: str) -> dict:
     return None
 
 
-def build_summary() -> dict:
-    """Full detail of every torrent at once (the original /summary payload).
-
-    Retained so the existing dashboard keeps working while the new tiered UI
-    (/overview + /torrent/<info_hash>) is built on top.
-    """
-    return {"ts": time.time(),
-            "torrents": [torrent_detail(meta, rows) for meta, rows in
-                         swarm_stats.collect_by_torrent(fresh_snapshots())]}
-
-
 def build_transfers() -> dict:
     """In-flight transfers across the swarm: one row per (node, dataset) that is
     not yet complete, with progress, the live download rate and an ETA.
@@ -380,21 +381,22 @@ def build_node_detail(label: str) -> dict:
 # keyed to the payload state (not the timestamp), so an idle swarm keeps a stable
 # ETag and viewers get cheap 304s instead of resent bytes.
 _CACHE_LOCK = threading.Lock()
-# endpoint key -> {built_at, body, etag}. /overview and /summary are polled by
-# every viewer; the heavy per-torrent detail is cached per info_hash so several
-# operators drilled into different datasets don't evict each other.
+# endpoint key -> {built_at, body, etag}. /overview is polled by every viewer;
+# the heavy per-torrent detail is cached per info_hash so several operators
+# drilled into different datasets don't evict each other. This caches the
+# *rendering*; the snapshots underneath have their own poll cache.
 _CACHE: dict = {}
 
 
 def cached_payload(key: str, builder, state_key) -> tuple:
-    """(body_bytes, etag) for `key`, rebuilt at most once per SUMMARY_TTL.
+    """(body_bytes, etag) for `key`, rebuilt at most once per POLL_TTL.
 
     `builder()` returns the dict to serve; `state_key(data)` returns the part the
     ETag should track (so the timestamp alone doesn't churn it)."""
     now = time.time()
     with _CACHE_LOCK:
         entry = _CACHE.get(key)
-        if entry is None or now - entry["built_at"] >= config.SUMMARY_TTL:
+        if entry is None or now - entry["built_at"] >= config.POLL_TTL:
             data = builder()
             digest = hashlib.md5(
                 json.dumps(state_key(data), sort_keys=True).encode()).hexdigest()
@@ -431,24 +433,6 @@ def make_handler():
                 self.send_header(k, v)
             self.end_headers()
             self.wfile.write(body)
-
-        def do_POST(self):
-            if self.path != "/api/ingest":
-                return self._send(b"", code=404)
-            try:
-                length = int(self.headers.get("Content-Length", 0))
-                snap = json.loads(self.rfile.read(length) or b"{}")
-                key = snap["node_key"]
-            except Exception as exc:
-                return self._send(json.dumps({"error": str(exc)}).encode(),
-                                  "application/json", 400)
-            # Record the IP we saw the node dial in from, as a cross-check
-            # against the advertise_ip it self-reports (a mismatch hints at NAT
-            # or a misconfigured advertise address).
-            snap["observed_ip"] = self.client_address[0]
-            with LOCK:
-                LATEST[key] = (time.time(), snap)
-            self._send(b"", code=204)
 
         def _send_cached_json(self, body: bytes, etag: str) -> None:
             """Serve a cached JSON body, honouring If-None-Match with a 304."""
@@ -517,22 +501,6 @@ def make_handler():
                     self._send(body, "application/json", 404)
                 else:
                     self._send_cached_json(body, etag)
-            elif path == "/api/summary":
-                body, etag = cached_payload("summary", build_summary,
-                                            lambda d: d["torrents"])
-                self._send_cached_json(body, etag)
-            elif path == "/api/live":
-                body = json.dumps({"ts": time.time(),
-                                   "nodes": fresh_snapshots()}).encode()
-                self._send(body, "application/json")
-            elif path == "/api/health":
-                now = time.time()
-                with LOCK:
-                    nodes = [{"node_key": k, "label": s.get("label", k),
-                              "age": round(now - seen, 2),
-                              "fresh": now - seen < config.NODE_STALE_AFTER}
-                             for k, (seen, s) in LATEST.items()]
-                self._send(json.dumps({"nodes": nodes}).encode(), "application/json")
             elif path.startswith("/api/"):
                 # The /api/ namespace is machine-only, so an unknown endpoint
                 # under it is an error — never the app shell. Falling through
@@ -551,12 +519,21 @@ def make_handler():
 
 
 def main() -> None:
+    global SEED
+    ap = argparse.ArgumentParser(
+        description="Optional dashboard for the swarm. Reads everything through "
+                    "one node; nothing has to be configured to report to it.")
+    ap.add_argument("node", nargs="?",
+                    default=f"{config.HOST}:{config.STATS_PORT_BASE}",
+                    help="any node's endpoint host[:port] — a way into the "
+                         "swarm, not a source of truth (default: %(default)s)")
+    SEED = catalog.base_url(ap.parse_args().node)
+
     srv = ThreadingHTTPServer((config.COLLECTOR_HOST, config.COLLECTOR_PORT),
                               make_handler())
     srv.daemon_threads = True
     print(f"collector on http://{config.COLLECTOR_HOST}:{config.COLLECTOR_PORT}/  "
-          f"(web UI + /api/* [ingest, live, health, dashboard], in-memory)",
-          flush=True)
+          f"(web UI + /api/*) reading the swarm through {SEED}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
