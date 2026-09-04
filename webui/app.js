@@ -411,7 +411,7 @@ const TransferRow = component({
       const active = tr.download_rate > 0;
       const stuck = tr.num_peers === 0;
       return this.make({
-        node: `n${tr.node}`,
+        node: tr.node,
         name: tr.name,
         href: `/dataset/${encodeURIComponent(tr.info_hash)}`,
         pctText: `${pct}%`,
