@@ -197,7 +197,7 @@ def store_torrent(ns: NodeState, name: str, info_hash: str, blob: bytes) -> str:
 def _ambiguous(ref: str, kind: str, matches: list) -> ValueError:
     """Refuse to guess, and hand back something that can be pasted straight back
     in — the shortened hashes below are valid references in their own right."""
-    return ValueError(f"{ref!r} is an ambiguous {kind} — {len(matches)} datasets "
+    return ValueError(f"{ref!r} is an ambiguous {kind} - {len(matches)} datasets "
                       f"match; use one of these info-hashes: "
                       f"{', '.join(h[:16] for h in sorted(matches))}")
 
@@ -960,7 +960,7 @@ def main() -> None:
                          "about")
     ap.add_argument("--peer", action="append", default=[], metavar="HOST[:PORT]",
                     help="bootstrap from a known node instead of relying on the "
-                         "multicast beacon; repeatable. One is enough — the rest "
+                         "multicast beacon; repeatable. One is enough - the rest "
                          "of the swarm is learned by gossip.")
     args = ap.parse_args()
 
@@ -992,7 +992,7 @@ def main() -> None:
     srv.daemon_threads = True
     state = f"{len(ns.catalog)} known, {resumed} held"
     boot = f"  bootstrap:{','.join(f'{h}:{p}' for h, p in ns.static)}" if ns.static else ""
-    print(f"node {args.id} up [{node_key[:8]}] — bt:{config.bt_port(args.id)} "
+    print(f"node {args.id} up [{node_key[:8]}] - bt:{config.bt_port(args.id)} "
           f"http://{config.ADVERTISE_IP}:{config.stats_port(args.id)}/  "
           f"beacon:{config.BEACON_GROUP}:{config.BEACON_PORT}  "
           f"replicate:{args.replicate}  ({state}){boot}", flush=True)

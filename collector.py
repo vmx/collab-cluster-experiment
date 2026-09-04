@@ -525,7 +525,7 @@ def main() -> None:
                     "one node; nothing has to be configured to report to it.")
     ap.add_argument("node", nargs="?",
                     default=f"{config.HOST}:{config.STATS_PORT_BASE}",
-                    help="any node's endpoint host[:port] — a way into the "
+                    help="any node's endpoint host[:port] - a way into the "
                          "swarm, not a source of truth (default: %(default)s)")
     SEED = catalog.base_url(ap.parse_args().node)
 

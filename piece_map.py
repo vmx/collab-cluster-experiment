@@ -94,8 +94,8 @@ def render_torrent(meta: dict, rows: list, source: str) -> None:
     full_copies = [r["label"] for r in rows if all(r["bits"])]
     cols = min(num_pieces, MAX_COLS)
 
-    print(f"Swarm piece map  —  '{name}'  {human(total_size)} in {len(files)} file(s), "
-          f"{num_pieces} pieces × {human(piece_length)}")
+    print(f"Swarm piece map  -  '{name}'  {human(total_size)} in {len(files)} file(s), "
+          f"{num_pieces} pieces x {human(piece_length)}")
     print(f"info hash (v2): {info_hash[:16]}...  |  nodes seen: {len(rows)}  |  source: {source}")
     if cols < num_pieces:
         print(f"(map bucketed: {num_pieces} pieces into {cols} columns)")
@@ -105,8 +105,8 @@ def render_torrent(meta: dict, rows: list, source: str) -> None:
           f"{'  (nodes: ' + ','.join(map(str, full_copies)) + ')' if full_copies else ''}")
     print(f"  complete copies incl. partial holders : {min_avail}"
           f"   (rarest piece is held by {min_avail} node(s))")
-    print(f"  redundancy (avg copies per piece)     : {total_have / num_pieces:.2f}×")
-    print(f"  fully available in swarm              : {'yes' if min_avail >= 1 else 'NO — missing pieces!'}")
+    print(f"  redundancy (avg copies per piece)     : {total_have / num_pieces:.2f}x")
+    print(f"  fully available in swarm              : {'yes' if min_avail >= 1 else 'NO - missing pieces!'}")
     print(f"  total data stored across swarm        : {human(total_have * piece_length)}")
 
     label_w = 24

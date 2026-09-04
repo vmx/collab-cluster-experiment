@@ -217,7 +217,7 @@ ambiguous, commands say so and ask for a hash rather than guessing:
 
 ```
 $ python control.py add 127.0.0.1:8003 media
-127.0.0.1:8003: 'media' is an ambiguous name — 2 datasets match; use one of these info-hashes: 3005dbccd2cc7111, e3603877cb88bd7d
+127.0.0.1:8003: 'media' is an ambiguous name - 2 datasets match; use one of these info-hashes: 3005dbccd2cc7111, e3603877cb88bd7d
 
 $ python control.py add 127.0.0.1:8003 3005dbccd2cc7111
 ```

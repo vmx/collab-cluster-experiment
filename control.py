@@ -60,7 +60,7 @@ def _dataset_ref(ref: str) -> dict:
 
 
 def _unreachable(endpoint: str) -> None:
-    print(f"{endpoint}: unreachable — is `python node.py` running there?")
+    print(f"{endpoint}: unreachable - is `python node.py` running there?")
     sys.exit(1)
 
 
@@ -82,7 +82,7 @@ def cmd_list(args) -> None:
     except Exception:
         _unreachable(args.endpoint)
     if not metas:
-        print("no datasets yet — publish one with: "
+        print("no datasets yet - publish one with: "
               "python control.py publish <node> <path>")
         return
     # Which of them this node actually holds, and how far along.
@@ -149,7 +149,7 @@ def cmd_publish(args) -> None:
                                         timeout=PUBLISH_TIMEOUT))
     if not res.get("published"):
         print(f"{args.endpoint}: already published {res['name']!r} "
-              f"[{res['info_hash'][:16]}] — nothing to do")
+              f"[{res['info_hash'][:16]}] - nothing to do")
         return
     print(f"{args.endpoint}: published {res['name']!r} [{res['info_hash'][:16]}]")
     print(f"every node learns about it within a tick (~{config.BEACON_INTERVAL:.0f}s). "
@@ -163,7 +163,7 @@ def cmd_add(args) -> None:
                                         _dataset_ref(args.dataset)))
     ref = f"{res['name']!r} [{res['info_hash'][:16]}]"
     if not res.get("added"):
-        print(f"{args.endpoint}: already holding {ref} — nothing to do")
+        print(f"{args.endpoint}: already holding {ref} - nothing to do")
         return
     print(f"{args.endpoint}: taking {ref}, pulling from every peer that has it")
     print("watch it arrive with:")
@@ -174,10 +174,10 @@ def cmd_remove(args) -> None:
     res = _checked(args.endpoint, _post(args.endpoint, "/remove",
                                         _dataset_ref(args.dataset)))
     if not res.get("removed"):
-        print(f"{args.endpoint}: not holding {args.dataset!r} — nothing to do")
+        print(f"{args.endpoint}: not holding {args.dataset!r} - nothing to do")
         return
     print(f"{args.endpoint}: dropped {res['name']!r} [{res['info_hash'][:16]}] "
-          "— it stays in the catalog, and the files stay on disk")
+          "- it stays in the catalog, and the files stay on disk")
 
 
 def main() -> None:
