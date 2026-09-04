@@ -64,6 +64,17 @@ def _unreachable(endpoint: str) -> None:
     sys.exit(1)
 
 
+def _checked(endpoint: str, res: dict) -> dict:
+    """Hand back a successful result, or print the node's error and stop. The
+    node writes its errors to be read — an ambiguous name comes back with the
+    info-hashes to disambiguate it — so they go out as they are rather than
+    wrapped in a JSON blob that escapes the punctuation."""
+    if res.get("error"):
+        print(f"{endpoint}: {res['error']}")
+        sys.exit(1)
+    return res
+
+
 def cmd_list(args) -> None:
     base = catalog.base_url(args.endpoint)
     try:
@@ -133,11 +144,9 @@ def cmd_status(args) -> None:
 
 
 def cmd_publish(args) -> None:
-    res = _post(args.endpoint, "/publish", {"path": args.path},
-                timeout=PUBLISH_TIMEOUT)
-    if res.get("error"):
-        print(f"{args.endpoint}: {res['error']}")
-        sys.exit(1)
+    res = _checked(args.endpoint, _post(args.endpoint, "/publish",
+                                        {"path": args.path},
+                                        timeout=PUBLISH_TIMEOUT))
     if not res.get("published"):
         print(f"{args.endpoint}: already published {res['name']!r} "
               f"[{res['info_hash'][:16]}] — nothing to do")
@@ -150,17 +159,25 @@ def cmd_publish(args) -> None:
 
 
 def cmd_add(args) -> None:
-    res = _post(args.endpoint, "/add", _dataset_ref(args.dataset))
-    print(f"{args.endpoint}: {json.dumps(res)}")
-    if res.get("error"):
-        sys.exit(1)
+    res = _checked(args.endpoint, _post(args.endpoint, "/add",
+                                        _dataset_ref(args.dataset)))
+    ref = f"{res['name']!r} [{res['info_hash'][:16]}]"
+    if not res.get("added"):
+        print(f"{args.endpoint}: already holding {ref} — nothing to do")
+        return
+    print(f"{args.endpoint}: taking {ref}, pulling from every peer that has it")
+    print("watch it arrive with:")
+    print(f"  python control.py status {args.endpoint}")
 
 
 def cmd_remove(args) -> None:
-    res = _post(args.endpoint, "/remove", _dataset_ref(args.dataset))
-    print(f"{args.endpoint}: {json.dumps(res)}")
-    if res.get("error"):
-        sys.exit(1)
+    res = _checked(args.endpoint, _post(args.endpoint, "/remove",
+                                        _dataset_ref(args.dataset)))
+    if not res.get("removed"):
+        print(f"{args.endpoint}: not holding {args.dataset!r} — nothing to do")
+        return
+    print(f"{args.endpoint}: dropped {res['name']!r} [{res['info_hash'][:16]}] "
+          "— it stays in the catalog, and the files stay on disk")
 
 
 def main() -> None:
