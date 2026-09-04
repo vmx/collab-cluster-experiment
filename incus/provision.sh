@@ -156,11 +156,9 @@ Drive the swarm from here, addressing nodes by the IPs above, e.g.:
   # confirm the nodes found each other
   python control.py peers $(ip_of "$first_node")
   # generate the sample content on $first_node
-  incus exec $first_node -- su --login debian --command \\
-      'python3 collab-cluster-experiment/make_torrent.py'
+  incus exec $first_node -- su --login debian --command 'python3 collab-cluster-experiment/make_torrent.py'
   # hash it into a dataset and seed it in place
-  python control.py publish $(ip_of "$first_node") \\
-      /home/debian/collab-cluster-experiment/data/sample/media
+  python control.py publish $(ip_of "$first_node") /home/debian/collab-cluster-experiment/data/sample/media
   # every node learns about it; have $second_node keep a copy
   python control.py add $(ip_of "$second_node") media
 EOF
