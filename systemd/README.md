@@ -14,8 +14,8 @@ The units run `python3` from `PATH` and set
 `~/collab-cluster-experiment` (the natural container layout) — or change that
 `WorkingDirectory=` if it lives elsewhere. Scripts, `data/`, and `nodes/` are all
 resolved relative to that dir. On a machine running a node, `python3` must have
-the `libtorrent` binding importable; the dashboard and the one-shot tools speak
-only HTTP and don't need it.
+the `libtorrent` binding importable; the dashboard and the one-shot tools are
+plain stdlib clients and don't need it.
 
 ## Install
 
@@ -68,23 +68,26 @@ The last step is only needed on nodes that aren't running `--replicate all`.
 
 ## The optional dashboard
 
-Only if you want the web UI. It reads the swarm through one node, and the unit as
-shipped uses a node on the same machine. Running it somewhere without one means
-naming a node in the unit's `ExecStart=` first:
+Only if you want the web UI. Like a node it takes no configuration and no
+addresses — it listens to the same beacon and reads the swarm through whichever
+node answers — so this is the whole of it, on any machine on the segment,
+with or without a node of its own:
+
+```sh
+# serves :8100
+systemctl --user enable --now collab-cluster-collector
+```
+
+Any node will do: it is a way in, not a destination, and the dashboard moves to
+another one by itself if that node goes away. Nothing is configured on the nodes
+either — they have no dashboard setting, and because it only ever listens and
+never beacons back, they cannot tell whether anyone is watching.
+
+Only where multicast doesn't reach does it need naming a node in the unit's
+`ExecStart=`, the same escape hatch a node has:
 
 ```ini
 ExecStart=python3 collector.py node0.example:8001
-```
-
-Any node will do — it is a way in, not a destination. Nothing is configured on
-the nodes: they have no dashboard setting and cannot tell whether anyone is
-watching.
-
-```sh
-# only if you edited the unit after the daemon-reload above
-systemctl --user daemon-reload
-# serves :8100
-systemctl --user enable --now collab-cluster-collector
 ```
 
 ## Spread across hosts

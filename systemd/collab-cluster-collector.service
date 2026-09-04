@@ -2,8 +2,10 @@
 Description=collab-cluster dashboard (optional stats collector + web UI, port 8100)
 
 [Service]
-# Reads the swarm through one node, defaulting to a node on this machine. If
-# the dashboard runs somewhere without one, append any node's address:
+# Finds a node by listening to the same beacon the nodes use, so this runs
+# anywhere on the segment with nothing configured, whether or not the machine
+# has a node of its own. Only where multicast doesn't reach does it need to be
+# given a way in:
 #   ExecStart=python3 collector.py node0.example:8001
 # Nothing in the swarm depends on it, or knows it exists — it is purely a view.
 WorkingDirectory=%h/collab-cluster-experiment

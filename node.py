@@ -5,8 +5,8 @@ datasets exist by pulling each other's catalogs, and move the bytes with
 BitTorrent v2. There is no tracker, no central catalog and no coordinator.
 
   GET  /stats                    JSON snapshot (session metrics + per-torrent
-                                 status + per-peer info). Also pushed to the
-                                 optional collector.
+                                 status + per-peer info). Already public, so
+                                 there is nothing for a node to report anywhere.
   GET  /catalog                  [{"name","info_hash"}] — every dataset this node
                                  knows of, held or not.
   GET  /catalog/<info_hash>.torrent   the raw .torrent for one dataset.
@@ -19,11 +19,11 @@ BitTorrent v2. There is no tracker, no central catalog and no coordinator.
   POST /add      {"info_hash"|"name": ...}     take a known dataset (manual mode)
   POST /remove   {"info_hash"|"name": ...}     drop one
 
-Three threads: the libtorrent session loop (refreshes the stats snapshot), the
-sync loop (the engine, below), and an optional push loop for the collector.
+Two background threads — the libtorrent session loop (refreshes the stats
+snapshot) and the sync loop (the engine, below) — while the main thread serves
+the HTTP API above.
 """
 import argparse
-import errno
 import glob
 import hashlib
 import json
@@ -31,8 +31,6 @@ import os
 import re
 import shutil
 import signal
-import socket
-import struct
 import threading
 import time
 import traceback
@@ -42,6 +40,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import libtorrent as lt
 
+import beacon
 import catalog
 import config
 import make_torrent
@@ -585,46 +584,16 @@ def make_want(policy: str):
     raise ValueError(f"unknown replication policy: {policy!r}")
 
 
-def make_beacon_socket() -> "socket.socket":
-    """A UDP socket joined to the beacon group, ready to send and to be drained.
-
-    SO_REUSEADDR/SO_REUSEPORT so several nodes can share the port on one dev
-    host, multicast loopback left on so those co-located nodes actually hear each
-    other, and TTL 1 so the beacon never leaves the local segment.
-    """
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    if hasattr(socket, "SO_REUSEPORT"):
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    s.bind(("", config.BEACON_PORT))
-    mreq = struct.pack("4s4s", socket.inet_aton(config.BEACON_GROUP),
-                       socket.inet_aton("0.0.0.0"))
-    s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-    s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
-    s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
-    s.setblocking(False)
-    return s
-
-
 def self_beacon(ns: NodeState) -> dict:
+    """Who we are, as the swarm sees us. Deliberately says nothing about our
+    address: a receiver reads that off the datagram's source (or, for the /peers
+    hello this doubles as, off the connection), so no node ever has to work out
+    (or be told) its own routable IP."""
     with ns.lock:
         digest = ns.digest
-    return {"v": 1, "node": ns.node_key, "bt": config.bt_port(ns.node_id),
+    return {"v": beacon.VERSION, "node": ns.node_key,
+            "bt": config.bt_port(ns.node_id),
             "http": config.stats_port(ns.node_id), "cat": digest}
-
-
-def send_beacon(ns: NodeState, sock) -> None:
-    """Announce ourselves to the local segment. Deliberately says nothing about
-    our address: the receiver reads that off the datagram's source, so no node
-    ever has to work out (or be told) its own routable IP."""
-    try:
-        sock.sendto(json.dumps(self_beacon(ns)).encode(),
-                    (config.BEACON_GROUP, config.BEACON_PORT))
-    except OSError as exc:
-        # No multicast route (offline host, restricted container). Not fatal:
-        # --peer bootstrapping still works.
-        if exc.errno not in (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EPERM):
-            raise
 
 
 def note_peer(ns: NodeState, key: str, ip: str, bt: int, http: int,
@@ -641,24 +610,11 @@ def note_peer(ns: NodeState, key: str, ip: str, bt: int, http: int,
 
 
 def drain_beacons(ns: NodeState, sock) -> None:
-    """Take in one tick's worth of beacons without blocking (hence no listener
-    thread). At ~120 bytes every couple of seconds the socket buffer holds far
-    more than a tick's worth, so nothing is missed between drains."""
-    while True:
-        try:
-            data, addr = sock.recvfrom(65535)
-        except BlockingIOError:
-            return
-        except OSError:
-            return
-        try:
-            msg = json.loads(data)
-        except ValueError:
-            continue
-        if msg.get("v") != 1:
-            continue
-        note_peer(ns, msg.get("node"), addr[0], msg.get("bt"), msg.get("http"),
-                  msg.get("cat"), time.time())
+    """Record everyone who announced themselves since the last tick."""
+    now = time.time()
+    for msg, ip in beacon.drain(sock):
+        note_peer(ns, msg.get("node"), ip, msg.get("bt"), msg.get("http"),
+                  msg.get("cat"), now)
 
 
 def expire_peers(ns: NodeState) -> None:
@@ -789,7 +745,7 @@ def sync_loop(ns: NodeState, sock) -> None:
     tick = 0
     while not ns.stop.is_set():
         try:
-            send_beacon(ns, sock)                    # 1. say who we are
+            beacon.send(sock, self_beacon(ns))       # 1. say who we are
             drain_beacons(ns, sock)                  # 2. hear who else is here
             expire_peers(ns)
             if tick % config.GOSSIP_EVERY == 0:
@@ -976,7 +932,7 @@ def main() -> None:
     resumed = load_resumes(ns)       # what it was holding before a restart
 
     threads = [threading.Thread(target=run, args=(session_loop, ns), daemon=True)]
-    sock = make_beacon_socket()
+    sock = beacon.make_socket()
     threads.append(threading.Thread(target=run, args=(sync_loop, ns, sock), daemon=True))
     for t in threads:
         t.start()

@@ -128,34 +128,21 @@ in which case the `add` step is unnecessary and the data arrives on its own.
 
 ## 5. Optional: the dashboard
 
-Launch one more container the same way:
+Launch one more container the same way and enable the other unit — that is all
+of it. This container runs no node and doesn't need one: the dashboard hears the
+nodes' beacons on the same bridge and reads the swarm through whichever answers,
+so like them it is told nothing and configured with nothing.
 
 ```sh
 incus launch images:debian/14/cloud collector --profile default --profile collab-cluster
 incus exec collector -- cloud-init status --wait
-```
-
-The unit defaults to a node on its own machine, and this container has none — so
-tell it where one is. Create
-`~/.config/systemd/user/collab-cluster-collector.service.d/node.conf` in the
-collector container:
-
-```ini
-[Service]
-ExecStart=
-ExecStart=python3 collector.py node0.incus:8001
-```
-
-The empty `ExecStart=` clears the one the unit ships; a drop-in leaves the unit
-itself untouched. Any node will do — it's a way in, not a destination — and the
-node containers are not touched either: they are read, and have no setting for
-this.
-
-```sh
-incus exec collector -- su --login debian --command 'systemctl --user daemon-reload'
 incus exec collector -- su --login debian --command 'systemctl --user enable --now collab-cluster-collector'
 incus exec collector -- loginctl enable-linger debian
 ```
+
+Any node will do — it's a way in, not a destination — and if that one goes away
+the dashboard picks up another by itself. The node containers are not touched
+either: they are read, have no setting for this, and never hear from it.
 
 Then expose just the UI:
 

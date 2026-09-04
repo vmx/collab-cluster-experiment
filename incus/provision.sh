@@ -13,11 +13,11 @@
 #   EXPOSE_WEB=1                   0 = don't add the public proxy device
 #   COLLECTOR=1                    0 = nodes only, no dashboard container
 #
-# Nothing here is swarm configuration: nodes are told no addresses and discover
-# each other by multicast. The collector container is the one exception — it has
-# no node of its own, so it gets a drop-in pointing it at node0.incus, which is
-# a way into the swarm rather than a destination. The nodes are not touched by
-# it and cannot tell whether anyone is watching.
+# Nothing here is swarm configuration, and there is none to write: every
+# container finds what it needs on the bridge. Nodes are told no addresses and
+# discover each other by multicast; the collector container, which runs no node
+# of its own, finds one to read through the same way. The nodes are not touched
+# by it and cannot tell whether anyone is watching.
 set -eu
 
 IMAGE=${IMAGE:-images:debian/14/cloud}
@@ -102,21 +102,6 @@ for name in $(all_names); do
 	fi
 done
 
-# The collector reads the swarm through one node. This container has none, so
-# override ExecStart to name one; any node will do.
-point_collector_at() {
-	dir=/home/debian/.config/systemd/user/collab-cluster-collector.service.d
-	incus exec "$COLLECTOR" -- mkdir --parents "$dir"
-	incus exec "$COLLECTOR" -- sh -c "cat >$dir/node.conf <<'CONF'
-[Service]
-ExecStart=
-ExecStart=python3 collector.py $1:8001
-CONF"
-	incus exec "$COLLECTOR" -- chown --recursive debian:debian "$dir"
-	# The user manager has already read its units at boot; pick up the drop-in.
-	as_debian "$COLLECTOR" 'systemctl --user daemon-reload'
-}
-
 say 'Enabling one unit per container'
 enable_unit() {
 	name=$1
@@ -130,8 +115,7 @@ for name in $(node_names); do
 	enable_unit "$name" collab-cluster-node
 done
 if [ "$COLLECTOR_ENABLED" = 1 ]; then
-	# After the nodes, so there is something to read as soon as it starts.
-	point_collector_at "$(node_names | sed -n 1p).incus"
+	# After the nodes, so there is a beacon to hear as soon as it starts.
 	enable_unit "$COLLECTOR" collab-cluster-collector
 fi
 

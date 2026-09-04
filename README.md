@@ -232,7 +232,9 @@ The beacon is a ~100-byte UDP datagram to `239.255.42.1:6772` (override with
 `SWARM_BEACON_GROUP` / `SWARM_BEACON_PORT`), TTL 1, so it stays on the local
 segment. It carries a node's identity, its ports and its catalog fingerprint. A
 node never states its own address — the receiver takes it from the packet — so
-there is nothing to configure on a multi-homed or NAT'd host.
+there is nothing to configure on a multi-homed or NAT'd host. The optional
+dashboard joins the same group to find a node to read through, and only ever
+listens: it discovers the swarm without the swarm discovering it.
 
 Beacons and gossip are the only sources of peers. Torrents are built private and
 trackerless — the private flag is what keeps libtorrent from using PEX — and DHT,
@@ -257,14 +259,25 @@ it goes on to publish.
 The swarm replicates with this switched off; run it to *see* what's happening.
 
 ```bash
-python collector.py 127.0.0.1:8001    # then open http://127.0.0.1:8100/
+python collector.py    # then open http://127.0.0.1:8100/
 ```
 
-That address is a way in, not a destination: the dashboard asks that node who
-else exists and reads every node's `/stats` itself. Any node will do, and
-nothing has to be configured — a node has no dashboard setting, and cannot tell
-whether anyone is watching. It shows an overview sorted rarest-copies-first, a
-per-dataset piece map, in-flight transfers, and per-node storage.
+No address, because it finds a node the way nodes find each other: it listens to
+the beacon and reads the swarm through whoever answers. That node is a way in,
+not a destination — it asks it who else exists and reads every node's `/stats`
+itself — so any node will do, and if that one goes away it picks up another by
+itself. Nothing is configured on either side: a node has no dashboard setting,
+and since the dashboard only ever listens and never beacons back, no node learns
+it exists or can tell whether anyone is watching. It shows an overview sorted
+rarest-copies-first, a per-dataset piece map, in-flight transfers, and per-node
+storage.
+
+Where multicast doesn't reach, name any node instead — the same escape hatch as
+`node.py --peer`:
+
+```bash
+python collector.py 127.0.0.1:8001
+```
 
 Nodes appear under the address the dashboard reached them at, so what you read
 there is what you can paste into `control.py`. A node is never labelled by
@@ -301,10 +314,11 @@ POST /remove   {"name"|"info_hash"}  drop one
 | `control.py` | CLI to talk to a node: publish, list, peers, status, add, remove. |
 | `make_torrent.py` | Builds v2-only, private, trackerless torrents (`build()`), reads a catalog directory (`list_catalog()`). As a script, generates the sample content. |
 | `catalog.py` | Stdlib client for another node's HTTP API, including `fetch_swarm()` — every node's stats, gathered through one node's peer table. No libtorrent, so `control.py` doesn't need it. |
+| `beacon.py` | The discovery datagram: join the group, send, drain. No libtorrent either, which is how the dashboard finds its way in without running a node. |
 | `config.py` | Ports, beacon group, timing, paths, the default replication policy. |
 | `swarm_stats.py` | Groups node snapshots by dataset and aggregates per-piece/per-file copy counts. Shared by `piece_map.py` and `collector.py`. |
 | `piece_map.py` | Terminal view, through any node: who holds which pieces, and how many copies of each file exist. |
-| `collector.py` | *Optional.* Stateless: reads the swarm through any one node and serves the `/api/*` dashboard endpoints and the web UI. |
+| `collector.py` | *Optional.* Stateless: finds a node on the beacon, reads the swarm through it, and serves the `/api/*` dashboard endpoints and the web UI. |
 | `webui/` | *Optional.* Zero-build [Tutuca](https://github.com/marianoguerra/tutuca) SPA, framework vendored as one file. Served by `collector.py`. |
 
 Python standard library only, plus the `libtorrent` binding (tested with
@@ -315,7 +329,7 @@ runtime.
 
 | | |
 |---|---|
-| Beacon (multicast, all nodes) | `239.255.42.1:6772` |
+| Beacon (multicast; every node sends, the dashboard only listens) | `239.255.42.1:6772` |
 | Node *i* BitTorrent | `6881 + i` |
 | Node *i* HTTP API | `8001 + i` |
 | Dashboard (optional) | `8100` |
@@ -348,7 +362,7 @@ to 0. A node's real identity is a persisted UUID in `nodes/<id>/node_key`.
   believed, and a beacon can claim to be any node — nothing is signed or
   authenticated. This suits a private network, which is the assumed environment.
 - **Discovery needs working multicast** between nodes, or a `--peer` address to
-  start from.
+  start from — and the same for the dashboard, which is otherwise given a node.
 - **The mesh is complete.** Every node connects to every other node for every
   dataset it holds, which is deterministic and fast at cluster scale but grows
   quadratically.

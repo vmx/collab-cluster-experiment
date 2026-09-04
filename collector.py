@@ -1,9 +1,12 @@
 """Optional dashboard for the swarm.
 
-Purely observability, and entirely a client: point it at any node and it reads
-the swarm through that node's peer table (catalog.fetch_swarm). Nodes are not
-configured for it, do not report to it, and cannot tell whether anyone is
-watching — the same relationship control.py and piece_map.py have.
+Purely observability, and entirely a client: it reads the whole swarm through
+any one node's peer table (catalog.fetch_swarm), and finds that node the way
+nodes find each other — by listening to the multicast beacon. So it is told no
+addresses and configured with nothing, exactly like the nodes it watches. Nor
+are they configured for it: they do not report to it and cannot tell whether
+anyone is watching, since the dashboard only ever listens and never beacons
+back. The same relationship control.py and piece_map.py have.
 
 Everything shown is derived from node snapshots alone. There is nothing else to
 ask: the nodes are the only thing that knows who holds what. A node's /stats is
@@ -42,11 +45,13 @@ import argparse
 import hashlib
 import json
 import os
+import select
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote
 
+import beacon
 import catalog
 import config
 import swarm_stats
@@ -63,28 +68,84 @@ STATIC_FILES = {
     "/tutuca.js": ("tutuca.js", "text/javascript; charset=utf-8"),
 }
 
-# The node we read the swarm through. Any node will do: it is a way in, not a
-# source of truth — every node knows the whole peer table.
+# A node named on the command line, for where multicast doesn't reach. Normally
+# empty: any node will do, so the beacon picks one. Whichever way it is found,
+# it is a way in and not a source of truth — every node knows the whole swarm.
 SEED = ""
+
+_HEARD_LOCK = threading.Lock()
+# node_key -> {"base", "at"} — nodes heard beaconing lately. This stands in for
+# the configuration the dashboard doesn't have: it listens where the nodes
+# announce themselves, and any one of them is a way in.
+_HEARD: dict = {}
 
 _SNAP_LOCK = threading.Lock()
 # {"at", "snaps", "bases"} — the last fan-out. `bases` is every node address it
-# reached, which is what lets us carry on when SEED itself goes away.
+# reached, which is what lets us carry on when our way in goes away.
 _SNAPS: dict = {"at": 0.0, "snaps": [], "bases": []}
 
+
+def listen_for_nodes() -> None:
+    """Track the nodes announcing themselves on the local segment, forever.
+
+    The dashboard finds its way into the swarm exactly as a node does, which is
+    why it needs no address, and why it picks itself back up when the node it
+    happened to be reading through goes away. It only ever listens: it sends no
+    beacon, so no node learns it exists and nothing in the swarm changes because
+    someone is watching."""
+    try:
+        sock = beacon.make_socket()
+    except OSError as exc:
+        # No multicast here (offline host, restricted network). Not fatal, but
+        # then the only way in is the one given on the command line.
+        print(f"no beacon ({exc}); name a node to read the swarm through",
+              flush=True)
+        return
+    while True:
+        # Wakes as soon as a beacon lands; the timeout is only so that on a
+        # silent segment we still get around to forgetting nodes.
+        select.select([sock], [], [], config.BEACON_INTERVAL)
+        now = time.time()
+        with _HEARD_LOCK:
+            for msg, ip in beacon.drain(sock):
+                if msg.get("node") and msg.get("http"):
+                    _HEARD[msg["node"]] = {"at": now,
+                                           "base": f"http://{ip}:{msg['http']}"}
+            for key in [k for k, e in _HEARD.items()
+                        if now - e["at"] > config.PEER_STALE_AFTER]:
+                del _HEARD[key]
+
+
+def ways_in() -> list:
+    """Every address worth trying as a way into the swarm, best first.
+
+    Any node will do, so this is a list of candidates rather than a setting: the
+    one named on the command line (if any), then the nodes the last successful
+    fan-out reached, then whatever the beacon has heard lately. The last is why
+    the dashboard normally needs no address at all; the middle one is what keeps
+    it reading through a node whose beacons we happen to be missing."""
+    with _HEARD_LOCK:
+        heard = [e["base"] for e in sorted(_HEARD.values(),
+                                           key=lambda e: -e["at"])]
+    out = []
+    for base in ([SEED] if SEED else []) + _SNAPS["bases"] + heard:
+        if base not in out:
+            out.append(base)
+    return out
+
+
 def fresh_snapshots(now: float = None) -> list:
-    """Every node's current snapshot, pulled through SEED at most once per
+    """Every node's current snapshot, pulled through one of them at most once per
     POLL_TTL. Every view in this file is a pure function of this list.
 
     A node that doesn't answer is absent: liveness is "responded", not a timer.
-    If SEED stops answering we retry through the addresses the last successful
-    fan-out found, so restarting the node the dashboard was pointed at doesn't
-    blank it."""
+    The same goes for the node we read through — when it stops answering we work
+    down the rest of ways_in(), so restarting it doesn't blank the dashboard."""
     now = now if now is not None else time.time()
     with _SNAP_LOCK:
         if now - _SNAPS["at"] < config.POLL_TTL:
             return _SNAPS["snaps"]
-        for base in [SEED] + [b for b in _SNAPS["bases"] if b != SEED]:
+        for base in ways_in():
             try:
                 snaps, bases = catalog.fetch_swarm(base)
             except Exception:
@@ -521,19 +582,24 @@ def make_handler():
 def main() -> None:
     global SEED
     ap = argparse.ArgumentParser(
-        description="Optional dashboard for the swarm. Reads everything through "
-                    "one node; nothing has to be configured to report to it.")
-    ap.add_argument("node", nargs="?",
-                    default=f"{config.HOST}:{config.STATS_PORT_BASE}",
-                    help="any node's endpoint host[:port] - a way into the "
-                         "swarm, not a source of truth (default: %(default)s)")
-    SEED = catalog.base_url(ap.parse_args().node)
+        description="Optional dashboard for the swarm. Finds a node on the "
+                    "beacon and reads everything through it, so it needs no "
+                    "configuration; nothing reports to it, or knows it is there.")
+    ap.add_argument("node", nargs="?", default="",
+                    help="read the swarm through this node, host[:port], instead "
+                         "of finding one on the beacon - for where multicast "
+                         "doesn't reach. Any node will do: it is a way into the "
+                         "swarm, not a source of truth.")
+    args = ap.parse_args()
+    SEED = catalog.base_url(args.node) if args.node else ""
 
+    threading.Thread(target=listen_for_nodes, daemon=True).start()
     srv = ThreadingHTTPServer((config.COLLECTOR_HOST, config.COLLECTOR_PORT),
                               make_handler())
     srv.daemon_threads = True
+    via = SEED or f"any node beaconing on {config.BEACON_GROUP}:{config.BEACON_PORT}"
     print(f"collector on http://{config.COLLECTOR_HOST}:{config.COLLECTOR_PORT}/  "
-          f"(web UI + /api/*) reading the swarm through {SEED}", flush=True)
+          f"(web UI + /api/*) reading the swarm through {via}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

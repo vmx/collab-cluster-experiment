@@ -65,7 +65,9 @@ STATS_PORT_BASE = 8001   # node i serves its HTTP API on STATS_PORT_BASE + i
 # or LSD is involved anywhere.
 #
 # The group is a local-scope (administratively scoped) multicast address and the
-# beacon goes out with TTL 1, so it never leaves the local segment.
+# beacon goes out with TTL 1, so it never leaves the local segment. See
+# beacon.py for the datagram itself; the optional dashboard joins the same group
+# to find a node to read through, but only listens.
 BEACON_GROUP = os.environ.get("SWARM_BEACON_GROUP") or "239.255.42.1"
 BEACON_PORT = int(os.environ.get("SWARM_BEACON_PORT") or 6772)
 
