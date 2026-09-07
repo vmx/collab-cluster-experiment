@@ -31,7 +31,7 @@ Every node runs the same tick, roughly every two seconds:
 | 2 | **peers** | read everyone else's beacons — a peer's address is the datagram's source |
 | 3 | **catalog** | for any peer whose fingerprint changed, pull its dataset list and fetch what's new |
 | 4 | **want()** | for each dataset we know of but don't hold — do we want it? |
-| 5 | **mesh** | hand every known peer to every torrent we hold, and let BitTorrent move the bytes |
+| 5 | **mesh** | hand every known peer to every torrent still missing data, and let BitTorrent move the bytes |
 
 Steps 1, 2, 3 and 5 are the same on every node and are not configurable. Step 4
 is the only policy — see [what a node stores](#what-a-node-stores).
@@ -356,6 +356,8 @@ to 0. A node's real identity is a persisted UUID in `nodes/<id>/node_key`.
 - **Discovery needs working multicast** between nodes: a node that cannot hear
   the beacon cannot join, and there is no address to bootstrap from. (The
   dashboard is the exception — it can be handed a node instead.)
-- **The mesh is complete.** Every node connects to every other node for every
-  dataset it holds, which is deterministic and fast at cluster scale but grows
-  quadratically.
+- **A transfer pulls from everyone at once.** A node offers all its known peers
+  to every dataset it is still missing, which is deterministic and fast at
+  cluster scale but grows as peers x transfers in flight. Nothing is offered for
+  a dataset it already holds: in BitTorrent the side that wants the bytes opens
+  the connection, so a settled swarm holds no peer connections at all.

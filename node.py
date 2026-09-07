@@ -69,7 +69,9 @@ class NodeState:
         # want(meta) -> bool: the one policy knob. See make_want().
         self.want = want
         self.lock = threading.Lock()
-        # info_hash(v2 str) -> {name, save_path, ti, files, handle} — data we hold
+        # info_hash(v2 str) -> {name, save_path, ti, files, handle, complete}
+        # — the data we hold. `complete` is refreshed by the session loop and
+        # read by mesh(), which only offers peers to torrents still missing data.
         self.torrents: dict = {}
         # info_hash(v2 str) -> {name, path} — datasets we know exist. A superset
         # of `torrents`: in manual mode a node knows of far more than it holds.
@@ -368,8 +370,8 @@ def add_torrent(ns: NodeState, info_hash: str, serve_path: str = None) -> dict:
     atp.save_path = save_path
     handle = ns.ses.add_torrent(atp)
 
-    entry = {"name": tname, "save_path": save_path,
-             "ti": ti, "files": file_list(ti), "handle": handle}
+    entry = {"name": tname, "save_path": save_path, "ti": ti,
+             "files": file_list(ti), "handle": handle, "complete": False}
     with ns.lock:
         ns.torrents[info_hash] = entry
     # Persist immediately so a restart before any download still restores it
@@ -459,7 +461,7 @@ def load_resumes(ns: NodeState) -> int:
         with ns.lock:
             ns.torrents[info_hash] = {"name": ti.name(), "save_path": atp.save_path,
                                       "ti": ti, "files": file_list(ti),
-                                      "handle": handle}
+                                      "handle": handle, "complete": False}
         count += 1
         print(f"node {ns.node_id}: resumed '{ti.name()}' [{info_hash[:8]}]", flush=True)
     return count
@@ -497,13 +499,18 @@ def session_loop(ns: NodeState) -> None:
         with ns.lock:
             entries = list(ns.torrents.values())
 
+        torrents = []
+        for e in entries:
+            t = torrent_dict(e["handle"].status(), e["ti"], e["files"])
+            e["complete"] = t["complete"]      # mesh() reads this
+            torrents.append(t)
+
         snap = {
             "node_key": ns.node_key,    # stable swarm-wide identity
             "ts": time.time(),
             "bt_port": config.bt_port(ns.node_id),
             "disk": node_disk(ns.node_id),
-            "torrents": [torrent_dict(e["handle"].status(), e["ti"], e["files"])
-                         for e in entries],
+            "torrents": torrents,
         }
         with ns.lock:
             ns.snapshot = snap
@@ -523,7 +530,7 @@ def session_loop(ns: NodeState) -> None:
 #   2. peers    drain everyone else's beacons
 #   3. catalog  pull from any peer whose digest changed
 #   4. want()   take datasets we don't hold but should
-#   5. mesh     hand every known peer to every torrent we hold
+#   5. mesh     hand every known peer to every torrent still missing data
 # That's the whole distributed system. Everything below is those five steps.
 
 def make_want(policy: str):
@@ -634,11 +641,18 @@ def take_wanted(ns: NodeState) -> None:
 
 def mesh(ns: NodeState) -> None:
     """Step 5: what the tracker used to do. Hand every known peer to every
-    torrent we hold and let libtorrent sort out the rest — it ignores peers it is
-    already connected to, so this is cheap to repeat every tick and is what makes
-    the swarm self-heal after a peer restarts."""
+    torrent that still needs data, and let libtorrent take it from there.
+
+    A complete torrent is skipped because it needs nobody: in BitTorrent the
+    side that wants the bytes opens the connection, and libtorrent closes a
+    seed-to-seed connection as soon as the handshake shows neither end has
+    anything to offer. So a settled swarm holds no peer connections at all and
+    does nothing here — the tick costs what is moving, not what is stored. A
+    node that restarts and still wants data re-offers on its own next tick,
+    which is what heals the swarm; a node that restarts holding everything has
+    nothing to heal."""
     with ns.lock:
-        handles = [e["handle"] for e in ns.torrents.values()]
+        handles = [e["handle"] for e in ns.torrents.values() if not e["complete"]]
         addrs = [(p["ip"], p["bt"]) for p in ns.peers.values()
                  if p.get("ip") and p.get("bt")]
     for handle in handles:
