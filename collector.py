@@ -20,6 +20,14 @@ things, and only the first grows with nothing at all:
               then only the transitions since the last one we saw.
   /transfers  what is moving right now, bounded by what is in flight.
 
+The catalog is not among them, because there isn't one to ask for: a dataset
+exists because some node holds it, so unioning the holdings streams both lists
+the datasets and counts their copies. That also makes this the place where the
+swarm's catalog exists at all — no node has one — and the place where the
+difference between "nobody holds this any more" and "the node that holds it is
+down" would be settled, since only something watching over time can tell them
+apart.
+
 So a settled swarm costs one small request per node, and a busy one costs the
 changes and nothing else. Which datasets a node holds is *accumulated* here
 (_NODES below) rather than refetched — that state is the price of the cursor,
@@ -107,14 +115,10 @@ _POLL: dict = {"at": 0.0, "bases": []}
 _NODES: dict = {}
 
 _META_LOCK = threading.Lock()
-# info_hash -> a dataset's static shape (size, piece layout, files). Fixed for
-# the life of the dataset — it is what the info-hash hashes — so it is fetched
-# once and never invalidated.
+# info_hash -> a dataset's file -> piece map. Fixed for the life of the dataset —
+# it is what the info-hash hashes — so it is fetched once and never invalidated.
+# Only the per-file views need it; the list view is built from holdings alone.
 _META: dict = {}
-
-# The catalog listing, cached like a poll. Every node converges on the same one,
-# so any of them will do.
-_CATALOG: dict = {"at": 0.0, "entries": []}
 
 
 def listen_for_nodes() -> None:
@@ -189,10 +193,12 @@ def follow(rec: dict, base: str) -> None:
                 for row in page.get("holdings") or []:
                     if row.get("state") == "gone":
                         # The tombstone. Without it a dropped dataset would be
-                        # indistinguishable from one simply not mentioned.
+                        # indistinguishable from one simply not mentioned — and
+                        # since holding is what makes a dataset exist, the last
+                        # of these is a dataset leaving the swarm.
                         held.pop(row["info_hash"], None)
                     else:
-                        held[row["info_hash"]] = row["state"]
+                        held[row["info_hash"]] = row
                 cursor = page["cursor"]
                 if not page.get("more"):
                     break
@@ -244,19 +250,12 @@ def poll(now: float = None) -> list:
         return [rec for rec in _NODES.values() if rec.get("live")]
 
 
-def bases_now(nodes: list) -> list:
-    """Node addresses to ask about a dataset. Any of them will do — every node
-    knows the whole catalog, whether or not it holds the data."""
-    return [rec["base"] for rec in nodes] or ways_in()
-
-
 def meta_for(info_hash: str, bases: list) -> dict:
-    """A dataset's static shape, fetched once and kept for good.
+    """A dataset's file -> piece map, fetched once from a holder and kept.
 
-    Immutable, so there is nothing to invalidate. Fetched lazily per dataset,
-    which is honest about where the seam is: this is the one thing here that is
-    still one request per dataset, and the place a catalog service would answer
-    instead of a node."""
+    Immutable, so there is nothing to invalidate. Only the per-file drill-down
+    needs it — the list view is built from holdings alone — so this is one
+    request per dataset *looked at*, not per dataset that exists."""
     with _META_LOCK:
         got = _META.get(info_hash)
     if got:
@@ -272,22 +271,10 @@ def meta_for(info_hash: str, bases: list) -> dict:
     return None
 
 
-def catalog_entries(bases: list, now: float = None) -> list:
-    """Every dataset the swarm knows of, held by anyone or not. Any node's
-    catalog will do — they converge on the same one."""
-    now = now if now is not None else time.time()
-    if now - _CATALOG["at"] < config.POLL_TTL:
-        return _CATALOG["entries"]
-    for base in bases:
-        try:
-            entries = catalog.fetch_list(base)
-        except Exception:
-            continue
-        _CATALOG.update({"at": now, "entries": entries})
-        return entries
-    _CATALOG["at"] = now
-    return _CATALOG["entries"]
-
+# --- one dataset's pieces -----------------------------------------------------
+# The only place piece bitfields are handled, and only ever for the dataset being
+# looked at. Bucketed into display columns here rather than shipped raw, so the
+# payload stays small even for a torrent with thousands of pieces.
 
 def bucket_fracs(bits: list, num_pieces: int, cols: int) -> list:
     """Held-fraction of each display column (one column per piece when they fit).
@@ -389,41 +376,19 @@ def torrent_detail(meta: dict, rows: list) -> dict:
 # view that needs bitfields fetches them for its single dataset.
 
 def build_overview() -> dict:
-    """The list view: one light row per dataset in the catalog.
+    """The list view: one light row per dataset in the swarm.
 
-    Listed from the catalog rather than from what nodes hold, so a dataset that
-    nobody has holds a row saying so — which is the row that matters most.
+    The dataset list and the copy counts are the same pass over the same data —
+    the union of what the nodes hold — because that union is the catalog. No
+    per-dataset lookup happens here at all: everything on a row comes out of the
+    holdings stream itself.
     """
     now = time.time()
-    nodes = poll(now)
-    holders: dict = {}          # info_hash -> [{label, state, progress}]
-    rates: dict = {}            # info_hash -> download rate across the swarm
-    for rec in nodes:
-        moving = {t["info_hash"]: t for t in rec["transfers"]}
-        for info_hash, state in rec["holdings"].items():
-            live = moving.get(info_hash)
-            holders.setdefault(info_hash, []).append({
-                "label": rec["label"], "state": state,
-                "progress": 1.0 if state == "complete"
-                            else float(live["progress"]) if live else 0.0})
-            if live:
-                rates[info_hash] = rates.get(info_hash, 0) + live["download_rate"]
-
-    bases = bases_now(nodes)
-    datasets = []
-    for entry in catalog_entries(bases, now):
-        info_hash = entry["info_hash"]
-        meta = meta_for(info_hash, bases)
-        if not meta:
-            continue
-        row = swarm_stats.overview_row(meta, holders.get(info_hash, []))
-        rate = rates.get(info_hash, 0)
-        # Inside the swarm every byte downloaded is a byte someone uploaded, so
-        # these are one number seen from either end. Reading it off the receiving
-        # side is what lets a node that is only seeding go unpolled per dataset.
-        row.update({"download_rate": rate, "upload_rate": rate})
-        datasets.append(row)
-    return {"ts": now, "datasets": datasets}
+    catalog = swarm_stats.catalog_from(
+        [(rec["label"], rec["holdings"], rec["transfers"]) for rec in poll(now)])
+    return {"ts": now,
+            "datasets": [swarm_stats.overview_row(meta, holders)
+                         for meta, holders in catalog.values()]}
 
 
 def build_torrent_detail(info_hash: str) -> dict:
@@ -434,11 +399,13 @@ def build_torrent_detail(info_hash: str) -> dict:
     in the catalog. That is the whole reason the bitfield lives on its own
     endpoint."""
     nodes = poll()
-    bases = bases_now(nodes)
-    meta = meta_for(info_hash, bases)
+    have = [rec for rec in nodes if info_hash in rec["holdings"]]
+    # Asked of a holder, which is the only kind of node that has the .torrent to
+    # answer from — and, since holding is what makes a dataset exist, the only
+    # kind there is when the dataset is there at all.
+    meta = meta_for(info_hash, [rec["base"] for rec in have])
     if not meta:
         return None
-    have = [rec for rec in nodes if info_hash in rec["holdings"]]
     holders = []
     if have:
         with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
@@ -518,24 +485,22 @@ def build_nodes() -> dict:
 def build_node_detail(label: str) -> dict:
     """One node's held datasets, or None if it isn't reporting.
 
-    The drill-down from the Nodes screen. Names and sizes come from the metadata
-    cache rather than from the node, which reports only what is its own to know:
-    that it holds the dataset, and how far along it is."""
-    nodes = poll()
-    bases = bases_now(nodes)
-    for rec in nodes:
+    The drill-down from the Nodes screen. Names and sizes ride along in the
+    holdings rows, so this needs nothing but what the poll already brought
+    back."""
+    for rec in poll():
         if rec["label"] != label:
             continue
         moving = {t["info_hash"]: t for t in rec["transfers"]}
         rows = []
-        for info_hash, state in rec["holdings"].items():
-            meta = meta_for(info_hash, bases) or {}
+        for info_hash, row in rec["holdings"].items():
             live = moving.get(info_hash)
+            state = row.get("state")
             complete = state == "complete"
-            size = int(meta.get("total_size") or 0)
+            size = int(row.get("total_size") or 0)
             rows.append({
                 "info_hash": info_hash,
-                "name": meta.get("name") or info_hash[:12],
+                "name": row.get("name") or info_hash[:12],
                 "total_size": size,
                 "complete": complete,
                 "progress": 1.0 if complete

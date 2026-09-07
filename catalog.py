@@ -1,17 +1,17 @@
 """Stdlib client for another node's HTTP API.
 
-There is no central catalog: every node keeps its own directory of .torrent
-files and serves it, so "the catalog" is just what some node knows about. These
-helpers are how a node pulls a peer's catalog during its sync tick, and how
-control.py and the dashboard inspect a node.
+There is no catalog anywhere — not centrally, and not on a node. Publishing
+seeds the data in place, so every dataset has a holder from the moment it
+exists, and the set of datasets in the swarm is the union of what its nodes
+hold. "The catalog" is therefore something a reader assembles from these calls,
+not something it asks anyone for.
 
 The node's API is split so that nothing a reader polls grows with how much that
 node holds, and these are the four halves of that split: fetch_stats for what a
 node is as a whole (including its cursor), fetch_holdings for which datasets it
 has — incrementally, following the cursor — fetch_transfers for what is moving,
 and fetch_holding for one dataset's piece bitfield. fetch_meta rounds it out with
-the static shape of a dataset, which belongs to the catalog because it is the
-same on every node.
+a dataset's file -> piece map, which any holder can answer.
 
 Kept free of libtorrent so control.py works without that dependency; callers
 that need to parse a .torrent bdecode the bytes themselves — which is also why
@@ -38,12 +38,6 @@ def _get(base: str, path: str, timeout: float) -> bytes:
         return r.read()
 
 
-def fetch_list(base: str, timeout: float = 5.0) -> list:
-    """A node's catalog: [{"name", "info_hash"}] for every dataset it knows of
-    (whether or not it holds the data)."""
-    return json.loads(_get(base, "/catalog", timeout).decode())
-
-
 class Resync(Exception):
     """The node cannot answer from the cursor we sent — it has restarted, or the
     transitions we asked about have been trimmed away. Drop the cursor and list
@@ -51,12 +45,15 @@ class Resync(Exception):
 
 
 def fetch_meta(base: str, info_hash: str, timeout: float = 10.0) -> dict:
-    """A dataset's static shape: name, size, piece layout, file -> piece ranges.
+    """A dataset's file -> piece map (plus its name, size and piece layout).
 
-    The same on every node and fixed for the life of the dataset (it is what the
-    info-hash hashes), so a reader fetches it once and keeps it. Nodes used to
-    ship it with every torrent in every snapshot, which meant one identical copy
-    per node per poll."""
+    The same on every node and fixed for the life of the dataset — it is what the
+    info-hash hashes — so a reader fetches it once and keeps it. Answered only by
+    a node that holds the dataset, which is also the only node that has its
+    .torrent; the holdings streams say who that is.
+
+    Only the per-file views need this. Everything a list view wants is already in
+    the holdings row."""
     try:
         return json.loads(_get(base, f"/catalog/{info_hash}", timeout).decode())
     except urllib.error.HTTPError as e:
@@ -67,6 +64,10 @@ def fetch_meta(base: str, info_hash: str, timeout: float = 10.0) -> dict:
 
 def fetch_holdings(base: str, since: str = None, timeout: float = 30.0) -> dict:
     """Which datasets a node holds: {"cursor", "more", "holdings"}.
+
+    Rows are {info_hash, state, name, total_size, piece_length} — enough to list
+    a dataset without asking anyone anything else, which is what lets the union
+    of these streams stand in for a catalog.
 
     With no cursor this is everything it holds; with one, only what has changed
     since — which is what makes following 25 nodes cost nothing while they are
@@ -113,7 +114,10 @@ def fetch_transfers(base: str, timeout: float = 5.0) -> list:
 def fetch_torrent_bytes(base: str, info_hash: str, timeout: float = 10.0) -> bytes:
     """The raw .torrent bytes for one dataset. Addressed by full v2 info-hash —
     never by name, which is only a label and can repeat across datasets.
-    Raises FileNotFoundError if that node doesn't have it."""
+
+    Answered only by a node holding the dataset: a node keeps torrents for what
+    it has and nothing else. Raises FileNotFoundError otherwise, which is how a
+    node taking a dataset walks its peers until one serves it."""
     try:
         return _get(base, f"/catalog/{info_hash}.torrent", timeout)
     except urllib.error.HTTPError as e:

@@ -1,15 +1,20 @@
 """Peer discovery: the multicast beacon, on the wire.
 
 Every node multicasts a tiny datagram to the local segment every tick — who it
-is, its ports, and a digest of its catalog — and reads everyone else's. That one
-mechanism replaces the tracker: it answers both "which nodes exist" and "has
-anyone published something new", and a peer's address comes free as the
-datagram's source, so no node ever has to work out (or be told) its own routable
-address.
+is, its ports, and where it is in its own stream of what it holds — and reads
+everyone else's. That one mechanism replaces the tracker: it answers both "which
+nodes exist" and "has anyone got something I haven't seen", and a peer's address
+comes free as the datagram's source, so no node ever has to work out (or be told)
+its own routable address.
 
 The message is JSON, and this is the whole of it:
 
-    {"v": 1, "node": <node_key>, "bt": <port>, "http": <port>, "cat": <digest>}
+    {"v": 1, "node": <node_key>, "bt": <port>, "http": <port>, "hold": <cursor>}
+
+`hold` is that node's holdings cursor. It replaced a digest of the node's
+catalog, which had to be recomputed over everything known on every change — and
+which, once publishing never stops, was never equal twice, so it gated nothing.
+A cursor says the same thing in a form that also says *where to carry on from*.
 
 Deliberately no address field — see above. `v` is the only thing a receiver
 insists on; anything else is ignored, so the datagram can grow.

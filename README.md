@@ -27,18 +27,26 @@ Every node runs the same tick, roughly every two seconds:
 
 | | | |
 |---|---|---|
-| 1 | **beacon** | multicast "here I am, and here's a fingerprint of my catalog" |
+| 1 | **beacon** | multicast "here I am, and here's where I am in my holdings stream" |
 | 2 | **peers** | read everyone else's beacons — a peer's address is the datagram's source |
-| 3 | **catalog** | for any peer whose fingerprint changed, pull its dataset list and fetch what's new |
-| 4 | **want()** | for each dataset we know of but don't hold — do we want it? |
+| 3 | **holdings** | for any peer whose cursor moved, read what changed — which is how a node learns what exists |
+| 4 | **want()** | each dataset it hasn't got, once, as it appears — do we want it? |
 | 5 | **mesh** | hand every known peer to every torrent still missing data, and let BitTorrent move the bytes |
 
 Steps 1, 2, 3 and 5 are the same on every node and are not configurable. Step 4
 is the only policy — see [what a node stores](#what-a-node-stores).
 
-A node's peer table, its catalog and its storage decisions are all its own. Two
-nodes converge because they see the same beacons, not because anything tells them
-to.
+A node's peer table and its storage decisions are all its own. Two nodes
+converge because they see the same beacons, not because anything tells them to.
+
+There is no catalog anywhere — not centrally, and not on a node. Publishing
+seeds the data in place, so a dataset has a holder from the moment it exists, and
+**the set of datasets in the swarm is just the union of what its nodes hold.** A
+node learns what exists by following its peers' holdings streams and forgetting
+the rows it doesn't act on; it keeps a `.torrent` only for what it holds. So
+nothing a node stores grows with the swarm's catalog, only with its own disk —
+and "which datasets exist" is a question for something looking at every node
+(`control.py list`, the dashboard), not for any one of them.
 
 ## Getting data in
 
@@ -49,35 +57,36 @@ python control.py publish <node> <path>
 ```
 
 That node hashes the path — resolved on its own filesystem, not on the machine
-you typed the command from — into a v2 torrent, adds it to its catalog, and
-**seeds it in place**: nothing is copied, the data stays where it is. Its beacon
-fingerprint changes, peers notice within a tick, and they pull the `.torrent`.
-Any node can publish.
+you typed the command from — into a v2 torrent and **seeds it in place**:
+nothing is copied, the data stays where it is. Publishing *is* starting to hold
+it, which is what makes a dataset exist. Its beacon cursor moves, peers notice
+within a tick, and each decides for itself. Any node can publish.
 
-Publishing puts a dataset in every node's *catalog*. It does not put the data on
-them; that is the next section.
+Publishing does not put the data on other nodes; that is the next section.
 
 ## What a node stores
 
 By default, only what you ask it to. A node with no `--replicate` flag joins the
-swarm completely — it hears every beacon, tracks the full catalog, and serves that
-catalog and its `.torrent` files to any peer that asks — but it holds no data
-until you name a dataset. Everything a node does *except* storing costs nothing;
-storing is the one thing it cannot undo cheaply, so it isn't done unasked.
+swarm completely — it hears every beacon, follows every peer's holdings, and
+serves what it has to any peer that asks — but it holds no data until you name a
+dataset, and it keeps nothing about the datasets it passed over. Everything a
+node does *except* storing costs nothing; storing is the one thing it cannot undo
+cheaply, so it isn't done unasked.
 
 ```bash
 python node.py                    # joins, tracks everything, stores nothing
 python node.py --replicate manual # the same thing, said out loud
 ```
 
-Such a node knows about every dataset and holds none of them. `list` shows the
-whole catalog, with the last column reporting what this particular node has:
+Such a node holds nothing. `list` is read *through* it rather than *from* it —
+every dataset in the swarm, with the last column reporting what this particular
+node has:
 
 ```
 $ python control.py list 127.0.0.1:8002
-name                     v2 info-hash       on this node
-documents                78c6f7e55ebbe684   -
-media                    66b676791b1a9e20   -
+name                     v2 info-hash       copies  on this node
+documents                78c6f7e55ebbe684        1  -
+media                    66b676791b1a9e20        1  -
 
 $ python control.py status 127.0.0.1:8002
 127.0.0.1:8002: holding nothing yet
@@ -85,7 +94,7 @@ $ python control.py status 127.0.0.1:8002
 
 (Datasets appear there once *some* node has published them — see
 [getting data in](#getting-data-in). A swarm where nobody has published anything
-has an empty catalog on every node.)
+lists nothing, because there is nothing anywhere for it to list.)
 
 ### Taking a dataset
 
@@ -98,13 +107,16 @@ An info-hash can be given in full or shortened to any unique leading portion, so
 the 16-character forms `list` prints work as-is. Use one when a name is
 ambiguous.
 
-The node downloads exactly that dataset and nothing else, into
-`nodes/<id>/data/<slug>/`, pulling from every peer that already holds it. Nothing
+The name is resolved across the swarm before the node is asked — a node has no
+catalog to look one up in — so what it receives is an info-hash. It fetches the
+`.torrent` from a peer that holds the dataset, then downloads exactly that
+dataset and nothing else, into `nodes/<id>/data/<slug>/`, pulling from every peer
+that already holds it. Nothing
 else about the node changes: it keeps discovering peers, keeps tracking new
 datasets as they appear, and keeps ignoring them.
 
 Which nodes hold what is entirely up to you, and nothing has to agree: one
-dataset can live on every node, another on two, another on none at all. Nothing
+dataset can live on every node and another on two. Nothing
 keeps track of that for you: `control.py status <node>` is the per-node answer,
 and `control.py map <node>` is the swarm-wide one — every dataset with its copy
 count, rarest first. Name a dataset as well and you get its piece map and how
@@ -117,20 +129,23 @@ place datasets by hand.
 python control.py remove 127.0.0.1:8002 media
 ```
 
-Three things happen, and the third is the one to know about:
+Four things happen, and the last two are the ones to know about:
 
 1. The node stops serving the dataset's data immediately.
-2. Its fast-resume file is deleted, so a restart won't bring it back.
+2. Its fast-resume file and its `.torrent` are deleted, so a restart won't bring
+   it back and the node stops answering for a dataset it no longer has.
 3. **The downloaded files stay on disk.** `remove` frees no space by itself —
    delete `nodes/<id>/data/<slug>/` yourself if that is what you were after.
+4. **If that was the last copy, the dataset has left the swarm.** A dataset
+   exists because someone holds it, so nothing keeps a record of one nobody
+   holds. This is how a dataset is retracted; there is no other way, and no
+   confirmation.
 
 One upshot of (3) is that re-adding the dataset later costs nothing: libtorrent
 rechecks the files already sitting there and comes back complete without pulling
-a byte over the network.
-
-The dataset also stays in the node's catalog. It still knows the dataset exists
-and still serves its `.torrent` to peers — it just doesn't keep a copy of the
-data.
+a byte over the network. Another is that (4) is recoverable — re-publishing the
+same path reproduces the same dataset, byte for byte and hash for hash, because
+the dataset *is* its content.
 
 ### Mirroring everything
 
@@ -176,8 +191,9 @@ Things worth trying from there:
 - **Drop it again.** `python control.py remove 127.0.0.1:8002 media`, then look at
   `status`, at `list`, and at `nodes/1/data/` — see
   [dropping a dataset](#dropping-a-dataset).
-- **Start a fourth node.** It joins and sees the same catalog with nothing
-  configured.
+- **Start a fourth node.** It joins and sees the whole swarm with nothing
+  configured — including, with `--replicate all`, everything published before it
+  existed: it reads each peer's holdings stream from the beginning.
 - **Publish from a different node.** Every node is equal.
 - **Kill a node and restart it.** It resumes with progress intact and re-meshes.
 - **Publish two different directories with the same name.** They coexist; see
@@ -198,8 +214,10 @@ python control.py map     <node> <dataset>   # ...and that one's pieces, per nod
 
 Nodes are addressed by their HTTP endpoint, `host[:port]`; the port defaults to
 8001, so `127.0.0.1` and `127.0.0.1:8001` name the same node. A dataset argument
-is a name or an info-hash, interchangeably. Any node will do for `list` — they
-converge on the same catalog. `status` is per node by definition.
+is a name or an info-hash, interchangeably. Any node will do for `list` and
+`map`, but they are read *through* it and not *from* it: no node has a catalog,
+so both ask it who else exists and union what everyone holds. `status` is per
+node by definition.
 
 ## Identity: hashes underneath, names on top
 
@@ -208,10 +226,13 @@ publish different content called `media` and both simply coexist as separate
 datasets. On disk each gets a readable slug, `<name>_<first 8 hex of hash>`:
 
 ```
-nodes/0/catalog/media_3005dbcc.torrent    # what this node knows exists
-nodes/0/data/media_3005dbcc/media/…       # a copy it downloaded
+nodes/0/catalog/media_3005dbcc.torrent    # the torrent, for a dataset it holds
+nodes/0/data/media_3005dbcc/media/…       # the copy it downloaded
 nodes/0/.resume/media_3005dbcc.resume     # libtorrent fast-resume
 ```
+
+All three exist for exactly the datasets this node holds, and are deleted
+together when it drops one.
 
 The other `media` sits beside it as `media_e3603877`, in the same three places.
 
@@ -233,7 +254,9 @@ are already usable.
 
 The beacon is a ~100-byte UDP datagram to `239.255.42.1:6772` (override with
 `SWARM_BEACON_GROUP` / `SWARM_BEACON_PORT`), TTL 1, so it stays on the local
-segment. It carries a node's identity, its ports and its catalog fingerprint. A
+segment. It carries a node's identity, its ports and its holdings cursor — where
+it is in its own stream of what it holds, so a peer can tell from the datagram
+alone whether there is anything new to read. A
 node never states its own address — the receiver takes it from the packet — so
 there is nothing to configure on a multi-homed or NAT'd host. The optional
 dashboard joins the same group to find a node to read through, and only ever
@@ -296,14 +319,21 @@ GET  /stats                          what the node is: disk, counts, rates, curs
 GET  /holdings[?since=<cursor>]      which datasets it holds — all, or just what changed
 GET  /holdings/<info_hash>           one dataset here, with its piece bitfield
 GET  /transfers                      what is moving right now: progress and rates
-GET  /catalog                        [{"name","info_hash"}] — every dataset it knows of
-GET  /catalog/<info_hash>            one dataset's shape: size, pieces, files
-GET  /catalog/<info_hash>.torrent    the raw .torrent
+GET  /catalog/<info_hash>            one dataset's file -> piece map (holders only)
+GET  /catalog/<info_hash>.torrent    the raw .torrent (holders only)
 GET  /peers                          {"self": …, "peers": […]} — its view of the swarm
 POST /publish  {"path": …}           hash a local path in and seed it
-POST /add      {"name"|"info_hash"}  take a known dataset
+POST /add      {"info_hash": …}      take a dataset from whoever has it
 POST /remove   {"name"|"info_hash"}  drop one
 ```
+
+There is no endpoint for "what datasets exist", because no node knows. That is
+the deliberate half of this: publishing seeds the data in place, so a dataset has
+a holder from the instant it exists, and the union of every node's `/holdings`
+**is** the catalog. A node learns what exists by following its peers' streams and
+forgetting what it doesn't take; it keeps a `.torrent` only for what it holds
+(~14 KB against ~100 MiB of data, so it costs nothing next to holding the data at
+all). Nothing a node stores grows with the swarm — only with its own disk.
 
 The split across the first four is the one thing here that decides whether
 watching a swarm stays affordable, so it is worth saying why it is drawn where it
@@ -317,38 +347,43 @@ it holds changes only when one is taken, finishes, or is dropped. So:
   holdings traffic at all. The cursor is opaque: store it, return it, never take
   it apart. That is what lets the *node* say "I can't answer from that one"
   (HTTP 409, after a restart) instead of silently returning an empty delta
-  forever. Rows are just `{info_hash, state}`, where `state` is `downloading`,
-  `complete`, or — only ever in a delta — `gone`, the tombstone that tells a
-  reader a dataset was dropped rather than merely not mentioned.
+  forever. A row is `{info_hash, state, name, total_size, piece_length}`, where
+  `state` is `downloading`, `complete`, or — only ever in a delta — `gone`, the
+  tombstone that tells a reader a dataset was dropped rather than merely not
+  mentioned. The three immutable fields are there so that unioning these streams
+  lists the datasets *and* counts their copies in one pass, with no per-dataset
+  lookup; they are exempt from the rule above because they never change, which
+  was the whole reason to keep rates out.
 - **`/transfers` holds every per-second number.** Progress and rates are kept out
   of `/holdings` precisely because they would churn the stream continuously.
   It is bounded by what is in flight, never by what is stored.
 - **`/holdings/<info_hash>` is the only piece bitfield**, and it is one dataset at
   a time. The swarm-wide piece map costs one request per node holding *that*
-  dataset, whatever else is in the catalog.
+  dataset, however much the swarm holds.
 
 Counting copies needs none of the piece detail: a node holding a dataset
 `complete` holds every file in it by definition, so **copies = holders in state
 `complete`**, straight off the holdings stream. The piece-level view refines that
 into per-file and rarest-piece figures when you ask for one dataset.
 
-`/catalog/<info_hash>` is there for the same reason: a dataset's size, piece
-layout and file list are identical on every node and fixed for its lifetime (they
-are what the info-hash hashes), so they belong to the catalog and are fetched
-once — not shipped with every node's status, one identical copy per node per
-poll.
+`/catalog/<info_hash>` carries the one thing a row can't: the file → piece map,
+which is the large part and is needed only for per-file copy counts. It is fixed
+for the dataset's lifetime — it is what the info-hash hashes — so a reader fetches
+it once and keeps it, from any node holding the dataset. Which is the only kind
+of node that has it, and, since holding is what makes a dataset exist, the only
+kind there is.
 
 ## Files
 
 | File | Role |
 |---|---|
-| `node.py` | **The system.** libtorrent session + the sync tick (beacon, peers, catalog, want, mesh) + the HTTP API. Run one per machine. |
+| `node.py` | **The system.** libtorrent session + the sync tick (beacon, peers, holdings, want, mesh) + the HTTP API. Run one per machine. |
 | `control.py` | CLI to talk to a node: publish, list, peers, status, add, remove, map. |
-| `make_torrent.py` | Builds v2-only, private, trackerless torrents (`build()`), reads a catalog directory (`list_catalog()`). As a script, generates the sample content. |
-| `catalog.py` | Stdlib client for another node's HTTP API: `fetch_stats`/`fetch_holdings` (cursor-following, raises `Resync`)/`fetch_transfers`/`fetch_holding`, plus `fetch_swarm()` — every node's `/stats`, gathered through one node's peer table. No libtorrent, so `control.py` doesn't need it. |
+| `make_torrent.py` | Builds v2-only, private, trackerless torrents (`build()`). As a script, generates the sample content. |
+| `catalog.py` | Stdlib client for another node's HTTP API: `fetch_stats`/`fetch_holdings` (cursor-following, raises `Resync`)/`fetch_transfers`/`fetch_holding`/`fetch_meta`, plus `fetch_swarm()` — every node's `/stats`, gathered through one node's peer table. Named for the thing it assembles rather than fetches: no node has a catalog. No libtorrent, so `control.py` doesn't need it. |
 | `beacon.py` | The discovery datagram: join the group, send, drain. No libtorrent either, which is how the dashboard finds its way in without running a node. |
 | `config.py` | Ports, beacon group, timing, paths. |
-| `swarm_stats.py` | The copy-count arithmetic, at both levels: `overview_row()` from holdings alone, `holder_rows()`/`per_file()` from piece bitfields. Shared by `control.py map` and `collector.py`. |
+| `swarm_stats.py` | The catalog and the copy-count arithmetic: `catalog_from()` unions the holdings streams, `overview_row()` scores a dataset from holdings alone, `holder_rows()`/`per_file()` work from piece bitfields. Shared by `control.py` and `collector.py`. |
 | `collector.py` | *Optional.* Finds a node on the beacon and reads the swarm through it. Keeps one cursor per node so a refresh costs the changes rather than the whole world; serves the `/api/*` dashboard endpoints and the web UI. |
 | `webui/` | *Optional.* Zero-build [Tutuca](https://github.com/marianoguerra/tutuca) SPA, framework vendored as one file. Served by `collector.py`. |
 
@@ -371,7 +406,7 @@ to 0. A node's real identity is a persisted UUID in `nodes/<id>/node_key`.
 
 ## Generated files (safe to delete)
 
-- `nodes/<id>/catalog/` — the .torrent files this node knows about
+- `nodes/<id>/catalog/` — the .torrent files for the datasets it holds
 - `nodes/<id>/data/` — datasets it downloaded (published ones stay in place)
 - `nodes/<id>/.resume/` — libtorrent fast-resume, so a restart doesn't re-download
 - `nodes/<id>/node_key` — its persisted identity
@@ -379,9 +414,12 @@ to 0. A node's real identity is a persisted UUID in `nodes/<id>/node_key`.
 
 ## Limitations
 
-- **The catalog only grows.** A node never drops a dataset on its own, and there
-  is no way to retract one once published — it stays in every catalog, and
-  `remove` on one node doesn't affect the others.
+- **A dataset is only as durable as its holders.** There is no catalog, so a
+  dataset nobody holds is not merely unavailable — it is gone, along with any
+  record that it existed. Dropping the last copy retracts it silently, and a node
+  that is *down* is indistinguishable, in a single fan-out, from one that never
+  had the data. Watching copy counts over time is the answer to both, and that is
+  the dashboard's job rather than a node's.
 - **`remove` doesn't delete the files.** It stops serving a dataset and forgets
   it across restarts, but the downloaded copy stays in `nodes/<id>/data/`.
 - **Nothing weighs a dataset against free space.** `add` never refuses, and

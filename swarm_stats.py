@@ -12,6 +12,10 @@ There are two levels here, and they are separate because the node's API is:
     by definition, so counting copies needs no piece-level detail at all. This is
     what overview_row does, and it costs nothing per dataset.
 
+    It is also where the catalog comes from: a dataset exists because someone
+    holds it, so unioning the streams (catalog_from) both lists the datasets and
+    counts their copies in one pass.
+
   * From piece bitfields comes everything finer: which pieces are rare, how many
     copies of each *file* exist, what a partial holder actually has. Bitfields
     are fetched one dataset at a time (node.holding_detail), so this level is the
@@ -39,6 +43,41 @@ def num_pieces(meta: dict) -> int:
 
 # --- the list level: copies, from holdings alone ------------------------------
 
+def catalog_from(nodes: list) -> dict:
+    """The swarm's catalog, assembled from what its nodes hold.
+
+    `nodes` is [(label, holdings, transfers)] — one entry per node that answered,
+    where `holdings` is {info_hash: row} as accumulated from its stream and
+    `transfers` is its live in-flight rows.
+
+    Returns {info_hash: (meta, holders)} ready for overview_row. There is nothing
+    else to consult: publishing seeds the data in place, so a dataset has a
+    holder from the moment it exists, and a dataset with no holder left has left
+    the swarm. The row carries the dataset's name, size and piece length, so this
+    needs no per-dataset lookup — that is what those fields are in the row for.
+
+    A node that isn't answering contributes nothing, so a dataset only it holds
+    is missing here rather than shown at zero copies. Telling "nobody has this"
+    from "the node that has it is down" is a question about time, which a caller
+    holding history can answer and a single fan-out cannot.
+    """
+    out: dict = {}
+    for label, holdings, transfers in nodes:
+        moving = {t["info_hash"]: t for t in transfers}
+        for info_hash, row in holdings.items():
+            meta, holders = out.setdefault(info_hash, ({
+                "info_hash": info_hash, "name": row.get("name", ""),
+                "total_size": int(row.get("total_size") or 0),
+                "piece_length": int(row.get("piece_length") or 0)}, []))
+            live = moving.get(info_hash)
+            holders.append({
+                "label": label, "state": row.get("state"),
+                "progress": 1.0 if row.get("state") == "complete"
+                            else float(live["progress"]) if live else 0.0,
+                "download_rate": int(live["download_rate"]) if live else 0})
+    return out
+
+
 def overview_row(meta: dict, holders: list) -> dict:
     """One dataset's durability and spread, without a single piece bitfield.
 
@@ -64,6 +103,10 @@ def overview_row(meta: dict, holders: list) -> dict:
     """
     complete = [h for h in holders if h.get("state") == "complete"]
     partial = [h for h in holders if h.get("state") != "complete"]
+    # Inside the swarm every byte downloaded is a byte someone uploaded, so the
+    # two rates are one number seen from either end. Reading it off the receiving
+    # side is what lets a node that is only seeding go unpolled per dataset.
+    rate = sum(h.get("download_rate") or 0 for h in holders)
     # Average copies per piece: whole copies, plus how far the partial ones got.
     redundancy = len(complete) + sum(float(h.get("progress") or 0.0) for h in partial)
     spread = [{"label": h["label"],
@@ -81,6 +124,7 @@ def overview_row(meta: dict, holders: list) -> dict:
         "redundancy": redundancy,
         "total_stored": int(redundancy * meta["total_size"]),
         "downloading": len(partial), "seeding": len(complete),
+        "download_rate": rate, "upload_rate": rate,
         "spread": spread,
     }
 

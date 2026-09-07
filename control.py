@@ -1,7 +1,7 @@
 """Talk to a node.
 
     python control.py publish 10.0.0.5 ~/photos   # put local data into the swarm
-    python control.py list     10.0.0.5           # datasets that node knows of
+    python control.py list     10.0.0.5           # every dataset, + what this node has
     python control.py peers    10.0.0.5           # nodes it can see
     python control.py status   10.0.0.5           # datasets it actually holds
     python control.py add      10.0.0.6 photos    # manual mode: take that one
@@ -13,10 +13,11 @@ Nodes are addressed by their HTTP endpoint, "host[:port]" (port defaults to the
 standard control port, so on its own IP a node is just its address). Several
 nodes on one host in a dev run are told apart by port, e.g. 127.0.0.1:8002.
 
-There is nothing central to talk to: every node answers for itself, and any node
-will do for `list` — they converge on the same catalog. Datasets are named by the
-basename of whatever was published; where a name is ambiguous (two nodes
-published different content under the same one), use the info-hash instead.
+There is nothing central to talk to, and no node has a catalog: a dataset exists
+because some node holds it, so `list` and `map` read every node through the one
+you name and union what they hold. Datasets are named by the basename of whatever
+was published; where a name is ambiguous (two nodes published different content
+under the same one), use the info-hash instead.
 """
 import argparse
 import json
@@ -56,9 +57,11 @@ def _post(endpoint: str, path: str, payload: dict, timeout: float = 5.0):
 
 
 def _dataset_ref(ref: str) -> dict:
-    """Address a dataset the way the user typed it. The node resolves either
-    form, and falls back to matching a name if a hex-looking ref matches no
-    hash — so a dataset that happens to be named like one still works."""
+    """Address a dataset the way the user typed it, for /remove — which acts on
+    something the node already holds, so the node can resolve either form
+    itself, falling back to a name if a hex-looking ref matches no hash. /add is
+    different: nothing is held yet and a node has no catalog, so control.py
+    resolves the name across the swarm and sends a hash."""
     return {"info_hash": ref.lower()} if HEXREF.match(ref) else {"name": ref}
 
 
@@ -79,29 +82,37 @@ def _checked(endpoint: str, res: dict) -> dict:
 
 
 def cmd_list(args) -> None:
+    """Every dataset in the swarm, and what the named node has of each.
+
+    Read through that node rather than from it: it knows only what it holds, so
+    the list is the union of every node's holdings, and the last column is the
+    one thing that is genuinely about the node you asked."""
     base = catalog.base_url(args.endpoint)
     try:
-        metas = catalog.fetch_list(base)
+        nodes = swarm_nodes(base)
     except Exception:
         _unreachable(args.endpoint)
-    if not metas:
+    entries = swarm_catalog(nodes)
+    if not entries:
         print("no datasets yet - publish one with: "
               "python control.py publish <node> <path>")
         return
-    # Which of them this node actually holds, and how far along. Two calls, and
-    # neither carries a piece bitfield: what it holds, and what is moving.
-    held, moving = _held(base)
-    print(f"{'name':<24} {'v2 info-hash':<18} on this node")
-    for m in metas:
-        state = held.get(m["info_hash"])
-        if not state:
+    here = next((n for n in nodes if n["base"] == base), None)
+    held = here["held"] if here else {}
+    moving = here["moving"] if here else {}
+    print(f"{'name':<24} {'v2 info-hash':<18} {'copies':>6}  on this node")
+    for meta, holders in sorted(entries.values(), key=lambda e: e[0]["name"]):
+        row = held.get(meta["info_hash"])
+        if not row:
             column = "-"
-        elif state == "complete":
+        elif row["state"] == "complete":
             column = "complete"
         else:
-            live = moving.get(m["info_hash"])
+            live = moving.get(meta["info_hash"])
             column = f"{(live['progress'] if live else 0.0) * 100:.0f}%"
-        print(f"{m['name']:<24} {m['info_hash'][:16]:<18} {column}")
+        copies = sum(1 for h in holders if h["state"] == "complete")
+        print(f"{meta['name']:<24} {meta['info_hash'][:16]:<18} "
+              f"{copies:>6}  {column}")
 
 
 def cmd_peers(args) -> None:
@@ -111,27 +122,31 @@ def cmd_peers(args) -> None:
         _unreachable(args.endpoint)
     me = view.get("self") or {}
     print(f"this node  {me.get('node','?')[:8]}  {args.endpoint}  "
-          f"({me.get('held',0)} held / {me.get('known',0)} known)")
+          f"({me.get('held', 0)} held)")
     peers = view.get("peers") or []
     if not peers:
         print("\nno peers seen yet. Nodes find each other by multicast beacon, so "
               "they must share a segment.")
         return
-    print(f"\n{'node':<10} {'address':<22} {'catalog':<13} last seen")
+    print(f"\n{'node':<10} {'address':<22} {'holdings':<13} last seen")
     for p in peers:
         # Its control address, not its BitTorrent one: this is the column you
-        # copy into the next command.
+        # copy into the next command. The holdings column is that peer's cursor
+        # as it announced it - where it is in its own stream of what it holds.
         addr = f"{p.get('ip')}:{p.get('http')}"
         print(f"{(p.get('node') or '?')[:8]:<10} {addr:<22} "
-              f"{(p.get('cat') or '-'):<13} {p.get('age', '?')}s ago")
+              f"{(p.get('hold') or '-'):<13} {p.get('age', '?')}s ago")
 
 
 def _held(base: str) -> tuple:
-    """What a node holds, and what of it is moving: (state by info-hash,
-    live transfer by info-hash). Neither call scales with the catalog — the
-    first is one row per dataset held, the second only what is in flight."""
+    """What one node holds, and what of it is moving: (row by info-hash, live
+    transfer by info-hash). Neither call scales with the swarm — the first is one
+    row per dataset held, the second only what is in flight.
+
+    control.py keeps no cursor between runs, so it always lists in full; a
+    long-running reader follows the cursor instead (see collector.py)."""
     try:
-        held = {r["info_hash"]: r["state"]
+        held = {r["info_hash"]: r
                 for r in (catalog.fetch_holdings(base).get("holdings") or [])}
         moving = {t["info_hash"]: t for t in catalog.fetch_transfers(base)}
     except Exception:
@@ -139,13 +154,25 @@ def _held(base: str) -> tuple:
     return held, moving
 
 
-def _names(base: str) -> dict:
-    """info-hash -> name, from a node's catalog. Names are labels only; every
-    call below addresses datasets by hash."""
-    try:
-        return {m["info_hash"]: m["name"] for m in catalog.fetch_list(base)}
-    except Exception:
-        return {}
+def swarm_nodes(base: str) -> list:
+    """Every node reachable through the one named, with what each holds."""
+    stats, _ = catalog.fetch_swarm(base)
+    out = []
+    for st in stats:
+        node_base = f"http://{st.get('label')}"
+        held, moving = _held(node_base)
+        out.append({"key": st["node_key"], "label": st.get("label", ""),
+                    "base": node_base, "held": held, "moving": moving})
+    return out
+
+
+def swarm_catalog(nodes: list) -> dict:
+    """The swarm's catalog: {info_hash: (meta, holders)}.
+
+    Nobody keeps one, so it is assembled here from what the nodes hold. That is
+    not a workaround — a dataset exists precisely because someone has it."""
+    return swarm_stats.catalog_from(
+        [(n["label"], n["held"], list(n["moving"].values())) for n in nodes])
 
 
 def cmd_status(args) -> None:
@@ -158,12 +185,11 @@ def cmd_status(args) -> None:
     if not held:
         print(f"{args.endpoint}: holding nothing yet")
         return
-    names = _names(base)
     parts = []
-    for info_hash, state in sorted(held.items(),
-                                   key=lambda kv: names.get(kv[0], kv[0])):
-        name = names.get(info_hash, info_hash[:12])
-        if state == "complete":
+    for info_hash, row in sorted(held.items(),
+                                 key=lambda kv: kv[1].get("name", "")):
+        name = row.get("name") or info_hash[:12]
+        if row["state"] == "complete":
             parts.append(f"{name}[seed]")
         else:
             live = moving.get(info_hash)
@@ -172,8 +198,7 @@ def cmd_status(args) -> None:
                          f"p{live['num_peers'] if live else 0}]")
     print(f"{args.endpoint}: " + "  ".join(parts))
     print(f"  {stats.get('complete', 0)}/{stats.get('held', 0)} complete, "
-          f"{human(stats.get('stored', 0))} stored, "
-          f"{stats.get('known', 0)} datasets known")
+          f"{human(stats.get('stored', 0))} stored")
 
 
 def cmd_publish(args) -> None:
@@ -192,8 +217,20 @@ def cmd_publish(args) -> None:
 
 
 def cmd_add(args) -> None:
+    """Tell a node to take a dataset.
+
+    The name is resolved here, not there: a node has no catalog to look one up
+    in, so it takes an info-hash and fetches the .torrent from whoever holds the
+    dataset."""
+    base = catalog.base_url(args.endpoint)
+    try:
+        entries = swarm_catalog(swarm_nodes(base))
+    except Exception:
+        _unreachable(args.endpoint)
+    info_hash = resolve_ref({h: m["name"] for h, (m, _) in entries.items()},
+                            args.dataset)
     res = _checked(args.endpoint, _post(args.endpoint, "/add",
-                                        _dataset_ref(args.dataset)))
+                                        {"info_hash": info_hash}))
     ref = f"{res['name']!r} [{res['info_hash'][:16]}]"
     if not res.get("added"):
         print(f"{args.endpoint}: already holding {ref} - nothing to do")
@@ -210,7 +247,10 @@ def cmd_remove(args) -> None:
         print(f"{args.endpoint}: not holding {args.dataset!r} - nothing to do")
         return
     print(f"{args.endpoint}: dropped {res['name']!r} [{res['info_hash'][:16]}] "
-          "- it stays in the catalog, and the files stay on disk")
+          "- the files stay on disk")
+    print("if that was the last copy, the dataset has left the swarm: nothing "
+          "keeps a\ncatalog of datasets nobody holds. Re-publishing the same "
+          "path brings it back\nunchanged - the dataset is its content.")
 
 
 # --- the swarm map -----------------------------------------------------------
@@ -348,20 +388,6 @@ def render_overview(rows: list) -> None:
               f"{spread:<14} {rate}{flag}")
 
 
-def swarm_nodes(base: str) -> list:
-    """Every node, with what it holds. One /stats each plus one full holdings
-    listing — control.py keeps no cursor between runs, so it always lists in
-    full; a long-running reader follows the cursor instead (see collector.py)."""
-    stats, _ = catalog.fetch_swarm(base)
-    out = []
-    for st in stats:
-        node_base = f"http://{st.get('label')}"
-        held, moving = _held(node_base)
-        out.append({"key": st["node_key"], "label": st.get("label", ""),
-                    "base": node_base, "held": held, "moving": moving})
-    return out
-
-
 def resolve_ref(names: dict, ref: str) -> str:
     """A dataset reference as typed -> its full info-hash. Same rules as the
     node's own resolver: an info-hash in full or shortened to any unique leading
@@ -390,49 +416,37 @@ def cmd_map(args) -> None:
     if not nodes:
         print("no nodes answered (check: python control.py peers).")
         return
+    entries = swarm_catalog(nodes)
+    if not entries:
+        print("no datasets yet - publish one with: "
+              "python control.py publish <node> <path>")
+        return
 
     if not args.dataset:
-        entries = catalog.fetch_list(base)
-        if not entries:
-            print("no datasets yet - publish one with: "
-                  "python control.py publish <node> <path>")
-            return
-        rows = []
-        for entry in entries:
-            info_hash = entry["info_hash"]
-            meta = catalog.fetch_meta(base, info_hash)
-            holders, rate = [], 0
-            for node in nodes:
-                state = node["held"].get(info_hash)
-                if not state:
-                    continue
-                live = node["moving"].get(info_hash)
-                holders.append({"label": node["label"], "state": state,
-                                "progress": (live or {}).get("progress", 0.0)})
-                rate += (live or {}).get("download_rate", 0)
-            row = swarm_stats.overview_row(meta, holders)
-            row["download_rate"] = rate
-            rows.append(row)
-        render_overview(rows)
+        render_overview([swarm_stats.overview_row(meta, holders)
+                         for meta, holders in entries.values()])
         print("\nfor one dataset's pieces and per-file copies: "
               f"python control.py map {args.endpoint} <dataset>")
         return
 
-    names = {m["info_hash"]: m["name"] for m in catalog.fetch_list(base)}
-    info_hash = resolve_ref(names, args.dataset)
-    meta = catalog.fetch_meta(base, info_hash)
-    holders = []
+    info_hash = resolve_ref({h: m["name"] for h, (m, _) in entries.items()},
+                            args.dataset)
+    holders, holder_bases = [], []
     for node in nodes:
         if info_hash not in node["held"]:
             continue
         detail = catalog.fetch_holding(node["base"], info_hash)
         if detail:
             holders.append((node["key"], node["label"], detail))
+            holder_bases.append(node["base"])
+    # A dataset is here at all only because someone holds it, so this list is
+    # never empty — but the node we asked may have gone away mid-command.
     if not holders:
-        print(f"'{meta['name']}' [{info_hash[:16]}] is in the catalog but no node "
-              "holds it.\ntake a copy with: python control.py add <node> "
-              f"{info_hash[:16]}")
+        print(f"no node is serving {args.dataset!r} any more.")
         return
+    # The file -> piece map is the one thing not in a holdings row, so it comes
+    # from a holder: the only kind of node that has the .torrent to answer from.
+    meta = catalog.fetch_meta(holder_bases[0], info_hash)
     render_torrent(meta, swarm_stats.holder_rows(meta, holders))
 
 
@@ -455,7 +469,8 @@ def main() -> None:
         p.set_defaults(func=func)
         return p
 
-    with_endpoint("list", "datasets a node knows of", cmd_list)
+    with_endpoint("list", "every dataset in the swarm, and what this node has",
+                  cmd_list)
     with_endpoint("peers", "nodes a node can see", cmd_peers)
     with_endpoint("status", "datasets a node actually holds", cmd_status)
     p_map = with_endpoint("map", "copies of every dataset, or one dataset's "

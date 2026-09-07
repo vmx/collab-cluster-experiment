@@ -8,25 +8,26 @@ BitTorrent v2. There is no tracker, no central catalog and no coordinator.
                                  throughput, and the cursor below. Constant
                                  size — it says nothing per dataset.
   GET  /holdings[?since=<cursor>]     which datasets this node holds and whether
-                                 each is complete. With a cursor, only what has
+                                 each is complete, with each one's name, size and
+                                 piece length. With a cursor, only what has
                                  changed since; the response carries the next
-                                 one. This is what copy counting reads.
+                                 one. This is what copy counting reads, and,
+                                 unioned across nodes, it is the catalog.
   GET  /holdings/<info_hash>     one dataset here, with its piece bitfield — the
                                  drill-down, one dataset at a time.
   GET  /transfers                what is moving right now: progress and rates,
                                  for in-flight transfers only.
-  GET  /catalog                  [{"name","info_hash"}] — every dataset this node
-                                 knows of, held or not.
-  GET  /catalog/<info_hash>      one dataset's static shape as JSON: size, piece
-                                 layout, file -> piece-range map.
-  GET  /catalog/<info_hash>.torrent   the raw .torrent for one dataset.
+  GET  /catalog/<info_hash>      one dataset's file -> piece-range map, for the
+                                 per-file views. Held datasets only.
+  GET  /catalog/<info_hash>.torrent   the raw .torrent. Held datasets only —
+                                 whoever holds the data has the torrent.
   GET  /peers                    {"self": {...}, "peers": [...]} — this node's
                                  view of the swarm.
   POST /publish  {"path": ...}   hash a local file/dir into a dataset, put it in
                                  this node's catalog, and seed it in place. This
                                  is the only way data enters the swarm, and it
                                  works the same in every replication mode.
-  POST /add      {"info_hash"|"name": ...}     take a known dataset (manual mode)
+  POST /add      {"info_hash": ...}            take a dataset from whoever has it
   POST /remove   {"info_hash"|"name": ...}     drop one
 
 Two background threads — the libtorrent session loop (tracks what is moving)
@@ -40,10 +41,18 @@ is dropped — so they are read as a stream of transitions (a cursor), while the
 per-second numbers are confined to the transfers in flight and the piece
 bitfields to a single dataset at a time. Nothing a reader polls scales with how
 much this node holds.
+
+There is no catalog here, and that is the second half of the same idea.
+Publishing seeds the data in place, so a dataset has a holder from the instant it
+exists and the union of every node's holdings is exactly the set of datasets in
+the swarm. A node learns what exists by following its peers' streams and
+forgetting the rows it doesn't act on; it keeps a .torrent only for what it
+holds. Nothing it stores scales with the catalog either. Two things follow:
+"which datasets exist" is a question for whoever is watching the whole swarm and
+not for any one node, and a dataset lives exactly as long as someone holds it.
 """
 import argparse
 import glob
-import hashlib
 import json
 import os
 import re
@@ -92,18 +101,19 @@ class NodeState:
         # want(meta) -> bool: the one policy knob. See make_want().
         self.want = want
         self.lock = threading.Lock()
-        # info_hash(v2 str) -> {name, save_path, ti, files, handle, state}
-        # — the data we hold. `state` is "downloading" or "complete"; it is set
-        # where the transition actually happens (add, finish, remove) rather than
-        # rediscovered by polling every torrent, and read by mesh(), which only
-        # offers peers to torrents still missing data.
+        # info_hash(v2 str) -> {name, save_path, ti, files, handle, state,
+        # total_size, piece_length} — the data we hold, and the whole of what
+        # this node knows about any dataset. There is no second dict of datasets
+        # it merely knows of: the holdings streams are the catalog, so a node
+        # follows its peers' and keeps only what it took. `state` is
+        # "downloading" or "complete", set where the transition happens (add,
+        # finish, remove) rather than rediscovered by polling every torrent, and
+        # read by mesh(), which only offers peers to torrents still missing data.
         self.torrents: dict = {}
-        # info_hash(v2 str) -> {name, path} — datasets we know exist. A superset
-        # of `torrents`: in manual mode a node knows of far more than it holds.
-        self.catalog: dict = {}
-        self.digest = ""            # fingerprint of `catalog`, sent in the beacon
-        # node_key -> {ip, bt, http, cat, last_seen} — other nodes we can see.
-        # Beacons are the only way in: a node we cannot hear, we do not know.
+        # node_key -> {ip, bt, http, hold, followed, last_seen} — other nodes we
+        # can see. Beacons are the only way in: a node we cannot hear, we do not
+        # know. `hold` is where that peer says it is in its own holdings stream,
+        # `followed` is where we have read it to.
         self.peers: dict = {}
         # --- how a reader follows what we hold -------------------------------
         # `torrents` changes only on a transition, so it is published as a stream
@@ -195,36 +205,20 @@ def node_disk(node_id: int) -> dict:
         return {"free": 0, "total": 0}
 
 
-# --- catalog -----------------------------------------------------------------
-
-def compute_digest(cat: dict) -> str:
-    """A short fingerprint of a catalog's contents.
-
-    Rides along in every beacon so a peer can tell at a glance whether our
-    catalog changed since it last looked — which is what keeps the sync tick from
-    re-fetching a list that hasn't moved. Order-independent (hashes are sorted),
-    so two nodes that know the same datasets always agree."""
-    h = hashlib.sha256()
-    for ih in sorted(cat):
-        h.update(ih.encode())
-    return h.hexdigest()[:12]
-
-
-def load_catalog(ns: NodeState) -> None:
-    """Index this node's catalog directory once at startup.
-
-    Afterwards the index is maintained in memory: we're the only writer of our
-    own catalog dir, so there's no need to re-parse every .torrent each tick."""
-    os.makedirs(catalog_dir(ns.node_id), exist_ok=True)
-    cat = {m["info_hash"]: {"name": m["name"], "path": m["path"]}
-           for m in make_torrent.list_catalog(catalog_dir(ns.node_id))}
-    with ns.lock:
-        ns.catalog = cat
-        ns.digest = compute_digest(cat)
-
+# --- the torrent files this node has -----------------------------------------
+# One .torrent per dataset held, and no others. A node used to keep a copy of
+# every torrent in the swarm so that "the catalog" was a thing it could serve;
+# it isn't any more (see the holdings section below), so this directory now
+# tracks ns.torrents exactly: written when a dataset is taken, deleted when it
+# is dropped.
 
 def store_torrent(ns: NodeState, name: str, info_hash: str, blob: bytes) -> str:
-    """Write a .torrent into this node's catalog and index it.
+    """Write a dataset's .torrent alongside the data this node holds.
+
+    Kept because a v2 torrent cannot be regenerated from libtorrent's resume data
+    — the piece layers live outside the info dict — and because a holder is who
+    peers ask for it. 14 KB against ~100 MiB of data, so it costs nothing next to
+    what holding the dataset already costs.
 
     Written via a temp file + rename so a reader never sees a partial torrent."""
     directory = catalog_dir(ns.node_id)
@@ -234,10 +228,17 @@ def store_torrent(ns: NodeState, name: str, info_hash: str, blob: bytes) -> str:
     with open(tmp, "wb") as f:
         f.write(blob)
     os.replace(tmp, path)
-    with ns.lock:
-        ns.catalog[info_hash] = {"name": name, "path": path}
-        ns.digest = compute_digest(ns.catalog)
     return path
+
+
+def drop_torrent(ns: NodeState, name: str, info_hash: str) -> None:
+    """Forget a dataset's .torrent when the data goes. The directory holds what
+    this node holds, so a dropped dataset leaves nothing behind to serve."""
+    try:
+        os.remove(os.path.join(catalog_dir(ns.node_id),
+                               f"{slug(name, info_hash)}.torrent"))
+    except FileNotFoundError:
+        pass
 
 
 def _ambiguous(ref: str, kind: str, matches: list) -> ValueError:
@@ -249,19 +250,23 @@ def _ambiguous(ref: str, kind: str, matches: list) -> ValueError:
 
 
 def resolve(ns: NodeState, info_hash: str = None, name: str = None) -> str:
-    """Find one dataset by info-hash or by name, refusing to guess.
+    """Find one dataset *this node holds*, by info-hash or by name.
 
-    An info-hash may be given in full or shortened to any unique leading portion,
-    so the 16-character forms printed by `control.py list` and by the ambiguity
-    error can be used as-is. Names are labels, not identifiers — two nodes can
-    publish different content under the same name — so a name matching several
-    datasets is an error.
+    Scoped to what it holds because that is all it knows: there is no local
+    catalog of the swarm any more. Resolving a name across the swarm is the
+    caller's job (control.py fans out over the holdings streams), and /add
+    therefore takes an info-hash; this is what /remove uses, which can only ever
+    act on something already held.
+
+    An info-hash may be given in full or shortened to any unique leading portion.
+    Names are labels, not identifiers — two nodes can publish different content
+    under the same name — so a name matching several datasets is an error.
     """
     with ns.lock:
-        cat = dict(ns.catalog)
+        held = {ih: e["name"] for ih, e in ns.torrents.items()}
     if info_hash:
         ref = info_hash.strip().lower()
-        matches = [ih for ih in cat if ih.startswith(ref)]
+        matches = [ih for ih in held if ih.startswith(ref)]
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
@@ -270,7 +275,7 @@ def resolve(ns: NodeState, info_hash: str = None, name: str = None) -> str:
         # hash (a directory called "deadbeef00"), so fall through rather than
         # failing on a technicality.
         name = name or info_hash
-    matches = [ih for ih, m in cat.items() if m["name"] == name]
+    matches = [ih for ih, held_name in held.items() if held_name == name]
     if not matches:
         raise FileNotFoundError(name)
     if len(matches) > 1:
@@ -282,6 +287,14 @@ def resolve(ns: NodeState, info_hash: str = None, name: str = None) -> str:
 # Which datasets this node holds, published as something a reader can follow
 # incrementally rather than refetch.
 #
+# This is also the catalog. There is no separate list of "datasets that exist":
+# publishing seeds the data in place, so every dataset has a holder from the
+# moment it exists, and the union of every node's holdings is therefore exactly
+# the set of datasets in the swarm. A node learns what exists by following its
+# peers' streams and forgetting the rows it doesn't act on — it keeps no copy of
+# the whole. The corollary is that a dataset lives as long as someone holds it:
+# when the last holder drops it, it leaves the swarm's view.
+#
 # The distinction that matters: holding a dataset is durable state that changes
 # only when one is taken, finishes, or is dropped, while progress and rates
 # change every second. Keeping them in one payload — as a single /stats snapshot
@@ -289,6 +302,13 @@ def resolve(ns: NodeState, info_hash: str = None, name: str = None) -> str:
 # second, or misses transitions. So transitions go in a log with a cursor, and
 # the per-second numbers live on /transfers, whose size is bounded by what is
 # moving rather than by what is stored.
+#
+# A row carries the dataset's immutable identity as well as the state: name,
+# size and piece length. Not a contradiction of the rule above — that rule is
+# about things which *churn*, and these never change — but what makes the union
+# of these streams usable as a catalog without a per-dataset lookup for every
+# dataset in it. Everything else about a dataset (the file -> piece map, which is
+# the large part) stays behind /catalog/<info_hash>, for the views that need it.
 
 
 class StaleCursor(Exception):
@@ -296,20 +316,30 @@ class StaleCursor(Exception):
     or older than the retained part of the change log."""
 
 
-def note_holding(ns: NodeState, info_hash: str, state: str,
-                 previous: str = None, size: int = 0) -> None:
+def holding_row(info_hash: str, entry: dict, state: str = None) -> dict:
+    """One row of the holdings stream: what this node has of a dataset, and the
+    little about the dataset itself that every list view needs."""
+    return {"info_hash": info_hash, "state": state or entry["state"],
+            "name": entry["name"], "total_size": entry["total_size"],
+            "piece_length": entry["piece_length"]}
+
+
+def note_holding(ns: NodeState, row: dict, previous: str = None) -> None:
     """Record a holding transition. The caller holds ns.lock.
 
     Every change to `torrents` goes through here, which is what lets a reader ask
     "what changed since" and be answered without a scan. The running totals are
-    kept here for the same reason: `previous` and `size` are enough to move them,
-    so /stats never has to walk everything held to report them.
+    kept here for the same reason: the row and `previous` are enough to move
+    them, so /stats never has to walk everything held to report them.
+
+    A tombstone ("gone") carries the same fields as any other row, so a reader
+    that never saw the dataset arrive still knows what left.
     """
     ns.seq += 1
-    ns.changes.append((ns.seq, info_hash, state))
-    became = (state == "complete") - (previous == "complete")
+    ns.changes.append((ns.seq, row))
+    became = (row["state"] == "complete") - (previous == "complete")
     ns.n_complete += became
-    ns.stored_complete += became * size
+    ns.stored_complete += became * row["total_size"]
     excess = len(ns.changes) - CHANGE_LOG_LIMIT
     if excess > 0:
         # What we drop we can no longer answer for: a cursor from before this
@@ -353,7 +383,9 @@ def holdings(ns: NodeState, since: str = None) -> dict:
 
     `state` is "downloading" or "complete", and in a delta also "gone": the
     tombstone that tells a reader a dataset was dropped rather than merely
-    absent from this response.
+    absent from this response. A dataset whose last holder reports "gone" has
+    left the swarm — this stream is the catalog, so there is nothing else for it
+    to still be in.
 
     `more` is always false for now — a full listing is not paged yet — but it is
     in the response so a reader's loop is already written to follow one, and
@@ -361,12 +393,10 @@ def holdings(ns: NodeState, since: str = None) -> dict:
     """
     with ns.lock:
         if since is None:
-            rows = [{"info_hash": ih, "state": e["state"]}
-                    for ih, e in ns.torrents.items()]
+            rows = [holding_row(ih, e) for ih, e in ns.torrents.items()]
         else:
             after = cursor_since(ns, since)
-            rows = [{"info_hash": ih, "state": st}
-                    for seq, ih, st in ns.changes if seq > after]
+            rows = [row for seq, row in ns.changes if seq > after]
         # Read under the same lock as the rows, so the cursor we hand back can
         # never claim to cover a transition the reader was not given.
         return {"cursor": cursor_of(ns), "more": False, "holdings": rows}
@@ -380,13 +410,13 @@ def node_stats(ns: NodeState) -> dict:
     """
     with ns.lock:
         held, complete = len(ns.torrents), ns.n_complete
-        known, cursor, rates = len(ns.catalog), cursor_of(ns), dict(ns.rates)
+        cursor, rates = cursor_of(ns), dict(ns.rates)
         moving = list(ns.transfers)
     return {"node_key": ns.node_key, "ts": time.time(),
             "bt_port": config.bt_port(ns.node_id),
             "http_port": config.stats_port(ns.node_id),
             "disk": node_disk(ns.node_id),
-            "known": known, "held": held, "complete": complete,
+            "held": held, "complete": complete,
             "downloading": held - complete, "moving": len(moving),
             # Bytes on disk: the completed datasets, plus how far the in-flight
             # ones have got. Both sides are already to hand, so this stays
@@ -427,19 +457,21 @@ def file_list(ti) -> list:
     return out
 
 
-def dataset_meta(info_hash: str, path: str) -> dict:
+def dataset_meta(info_hash: str, entry: dict) -> dict:
     """A dataset's static shape: name, size, piece layout, file -> piece ranges.
 
-    This belongs to the catalog and not to any node's live state, because it is
-    identical on every node and never changes — a dataset is its v2 info-hash, and
-    the info-hash is a hash of exactly this. Carried in each node's per-torrent
-    status (as it used to be) it arrives at a reader once per node per poll, every
-    copy byte-identical to the last.
+    Identical on every node and fixed for the dataset's lifetime — it is what the
+    info-hash hashes — so a reader fetches it once and keeps it, rather than
+    receiving one copy per node per poll as it used to.
+
+    The file -> piece map is the large part and only the per-file views need it,
+    which is why the holdings row carries just name/size/piece_length and this is
+    a separate lookup.
     """
-    ti = lt.torrent_info(path)
+    ti = entry["ti"]
     return {"info_hash": info_hash, "name": ti.name(),
             "total_size": ti.total_size(), "piece_length": ti.piece_length(),
-            "num_pieces": ti.num_pieces(), "files": file_list(ti)}
+            "num_pieces": ti.num_pieces(), "files": entry["files"]}
 
 
 def transfer_row(info_hash: str, entry: dict, st) -> dict:
@@ -515,24 +547,27 @@ def make_session(node_id: int) -> "lt.session":
     return lt.session(settings)
 
 
-def add_torrent(ns: NodeState, info_hash: str, serve_path: str = None) -> dict:
-    """Start holding a dataset this node knows about.
+def add_torrent(ns: NodeState, blob: bytes, serve_path: str = None) -> dict:
+    """Start holding a dataset, given its .torrent bytes.
+
+    Takes the bytes rather than an info-hash because a node no longer keeps
+    torrents for datasets it doesn't hold: there is nowhere local to look one up.
+    They come from make_torrent.build (publish) or from a peer that holds the
+    dataset (take, below), and either way the identity is read out of the bytes
+    themselves rather than believed from whoever supplied them.
 
     `serve_path` says where the data comes from: given, it is a copy already on
     this host (what /publish was handed) and we seed it in place; omitted, we
     download a fresh copy into nodes/<id>/data/<slug>/. Returns a status dict.
     """
+    ti = lt.torrent_info(lt.bdecode(blob))
+    info_hash = str(ti.info_hashes().v2)
+    tname = ti.name()
     with ns.lock:
-        meta = ns.catalog.get(info_hash)
         held = ns.torrents.get(info_hash)
     if held:
         return {"info_hash": info_hash, "name": held["name"],
                 "added": False, "note": "already present"}
-    if not meta:
-        raise FileNotFoundError(info_hash)
-
-    ti = lt.torrent_info(meta["path"])
-    tname = ti.name()
 
     if serve_path:
         content = os.path.abspath(serve_path)
@@ -546,19 +581,24 @@ def add_torrent(ns: NodeState, info_hash: str, serve_path: str = None) -> dict:
         save_path = os.path.join(data_dir(ns.node_id), slug(tname, info_hash))
         os.makedirs(save_path, exist_ok=True)
 
+    # On disk before it is in the stream: a peer that reacts to our transition
+    # asks us for this file, so it must already be there to serve.
+    store_torrent(ns, tname, info_hash, blob)
+
     atp = lt.add_torrent_params()
     atp.ti = ti
     atp.save_path = save_path
     handle = ns.ses.add_torrent(atp)
 
     entry = {"name": tname, "save_path": save_path, "ti": ti,
-             "files": file_list(ti), "handle": handle, "state": "downloading"}
+             "files": file_list(ti), "handle": handle, "state": "downloading",
+             "total_size": ti.total_size(), "piece_length": ti.piece_length()}
     with ns.lock:
         ns.torrents[info_hash] = entry
         # Even a dataset we already have every byte of starts here: the session
         # loop promotes it once libtorrent has checked the files. One path in,
         # so nothing can be held without a transition being published.
-        note_holding(ns, info_hash, "downloading", size=ti.total_size())
+        note_holding(ns, holding_row(info_hash, entry))
     # Persist immediately so a restart before any download still restores it
     # (the session loop writes the actual .resume file from the alert).
     handle.save_resume_data(SAVE_FLAGS)
@@ -567,26 +607,63 @@ def add_torrent(ns: NodeState, info_hash: str, serve_path: str = None) -> dict:
     return {"info_hash": info_hash, "name": tname, "added": True}
 
 
+def fetch_torrent(ns: NodeState, info_hash: str) -> bytes:
+    """A dataset's .torrent, from a peer that holds it.
+
+    This is what replaces having a copy of every torrent in the swarm. Whoever
+    holds the data necessarily has the torrent, so asking peers in turn finds it
+    — and only the node that has decided to take a dataset pays for it, once,
+    instead of every node paying for every dataset.
+
+    The bytes are checked against the info-hash asked for, so a peer cannot
+    answer with something else.
+    """
+    with ns.lock:
+        bases = [f"http://{p['ip']}:{p['http']}" for p in ns.peers.values()
+                 if p.get("ip") and p.get("http")]
+    for base in bases:
+        try:
+            blob = catalog.fetch_torrent_bytes(base, info_hash)
+        except Exception:
+            continue
+        got = str(lt.torrent_info(lt.bdecode(blob)).info_hashes().v2)
+        if got == info_hash:
+            return blob
+        print(f"node {ns.node_id}: {base} offered {info_hash[:8]} but sent "
+              f"{got[:8]}; ignoring", flush=True)
+    raise FileNotFoundError(info_hash)
+
+
+def take(ns: NodeState, info_hash: str) -> dict:
+    """Take a dataset: find its .torrent among the peers, then hold it."""
+    return add_torrent(ns, fetch_torrent(ns, info_hash))
+
+
 def remove_torrent(ns: NodeState, info_hash: str) -> dict:
-    """Stop holding a dataset. It stays in the catalog — the node still knows it
-    exists, it just doesn't keep a copy (and in "all" mode would take it again;
-    use manual mode if you want removals to stick)."""
+    """Stop holding a dataset, and stop being one of the places it exists.
+
+    There is no catalog to stay in: the holdings streams *are* the catalog, so
+    dropping a dataset removes this node from the set of places it exists, and
+    dropping the last copy retracts it from the swarm. The downloaded files stay
+    on disk — re-publishing that path reproduces the same dataset, since the
+    identity is the content."""
     with ns.lock:
         entry = ns.torrents.pop(info_hash, None)
         if entry:
             # The tombstone: without it a reader following the stream cannot tell
             # a dropped dataset from one that simply wasn't mentioned.
-            note_holding(ns, info_hash, "gone", entry["state"],
-                         size=entry["ti"].total_size())
+            note_holding(ns, holding_row(info_hash, entry, "gone"), entry["state"])
     if not entry:
         return {"removed": False, "note": "not held"}
     ns.ses.remove_torrent(entry["handle"])
-    # Drop its resume file so a restart doesn't bring the torrent back.
+    # Drop its resume file so a restart doesn't bring the torrent back, and its
+    # .torrent so this node stops answering for a dataset it no longer has.
     try:
         os.remove(os.path.join(resume_dir(ns.node_id),
                                f"{slug(entry['name'], info_hash)}.resume"))
     except FileNotFoundError:
         pass
+    drop_torrent(ns, entry["name"], info_hash)
     print(f"node {ns.node_id}: -{entry['name']} [{info_hash[:8]}]", flush=True)
     return {"removed": True, "info_hash": info_hash, "name": entry["name"]}
 
@@ -594,17 +671,17 @@ def remove_torrent(ns: NodeState, info_hash: str) -> dict:
 def publish(ns: NodeState, path: str) -> dict:
     """Put local data into the swarm. The only way in, identical in every mode.
 
-    Hash the path into a v2 torrent, drop it in this node's catalog, and seed it
-    in place — nothing is copied. That bumps our catalog digest, so the next
-    beacon tells every peer there's something new; what they do about it is their
-    own want() decision.
+    Hash the path into a v2 torrent and seed it in place — nothing is copied.
+    Publishing *is* starting to hold it, which is what makes the holdings streams
+    the catalog: a dataset exists from the moment someone has it, and there is no
+    separate list for it to be added to. The transition goes into this node's
+    stream, peers see it on the next tick, and what they do about it is their own
+    want() decision.
     """
     name, info_hash, blob = make_torrent.build(path)   # raises ValueError
     with ns.lock:
-        known = info_hash in ns.catalog
-    if not known:
-        store_torrent(ns, name, info_hash, blob)
-    res = add_torrent(ns, info_hash, serve_path=path)
+        known = info_hash in ns.torrents
+    res = add_torrent(ns, blob, serve_path=path)
     return {"name": name, "info_hash": info_hash, "published": not known,
             "serving": res.get("added", False), "note": res.get("note")}
 
@@ -648,11 +725,12 @@ def load_resumes(ns: NodeState) -> int:
             continue
         info_hash = str(ti.info_hashes().v2)
         handle = ns.ses.add_torrent(atp)
+        entry = {"name": ti.name(), "save_path": atp.save_path, "ti": ti,
+                 "files": file_list(ti), "handle": handle, "state": "downloading",
+                 "total_size": ti.total_size(), "piece_length": ti.piece_length()}
         with ns.lock:
-            ns.torrents[info_hash] = {"name": ti.name(), "save_path": atp.save_path,
-                                      "ti": ti, "files": file_list(ti),
-                                      "handle": handle, "state": "downloading"}
-            note_holding(ns, info_hash, "downloading", size=ti.total_size())
+            ns.torrents[info_hash] = entry
+            note_holding(ns, holding_row(info_hash, entry))
         count += 1
         print(f"node {ns.node_id}: resumed '{ti.name()}' [{info_hash[:8]}]", flush=True)
     return count
@@ -753,8 +831,7 @@ def session_loop(ns: NodeState) -> None:
                 # resurrect it in every reader.
                 if ns.torrents.get(info_hash) is entry:
                     entry["state"] = "complete"
-                    note_holding(ns, info_hash, "complete", "downloading",
-                                 size=entry["ti"].total_size())
+                    note_holding(ns, holding_row(info_hash, entry), "downloading")
             ns.transfers = transfers
 
         # A complete torrent never changes again, so this is the last checkpoint
@@ -771,53 +848,68 @@ def session_loop(ns: NodeState) -> None:
 
 # --- the engine --------------------------------------------------------------
 # One tick, every BEACON_INTERVAL:
-#   1. beacon   say who we are and what our catalog looks like
+#   1. beacon   say who we are and where we are in our holdings stream
 #   2. peers    drain everyone else's beacons
-#   3. catalog  pull from any peer whose digest changed
-#   4. want()   take datasets we don't hold but should
+#   3. holdings follow any peer whose cursor moved — which is how a node learns
+#               what exists, since the holdings streams are the catalog
+#   4. want()   offered each dataset once, as it appears
 #   5. mesh     hand every known peer to every torrent still missing data
 # That's the whole distributed system. Everything below is those five steps.
 
 def make_want(policy: str):
-    """The single policy knob: given a dataset we know of but don't hold, do we
-    want a copy?
+    """The single policy knob: shown a dataset we don't hold, do we want a copy?
+
+    A standing rule, evaluated on a dataset as it appears in a peer's stream
+    rather than re-run over everything every tick. So it must decide from the
+    dataset alone — it cannot wait for free space and change its mind later. That
+    is deliberate: placing a dataset on a particular node is an instruction
+    (/add), not something a node talks itself into.
 
     "manual" wants nothing on its own, so a node only holds what someone asked it
-    for via /add. It is the default because storing data is the one thing a node
-    cannot undo cheaply — everything else it does (discovery, tracking the
-    catalog, serving what it has) costs nothing and happens regardless.
+    for. It is the default because storing data is the one thing a node cannot
+    undo cheaply — everything else it does (discovery, following its peers,
+    serving what it has) costs nothing and happens regardless.
 
     "all" mirrors everything, so the swarm converges on one complete copy per
     node with no operator input at all.
     """
     if policy == "manual":
-        return lambda meta: False
+        return lambda row: False
     if policy == "all":
-        return lambda meta: True
+        return lambda row: True
     raise ValueError(f"unknown replication policy: {policy!r}")
 
 
 def self_beacon(ns: NodeState) -> dict:
     """Who we are, as the swarm sees us. Deliberately says nothing about our
     address: a receiver reads that off the datagram's source, so no node ever has
-    to work out (or be told) its own routable IP."""
+    to work out (or be told) its own routable IP.
+
+    `hold` is our position in our own holdings stream, so a peer can tell from
+    the datagram alone whether there is anything new to follow. It replaced a
+    digest of the catalog, which had to be recomputed over everything known on
+    every change and, once publishing is continuous, was never equal twice."""
     with ns.lock:
-        digest = ns.digest
+        cursor = cursor_of(ns)
     return {"v": beacon.VERSION, "node": ns.node_key,
             "bt": config.bt_port(ns.node_id),
-            "http": config.stats_port(ns.node_id), "cat": digest}
+            "http": config.stats_port(ns.node_id), "hold": cursor}
 
 
 def note_peer(ns: NodeState, key: str, ip: str, bt: int, http: int,
-              cat: str, last_seen: float) -> None:
-    """Record (or refresh) a peer. Never records ourselves."""
+              hold: str, last_seen: float) -> None:
+    """Record (or refresh) a peer. Never records ourselves.
+
+    `hold` is where that peer says it is in its own holdings stream; `followed`
+    is where we last read it to. They differ exactly when there is something to
+    pull."""
     if not key or key == ns.node_key:
         return
     with ns.lock:
-        peer = ns.peers.setdefault(key, {"pulled": None})
+        peer = ns.peers.setdefault(key, {"followed": None})
         # Never let an older sighting overwrite a fresher one.
         if last_seen >= peer.get("last_seen", 0):
-            peer.update({"ip": ip, "bt": bt, "http": http, "cat": cat,
+            peer.update({"ip": ip, "bt": bt, "http": http, "hold": hold,
                          "last_seen": last_seen})
 
 
@@ -826,7 +918,7 @@ def drain_beacons(ns: NodeState, sock) -> None:
     now = time.time()
     for msg, ip in beacon.drain(sock):
         note_peer(ns, msg.get("node"), ip, msg.get("bt"), msg.get("http"),
-                  msg.get("cat"), now)
+                  msg.get("hold"), now)
 
 
 def expire_peers(ns: NodeState) -> None:
@@ -837,51 +929,70 @@ def expire_peers(ns: NodeState) -> None:
             del ns.peers[key]
 
 
-def pull_catalog(ns: NodeState, key: str, peer: dict) -> None:
-    """Learn about datasets a peer knows and we don't, and fetch their .torrents.
+def pull_holdings(ns: NodeState, key: str, peer: dict) -> None:
+    """Steps 3 and 4: follow a peer's holdings stream, and want() what it shows.
 
-    Gated on the peer's beacon digest, so a settled swarm does no HTTP at all."""
-    digest = peer.get("cat")
-    if digest and digest == peer.get("pulled"):
+    This is how a node learns what exists. There is no catalog to pull: every
+    dataset has a holder from the moment it is published, so the union of these
+    streams is the set of datasets in the swarm — and following them costs the
+    changes rather than the whole list.
+
+    Rows are processed and forgotten. The only things kept are the cursor and
+    whatever want() decided to take, so a node's memory is bounded by what it
+    stores rather than by how large the swarm's catalog has grown. want() sees
+    each dataset once per peer that announces it; it is a standing rule, so
+    seeing it again is harmless and says the same thing.
+
+    Gated on the peer's beacon cursor, so a settled swarm does no HTTP at all.
+    """
+    if peer.get("hold") and peer["hold"] == peer.get("followed"):
         return
     base = f"http://{peer['ip']}:{peer['http']}"
-    entries = catalog.fetch_list(base)
-    for meta in entries:
-        info_hash = meta.get("info_hash")
-        with ns.lock:
-            if not info_hash or info_hash in ns.catalog:
-                continue
-        blob = catalog.fetch_torrent_bytes(base, info_hash)
-        # Trust nothing about the filename or the peer's claimed name: parse the
-        # torrent and take its identity from the bytes themselves.
-        ti = lt.torrent_info(lt.bdecode(blob))
-        got = str(ti.info_hashes().v2)
-        if got != info_hash:
-            print(f"node {ns.node_id}: {key[:8]} offered {info_hash[:8]} but sent "
-                  f"{got[:8]}; ignoring", flush=True)
-            continue
-        store_torrent(ns, ti.name(), got, blob)
-        print(f"node {ns.node_id}: learned '{ti.name()}' [{got[:8]}] "
-              f"from {key[:8]}", flush=True)
-    with ns.lock:
-        if key in ns.peers:
-            ns.peers[key]["pulled"] = digest
-
-
-def take_wanted(ns: NodeState) -> None:
-    """Step 4: the policy. Everything the node knows of but doesn't hold gets
-    offered to want(); whatever it accepts starts downloading."""
-    with ns.lock:
-        pending = [(ih, dict(meta)) for ih, meta in ns.catalog.items()
-                   if ih not in ns.torrents]
-    for info_hash, meta in pending:
-        if not ns.want(meta):
-            continue
+    for cursor in (peer.get("followed"), None):
         try:
-            add_torrent(ns, info_hash)
-        except Exception as exc:
-            print(f"node {ns.node_id}: can't take {meta['name']!r} "
-                  f"[{info_hash[:8]}]: {exc}", flush=True)
+            while True:
+                page = catalog.fetch_holdings(base, since=cursor)
+                for row in page.get("holdings") or []:
+                    consider(ns, key, row)
+                cursor = page["cursor"]
+                if not page.get("more"):
+                    break
+        except catalog.Resync:
+            # That peer restarted, or trimmed away what we asked for. Drop the
+            # cursor and read its whole stream once — it is telling us so rather
+            # than answering "nothing new", which is the point of the cursor
+            # being its to interpret and not ours.
+            continue
+        with ns.lock:
+            if key in ns.peers:
+                ns.peers[key]["followed"] = cursor
+        return
+
+
+def consider(ns: NodeState, key: str, row: dict) -> None:
+    """One row of a peer's stream: a dataset it holds, so a dataset that exists.
+
+    A "gone" row is nothing to act on — it says that peer stopped holding it,
+    which is a fact about the peer. Whether any copy is left is a question about
+    the whole swarm, and so a question for whoever is watching all of it.
+    """
+    info_hash = row.get("info_hash")
+    if not info_hash or row.get("state") == "gone":
+        return
+    with ns.lock:
+        if info_hash in ns.torrents:
+            return
+    if not ns.want(row):
+        return
+    try:
+        take(ns, info_hash)
+    except FileNotFoundError:
+        print(f"node {ns.node_id}: wanted {row.get('name')!r} "
+              f"[{info_hash[:8]}] but no peer would serve its torrent",
+              flush=True)
+    except Exception as exc:
+        print(f"node {ns.node_id}: can't take {row.get('name')!r} "
+              f"[{info_hash[:8]}]: {exc}", flush=True)
 
 
 def mesh(ns: NodeState) -> None:
@@ -909,17 +1020,17 @@ def mesh(ns: NodeState) -> None:
                 pass  # torrent not ready, or peer already known
 
 
-def pull_catalogs(ns: NodeState) -> None:
-    """Step 3: learn what everyone else knows exists."""
+def follow_peers(ns: NodeState) -> None:
+    """Steps 3 and 4, over every peer: learn what exists, take what we want."""
     with ns.lock:
         peers = [(k, dict(p)) for k, p in ns.peers.items()]
     for key, peer in peers:
         if not peer.get("ip") or not peer.get("http"):
             continue
         try:
-            pull_catalog(ns, key, peer)
+            pull_holdings(ns, key, peer)
         except Exception as exc:
-            print(f"node {ns.node_id}: catalog pull from {key[:8]} failed: {exc}",
+            print(f"node {ns.node_id}: following {key[:8]} failed: {exc}",
                   flush=True)
 
 
@@ -930,8 +1041,7 @@ def sync_loop(ns: NodeState, sock) -> None:
             beacon.send(sock, self_beacon(ns))       # 1. say who we are
             drain_beacons(ns, sock)                  # 2. hear who else is here
             expire_peers(ns)
-            pull_catalogs(ns)                        # 3. learn what exists
-            take_wanted(ns)                          # 4. decide what to hold
+            follow_peers(ns)                         # 3+4. learn, and want()
             mesh(ns)                                 # 5. wire peers into torrents
         except Exception:
             traceback.print_exc()
@@ -988,11 +1098,6 @@ def make_handler(ns: NodeState):
                 with ns.lock:
                     rows = list(ns.transfers)
                 self._send_json({"ts": time.time(), "transfers": rows})
-            elif path == "/catalog":
-                with ns.lock:
-                    cat = [{"name": m["name"], "info_hash": ih}
-                           for ih, m in ns.catalog.items()]
-                self._send_json(sorted(cat, key=lambda m: (m["name"], m["info_hash"])))
             elif path == "/peers":
                 self._send_json(self._peers_view())
             elif path.startswith("/catalog/"):
@@ -1004,13 +1109,12 @@ def make_handler(ns: NodeState):
             now = time.time()
             with ns.lock:
                 peers = [{"node": key, "ip": p.get("ip"), "bt": p.get("bt"),
-                          "http": p.get("http"), "cat": p.get("cat"),
+                          "http": p.get("http"), "hold": p.get("hold"),
                           "age": round(now - p.get("last_seen", now))}
                          for key, p in ns.peers.items()]
                 held = len(ns.torrents)
-                known = len(ns.catalog)
             me = self_beacon(ns)
-            me.update({"held": held, "known": known})
+            me.update({"held": held})
             return {"self": me, "peers": sorted(peers, key=lambda p: p["node"])}
 
         def _holdings(self, query: str):
@@ -1047,13 +1151,18 @@ def make_handler(ns: NodeState):
             if not _HEX64.match(info_hash):
                 return self._send_json({"error": "not a v2 info-hash"}, 400)
             with ns.lock:
-                meta = ns.catalog.get(info_hash)
-            if not meta:
-                return self._send_json({"error": "not found"}, 404)
+                entry = ns.torrents.get(info_hash)
+            # Answered only for what this node holds, which is also the only
+            # thing it has the torrent for. A reader asks a holder; the holdings
+            # streams say who that is.
+            if not entry:
+                return self._send_json({"error": "not held here"}, 404)
+            if not raw:
+                return self._send_json(dataset_meta(info_hash, entry))
             try:
-                if not raw:
-                    return self._send_json(dataset_meta(info_hash, meta["path"]))
-                with open(meta["path"], "rb") as f:
+                with open(os.path.join(catalog_dir(ns.node_id),
+                                       f"{slug(entry['name'], info_hash)}.torrent"),
+                          "rb") as f:
                     body = f.read()
             except OSError:
                 return self._send_json({"error": "not readable"}, 404)
@@ -1066,8 +1175,10 @@ def make_handler(ns: NodeState):
                 if self.path == "/publish":
                     self._send_json(publish(ns, body["path"]))
                 elif self.path == "/add":
-                    info_hash = resolve(ns, body.get("info_hash"), body.get("name"))
-                    self._send_json(add_torrent(ns, info_hash))
+                    # By info-hash only: a node has no catalog to look a name up
+                    # in. control.py resolves names across the swarm's holdings
+                    # streams and sends the hash it found.
+                    self._send_json(take(ns, body["info_hash"].lower()))
                 elif self.path == "/remove":
                     info_hash = resolve(ns, body.get("info_hash"), body.get("name"))
                     self._send_json(remove_torrent(ns, info_hash))
@@ -1116,7 +1227,7 @@ def main() -> None:
 
     node_key = load_or_create_node_key(args.id)
     ns = NodeState(args.id, node_key, make_session(args.id), make_want(args.replicate))
-    load_catalog(ns)                 # what this node already knows exists
+    os.makedirs(catalog_dir(args.id), exist_ok=True)
     resumed = load_resumes(ns)       # what it was holding before a restart
 
     threads = [threading.Thread(target=run, args=(session_loop, ns), daemon=True)]
@@ -1134,7 +1245,7 @@ def main() -> None:
     # blocked reading the next request on a persistent connection, and as non-daemon
     # threads they'd keep the process alive after Ctrl-C, hanging shutdown.
     srv.daemon_threads = True
-    state = f"{len(ns.catalog)} known, {resumed} held"
+    state = f"{resumed} held"
     print(f"node {args.id} up [{node_key[:8]}] - bt:{config.bt_port(args.id)} "
           f"http:{config.stats_port(args.id)}  "
           f"beacon:{config.BEACON_GROUP}:{config.BEACON_PORT}  "

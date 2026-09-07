@@ -1,9 +1,8 @@
 """Build BitTorrent v2-only .torrent files from arbitrary local files or
-directories, and read back a node's catalog directory.
+directories.
 
 This is a **library** first: `build()` is what a node calls when you publish a
-local path to it (`control.py publish`), and `list_catalog()` is how a node reads
-the catalog it keeps on disk. Torrents are:
+local path to it (`control.py publish`). Torrents are:
 
   - **v2-only** => SHA-256 merkle hashing, no v1/hybrid.
   - **trackerless** => no announce URL at all; there is no tracker in this system.
@@ -17,7 +16,6 @@ there's something to publish:
     python make_torrent.py            # writes data/sample/{media,documents}
 """
 import argparse
-import glob
 import os
 import sys
 
@@ -90,28 +88,6 @@ def serve_save_path(ti, source: str) -> str:
     if os.path.isdir(source) and ti.name() != os.path.basename(source):
         return source
     return os.path.dirname(source)
-
-
-# --- catalog -----------------------------------------------------------------
-
-def list_catalog(dirpath: str) -> list:
-    """Every .torrent in a catalog directory, as {"name", "info_hash", "path"}.
-
-    The .torrent is the only source of truth — name and info-hash come from
-    parsing it, never from the filename (which carries a readable slug purely for
-    humans; see node.slug). Sorted by name, then hash, so two datasets that share
-    a name still have a stable order.
-    """
-    metas = []
-    for path in sorted(glob.glob(os.path.join(dirpath, "*.torrent"))):
-        try:
-            ti = lt.torrent_info(path)
-        except Exception as exc:
-            print(f"catalog: skipping {os.path.basename(path)}: {exc}", flush=True)
-            continue
-        metas.append({"name": ti.name(), "info_hash": str(ti.info_hashes().v2),
-                      "path": path})
-    return sorted(metas, key=lambda m: (m["name"], m["info_hash"]))
 
 
 # --- sample content ----------------------------------------------------------
