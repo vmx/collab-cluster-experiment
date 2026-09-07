@@ -61,7 +61,8 @@ BEACON_INTERVAL = 2.0
 # exceed BEACON_INTERVAL so a single dropped datagram doesn't evict a live node.
 PEER_STALE_AFTER = 3 * BEACON_INTERVAL
 
-NODE_LOOP_INTERVAL = 1.0   # how often a node refreshes its stats snapshot
+NODE_LOOP_INTERVAL = 1.0   # how often a node refreshes what it is moving
+                           # (only the transfers in flight - see node.session_loop)
 
 # --- Dashboard (optional) ----------------------------------------------------
 # Purely observability, and purely a client: it reads the swarm through any one

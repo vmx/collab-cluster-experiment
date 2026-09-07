@@ -1,9 +1,22 @@
-"""Shared helpers to aggregate per-node /stats snapshots into swarm-wide views.
+"""Shared helpers to aggregate what nodes report into swarm-wide views.
 
 The web dashboard (collector.py) and the terminal map (control.py map) both
 render from these, so the two can never disagree about how many copies of
-something exist. A node may hold several torrents at once, so everything is
-grouped per torrent (by v2 info-hash).
+something exist.
+
+There are two levels here, and they are separate because the node's API is:
+
+  * From holdings alone — which datasets a node has and whether each is complete
+    — comes every list-level number, including the one that matters most: how
+    many complete copies of a dataset exist. A complete holder holds every file
+    by definition, so counting copies needs no piece-level detail at all. This is
+    what overview_row does, and it costs nothing per dataset.
+
+  * From piece bitfields comes everything finer: which pieces are rare, how many
+    copies of each *file* exist, what a partial holder actually has. Bitfields
+    are fetched one dataset at a time (node.holding_detail), so this level is the
+    drill-down and never the list. holder_rows turns those into the row shape
+    availability() and per_file() work on.
 
 Stdlib only, deliberately: control.py must work on a machine with no libtorrent.
 """
@@ -18,50 +31,85 @@ def piece_size(i: int, piece_length: int, total_size: int, num_pieces: int) -> i
     return total_size - piece_length * (num_pieces - 1)
 
 
-def collect_by_torrent(nodes: list) -> list:
-    """Group every node's torrent entries by torrent.
+def num_pieces(meta: dict) -> int:
+    """How many pieces a dataset has, from its static shape."""
+    return max(1, int(meta.get("num_pieces")
+                      or math.ceil(meta["total_size"] / meta["piece_length"])))
 
-    Returns a list of (meta, rows), one per distinct torrent, sorted by name:
-      rows: [{"id", "label", "bits": list[bool] of length num_pieces,
-              "complete", "progress", "dl", "ul", "num_peers"}]
-            id = node_key (stable swarm-wide identity, used for holders);
-            label = short human name for display;
-            complete/progress/dl/ul/num_peers = this node's live transfer activity
-            for the torrent (aggregate throughput / "replicating" signal, and the
-            live connection count the detail view shows). Ownership views ignore
-            these; only `bits` matters there.
-      meta: {info_hash, name, num_pieces, piece_length, total_size, files}
+
+# --- the list level: copies, from holdings alone ------------------------------
+
+def overview_row(meta: dict, holders: list) -> dict:
+    """One dataset's durability and spread, without a single piece bitfield.
+
+    `holders` is one entry per node that holds the dataset, as
+    {"label", "state", "progress"} — exactly what a node's holdings stream says,
+    plus the progress of an in-flight copy from its transfers.
+
+    Two of the numbers here are deliberately *lower bounds* rather than the exact
+    figure the drill-down gives:
+
+      full_copies     nodes holding the whole dataset. Exact.
+      durable_copies  the weakest-link per-file count — how many copies really
+                      exist, since a dataset is only as replicated as its
+                      least-replicated file. A partial holder can only ever raise
+                      it, so the complete-holder count is a floor, and reported
+                      as such here.
+      min_avail       the rarest piece's holder count, likewise floored.
+
+    Both are exact whenever every holder is complete, which is the settled case,
+    and both err towards saying a dataset is less safe than it is — the right
+    direction for a number you act on. The exact values need every holder's
+    bitfield, which is what the per-dataset view fetches.
     """
-    groups: dict = {}  # info_hash -> {"meta", "rows"}
-    for n in sorted(nodes, key=lambda n: n.get("label", "")):
-        key = n.get("node_key")
-        label = n.get("label", key)
-        for t in n.get("torrents", []):
-            ih = t.get("info_hash_v2") or t.get("name")
-            piece_length = t["piece_length"]
-            total_size = t["total_size"]
-            num_pieces = max(1, math.ceil(total_size / piece_length))
-            bits = [bool(b) for b in (t.get("pieces") or [])]
-            bits = (bits + [False] * num_pieces)[:num_pieces]
-            g = groups.setdefault(ih, {
-                "meta": {"info_hash": ih, "name": t.get("name", ""),
-                         "num_pieces": num_pieces, "piece_length": piece_length,
-                         "total_size": total_size, "files": t.get("files") or []},
-                "rows": []})
-            g["rows"].append({"id": key, "label": label,
-                              "bits": bits,
-                              "complete": bool(t.get("complete")),
-                              "progress": float(t.get("progress") or 0.0),
-                              "dl": int(t.get("download_rate") or 0),
-                              "ul": int(t.get("upload_rate") or 0),
-                              "num_peers": int(t.get("num_peers") or 0)})
-    return [(g["meta"], g["rows"])
-            for g in sorted(groups.values(), key=lambda g: g["meta"]["name"])]
+    complete = [h for h in holders if h.get("state") == "complete"]
+    partial = [h for h in holders if h.get("state") != "complete"]
+    # Average copies per piece: whole copies, plus how far the partial ones got.
+    redundancy = len(complete) + sum(float(h.get("progress") or 0.0) for h in partial)
+    spread = [{"label": h["label"],
+               "frac": round(1.0 if h.get("state") == "complete"
+                             else float(h.get("progress") or 0.0), 3)}
+              for h in sorted(holders, key=lambda h: h["label"])]
+    return {
+        "info_hash": meta["info_hash"], "name": meta.get("name", ""),
+        "total_size": meta["total_size"], "piece_length": meta["piece_length"],
+        "num_pieces": num_pieces(meta),
+        "nodes_seen": len(holders),
+        "full_copies": len(complete),
+        "durable_copies": len(complete),
+        "min_avail": len(complete),
+        "redundancy": redundancy,
+        "total_stored": int(redundancy * meta["total_size"]),
+        "downloading": len(partial), "seeding": len(complete),
+        "spread": spread,
+    }
 
 
-def availability(rows: list, num_pieces: int) -> list:
+# --- the piece level: one dataset at a time -----------------------------------
+
+def holder_rows(meta: dict, holders: list) -> list:
+    """Rows for the piece-level views, from each node's /holdings/<info_hash>.
+
+    `holders` is [(node_key, label, detail)] for the nodes that hold the dataset.
+    Returns [{"id", "label", "bits", "complete", "progress", "num_peers"}] —
+    id = node_key (stable swarm-wide identity, used for holders); label = short
+    human name for display. Sorted by label so the two views agree on order.
+    """
+    total = num_pieces(meta)
+    rows = []
+    for key, label, detail in sorted(holders, key=lambda h: h[1]):
+        bits = [bool(b) for b in (detail.get("pieces") or [])]
+        bits = (bits + [False] * total)[:total]
+        rows.append({"id": key, "label": label, "bits": bits,
+                     "complete": detail.get("state") == "complete",
+                     "progress": float(detail.get("progress") or 0.0),
+                     "num_peers": int(detail.get("num_peers") or 0)})
+    return rows
+
+
+def availability(rows: list, total_pieces: int) -> list:
     """Per-piece holder count across all nodes."""
-    return [sum(r["bits"][i] for r in rows) for i in range(num_pieces)]
+    return [sum(r["bits"][i] for r in rows) for i in range(total_pieces)]
 
 
 def per_file(rows: list, files: list, avail: list) -> list:

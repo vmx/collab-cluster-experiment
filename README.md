@@ -106,9 +106,10 @@ datasets as they appear, and keeps ignoring them.
 Which nodes hold what is entirely up to you, and nothing has to agree: one
 dataset can live on every node, another on two, another on none at all. Nothing
 keeps track of that for you: `control.py status <node>` is the per-node answer,
-and `control.py map <node>` is the swarm-wide one — including how many copies of
-each file exist, which is the number that matters when you place datasets by
-hand.
+and `control.py map <node>` is the swarm-wide one — every dataset with its copy
+count, rarest first. Name a dataset as well and you get its piece map and how
+many copies of each *file* exist, which is the number that matters when you
+place datasets by hand.
 
 ### Dropping a dataset
 
@@ -191,7 +192,8 @@ python control.py peers   [node]             # nodes a node can see  <- start he
 python control.py status  [node]             # datasets a node actually holds
 python control.py add     <node> <dataset>   # tell it to store this one
 python control.py remove  <node> <dataset>   # tell it to stop holding it
-python control.py map     [node]             # who holds which pieces, swarm-wide
+python control.py map     <node>             # copies of every dataset, rarest first
+python control.py map     <node> <dataset>   # ...and that one's pieces, per node
 ```
 
 Nodes are addressed by their HTTP endpoint, `host[:port]`; the port defaults to
@@ -256,8 +258,7 @@ python collector.py    # then open http://127.0.0.1:8100/
 
 No address, because it finds a node the way nodes find each other: it listens to
 the beacon and reads the swarm through whoever answers. That node is a way in,
-not a destination — it asks it who else exists and reads every node's `/stats`
-itself — so any node will do, and if that one goes away it picks up another by
+not a destination — it asks it who else exists and reads every node itself — so any node will do, and if that one goes away it picks up another by
 itself. Nothing is configured on either side: a node has no dashboard setting,
 and since the dashboard only ever listens and never beacons back, no node learns
 it exists or can tell whether anyone is watching. It shows an overview sorted
@@ -282,7 +283,8 @@ and not at all while none is.
 The same data in the terminal, the same way:
 
 ```bash
-python control.py map 127.0.0.1:8001    # who has which pieces, and how many copies exist
+python control.py map 127.0.0.1:8001          # how many copies of everything exist
+python control.py map 127.0.0.1:8001 media   # who has which pieces of one dataset
 watch -n 2 python control.py map 127.0.0.1:8001
 curl -s http://127.0.0.1:8001/stats | python -m json.tool     # one node, directly
 ```
@@ -290,14 +292,51 @@ curl -s http://127.0.0.1:8001/stats | python -m json.tool     # one node, direct
 ## A node's HTTP API
 
 ```
-GET  /stats                          snapshot: per-torrent status and piece ownership
+GET  /stats                          what the node is: disk, counts, rates, cursor
+GET  /holdings[?since=<cursor>]      which datasets it holds — all, or just what changed
+GET  /holdings/<info_hash>           one dataset here, with its piece bitfield
+GET  /transfers                      what is moving right now: progress and rates
 GET  /catalog                        [{"name","info_hash"}] — every dataset it knows of
+GET  /catalog/<info_hash>            one dataset's shape: size, pieces, files
 GET  /catalog/<info_hash>.torrent    the raw .torrent
 GET  /peers                          {"self": …, "peers": […]} — its view of the swarm
 POST /publish  {"path": …}           hash a local path in and seed it
 POST /add      {"name"|"info_hash"}  take a known dataset
 POST /remove   {"name"|"info_hash"}  drop one
 ```
+
+The split across the first four is the one thing here that decides whether
+watching a swarm stays affordable, so it is worth saying why it is drawn where it
+is. A node holds far more datasets than it is moving at any moment, and *which*
+it holds changes only when one is taken, finishes, or is dropped. So:
+
+- **`/stats` is constant size.** Nothing in it is per dataset. It carries a
+  **cursor** — the node's position in its own stream of holding changes.
+- **`/holdings` is read by that cursor.** Hand back the one you were given and
+  you are told only what has changed since; a settled swarm therefore does no
+  holdings traffic at all. The cursor is opaque: store it, return it, never take
+  it apart. That is what lets the *node* say "I can't answer from that one"
+  (HTTP 409, after a restart) instead of silently returning an empty delta
+  forever. Rows are just `{info_hash, state}`, where `state` is `downloading`,
+  `complete`, or — only ever in a delta — `gone`, the tombstone that tells a
+  reader a dataset was dropped rather than merely not mentioned.
+- **`/transfers` holds every per-second number.** Progress and rates are kept out
+  of `/holdings` precisely because they would churn the stream continuously.
+  It is bounded by what is in flight, never by what is stored.
+- **`/holdings/<info_hash>` is the only piece bitfield**, and it is one dataset at
+  a time. The swarm-wide piece map costs one request per node holding *that*
+  dataset, whatever else is in the catalog.
+
+Counting copies needs none of the piece detail: a node holding a dataset
+`complete` holds every file in it by definition, so **copies = holders in state
+`complete`**, straight off the holdings stream. The piece-level view refines that
+into per-file and rarest-piece figures when you ask for one dataset.
+
+`/catalog/<info_hash>` is there for the same reason: a dataset's size, piece
+layout and file list are identical on every node and fixed for its lifetime (they
+are what the info-hash hashes), so they belong to the catalog and are fetched
+once — not shipped with every node's status, one identical copy per node per
+poll.
 
 ## Files
 
@@ -306,11 +345,11 @@ POST /remove   {"name"|"info_hash"}  drop one
 | `node.py` | **The system.** libtorrent session + the sync tick (beacon, peers, catalog, want, mesh) + the HTTP API. Run one per machine. |
 | `control.py` | CLI to talk to a node: publish, list, peers, status, add, remove, map. |
 | `make_torrent.py` | Builds v2-only, private, trackerless torrents (`build()`), reads a catalog directory (`list_catalog()`). As a script, generates the sample content. |
-| `catalog.py` | Stdlib client for another node's HTTP API, including `fetch_swarm()` — every node's stats, gathered through one node's peer table. No libtorrent, so `control.py` doesn't need it. |
+| `catalog.py` | Stdlib client for another node's HTTP API: `fetch_stats`/`fetch_holdings` (cursor-following, raises `Resync`)/`fetch_transfers`/`fetch_holding`, plus `fetch_swarm()` — every node's `/stats`, gathered through one node's peer table. No libtorrent, so `control.py` doesn't need it. |
 | `beacon.py` | The discovery datagram: join the group, send, drain. No libtorrent either, which is how the dashboard finds its way in without running a node. |
 | `config.py` | Ports, beacon group, timing, paths. |
-| `swarm_stats.py` | Groups node snapshots by dataset and aggregates per-piece/per-file copy counts. Shared by `control.py map` and `collector.py`. |
-| `collector.py` | *Optional.* Stateless: finds a node on the beacon, reads the swarm through it, and serves the `/api/*` dashboard endpoints and the web UI. |
+| `swarm_stats.py` | The copy-count arithmetic, at both levels: `overview_row()` from holdings alone, `holder_rows()`/`per_file()` from piece bitfields. Shared by `control.py map` and `collector.py`. |
+| `collector.py` | *Optional.* Finds a node on the beacon and reads the swarm through it. Keeps one cursor per node so a refresh costs the changes rather than the whole world; serves the `/api/*` dashboard endpoints and the web UI. |
 | `webui/` | *Optional.* Zero-build [Tutuca](https://github.com/marianoguerra/tutuca) SPA, framework vendored as one file. Served by `collector.py`. |
 
 Python standard library only, plus the `libtorrent` binding (tested with

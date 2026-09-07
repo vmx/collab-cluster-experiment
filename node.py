@@ -4,12 +4,21 @@ Run one per host. Nodes find each other with a UDP multicast beacon, learn what
 datasets exist by pulling each other's catalogs, and move the bytes with
 BitTorrent v2. There is no tracker, no central catalog and no coordinator.
 
-  GET  /stats                    JSON snapshot: per-torrent status and the
-                                 piece bitfield behind every swarm-wide view.
-                                 Already public, so there is nothing for a node
-                                 to report anywhere.
+  GET  /stats                    what this node is, as a whole: disk, counts,
+                                 throughput, and the cursor below. Constant
+                                 size — it says nothing per dataset.
+  GET  /holdings[?since=<cursor>]     which datasets this node holds and whether
+                                 each is complete. With a cursor, only what has
+                                 changed since; the response carries the next
+                                 one. This is what copy counting reads.
+  GET  /holdings/<info_hash>     one dataset here, with its piece bitfield — the
+                                 drill-down, one dataset at a time.
+  GET  /transfers                what is moving right now: progress and rates,
+                                 for in-flight transfers only.
   GET  /catalog                  [{"name","info_hash"}] — every dataset this node
                                  knows of, held or not.
+  GET  /catalog/<info_hash>      one dataset's static shape as JSON: size, piece
+                                 layout, file -> piece-range map.
   GET  /catalog/<info_hash>.torrent   the raw .torrent for one dataset.
   GET  /peers                    {"self": {...}, "peers": [...]} — this node's
                                  view of the swarm.
@@ -20,9 +29,17 @@ BitTorrent v2. There is no tracker, no central catalog and no coordinator.
   POST /add      {"info_hash"|"name": ...}     take a known dataset (manual mode)
   POST /remove   {"info_hash"|"name": ...}     drop one
 
-Two background threads — the libtorrent session loop (refreshes the stats
-snapshot) and the sync loop (the engine, below) — while the main thread serves
-the HTTP API above.
+Two background threads — the libtorrent session loop (tracks what is moving)
+and the sync loop (the engine, below) — while the main thread serves the HTTP
+API above.
+
+The split across those endpoints is deliberate and is the one thing here that
+decides whether a swarm-wide view stays affordable. A node holds far more
+datasets than it moves, and holdings change only when one is taken, finishes or
+is dropped — so they are read as a stream of transitions (a cursor), while the
+per-second numbers are confined to the transfers in flight and the piece
+bitfields to a single dataset at a time. Nothing a reader polls scales with how
+much this node holds.
 """
 import argparse
 import glob
@@ -37,7 +54,7 @@ import time
 import traceback
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import libtorrent as lt
 
@@ -56,6 +73,12 @@ SAVE_FLAGS = lt.torrent_handle.save_info_dict | lt.torrent_handle.flush_disk_cac
 # How often (session loops) to checkpoint resume data for torrents that changed.
 RESUME_EVERY = 5
 
+# How many holding transitions to keep so a reader can be told what changed
+# rather than re-sent everything. A reader whose cursor is older than the oldest
+# retained transition is told to re-list instead; the bound is what stops the log
+# growing without limit on a long-lived node.
+CHANGE_LOG_LIMIT = 10000
+
 
 class NodeState:
     def __init__(self, node_id: int, node_key: str, ses: "lt.session", want):
@@ -69,9 +92,11 @@ class NodeState:
         # want(meta) -> bool: the one policy knob. See make_want().
         self.want = want
         self.lock = threading.Lock()
-        # info_hash(v2 str) -> {name, save_path, ti, files, handle, complete}
-        # — the data we hold. `complete` is refreshed by the session loop and
-        # read by mesh(), which only offers peers to torrents still missing data.
+        # info_hash(v2 str) -> {name, save_path, ti, files, handle, state}
+        # — the data we hold. `state` is "downloading" or "complete"; it is set
+        # where the transition actually happens (add, finish, remove) rather than
+        # rediscovered by polling every torrent, and read by mesh(), which only
+        # offers peers to torrents still missing data.
         self.torrents: dict = {}
         # info_hash(v2 str) -> {name, path} — datasets we know exist. A superset
         # of `torrents`: in manual mode a node knows of far more than it holds.
@@ -80,7 +105,30 @@ class NodeState:
         # node_key -> {ip, bt, http, cat, last_seen} — other nodes we can see.
         # Beacons are the only way in: a node we cannot hear, we do not know.
         self.peers: dict = {}
-        self.snapshot: dict = {"node_key": node_key, "torrents": []}
+        # --- how a reader follows what we hold -------------------------------
+        # `torrents` changes only on a transition, so it is published as a stream
+        # of them: a reader keeps a cursor and asks what changed since, instead
+        # of refetching a list that is mostly the same every time.
+        #
+        # `epoch` is minted fresh every process start and `seq` counts
+        # transitions within it. Together they are the cursor — see cursor_of()
+        # for why the reader is not allowed to take them apart.
+        self.epoch = uuid.uuid4().hex[:8]
+        self.seq = 0
+        self.changes: list = []      # (seq, info_hash, state), oldest first
+        self.trimmed_before = 0      # cursors at or below this can't be answered
+        # Both maintained as transitions happen rather than counted on demand,
+        # so /stats answers without walking everything this node holds.
+        self.n_complete = 0
+        self.stored_complete = 0
+        # The transfers still moving, with their live progress and rates. The
+        # only place per-dataset per-second numbers exist, and bounded by what is
+        # in flight rather than by how much this node holds.
+        self.transfers: list = []
+        # Session-wide throughput, from libtorrent's own counters. Summing the
+        # torrents would mean asking every one of them every second, which is
+        # precisely what must not scale with the number held.
+        self.rates = {"download_rate": 0, "upload_rate": 0, "num_peers": 0}
         self.stop = threading.Event()
 
 
@@ -230,11 +278,122 @@ def resolve(ns: NodeState, info_hash: str = None, name: str = None) -> str:
     return matches[0]
 
 
-# --- snapshot helpers ---------------------------------------------------------
-# What /stats carries, and nothing more: every field below is read by something
-# (the dashboard, control.py, the swarm map). A node reports its own view once
-# and every viewer derives the rest, so anything no viewer reads is not measured
-# here at all.
+# --- holdings ----------------------------------------------------------------
+# Which datasets this node holds, published as something a reader can follow
+# incrementally rather than refetch.
+#
+# The distinction that matters: holding a dataset is durable state that changes
+# only when one is taken, finishes, or is dropped, while progress and rates
+# change every second. Keeping them in one payload — as a single /stats snapshot
+# would — means a reader either refetches everything it already knows every
+# second, or misses transitions. So transitions go in a log with a cursor, and
+# the per-second numbers live on /transfers, whose size is bounded by what is
+# moving rather than by what is stored.
+
+
+class StaleCursor(Exception):
+    """A cursor this node can no longer answer from — minted in an earlier epoch,
+    or older than the retained part of the change log."""
+
+
+def note_holding(ns: NodeState, info_hash: str, state: str,
+                 previous: str = None, size: int = 0) -> None:
+    """Record a holding transition. The caller holds ns.lock.
+
+    Every change to `torrents` goes through here, which is what lets a reader ask
+    "what changed since" and be answered without a scan. The running totals are
+    kept here for the same reason: `previous` and `size` are enough to move them,
+    so /stats never has to walk everything held to report them.
+    """
+    ns.seq += 1
+    ns.changes.append((ns.seq, info_hash, state))
+    became = (state == "complete") - (previous == "complete")
+    ns.n_complete += became
+    ns.stored_complete += became * size
+    excess = len(ns.changes) - CHANGE_LOG_LIMIT
+    if excess > 0:
+        # What we drop we can no longer answer for: a cursor from before this
+        # point gets told to start over rather than handed an incomplete delta.
+        ns.trimmed_before = ns.changes[excess - 1][0]
+        del ns.changes[:excess]
+
+
+def cursor_of(ns: NodeState) -> str:
+    """This node's current position in its own change log. Caller holds ns.lock.
+
+    Deliberately one opaque string. It is "<epoch>:<seq>" today, and readable on
+    purpose, but nothing outside this file may take it apart: a reader stores it
+    and hands it back untouched. That is what lets *this node* decide whether a
+    cursor is still good. Split across two fields the node cannot tell — it would
+    see only a number, with no idea which epoch minted it — and a reader that
+    forgets to compare epochs is handed an empty delta after every restart and
+    believes, silently and permanently, that nothing has changed.
+    """
+    return f"{ns.epoch}:{ns.seq}"
+
+
+def cursor_since(ns: NodeState, token: str) -> int:
+    """The seq a cursor refers to, or StaleCursor. Caller holds ns.lock."""
+    epoch, _, seq = token.partition(":")
+    if epoch != ns.epoch or not seq.isdigit():
+        raise StaleCursor(token)
+    since = int(seq)
+    if since < ns.trimmed_before or since > ns.seq:
+        raise StaleCursor(token)
+    return since
+
+
+def holdings(ns: NodeState, since: str = None) -> dict:
+    """What this node holds: everything, or only what changed since a cursor.
+
+    Rows are deliberately no more than (info_hash, state). Progress and rates are
+    left out on purpose — they move every second, so including them would put
+    every in-flight transfer into the stream continuously and defeat the cursor
+    entirely. They are on /transfers instead.
+
+    `state` is "downloading" or "complete", and in a delta also "gone": the
+    tombstone that tells a reader a dataset was dropped rather than merely
+    absent from this response.
+
+    `more` is always false for now — a full listing is not paged yet — but it is
+    in the response so a reader's loop is already written to follow one, and
+    paging can be added behind the same cursor without the reader changing.
+    """
+    with ns.lock:
+        if since is None:
+            rows = [{"info_hash": ih, "state": e["state"]}
+                    for ih, e in ns.torrents.items()]
+        else:
+            after = cursor_since(ns, since)
+            rows = [{"info_hash": ih, "state": st}
+                    for seq, ih, st in ns.changes if seq > after]
+        # Read under the same lock as the rows, so the cursor we hand back can
+        # never claim to cover a transition the reader was not given.
+        return {"cursor": cursor_of(ns), "more": False, "holdings": rows}
+
+
+def node_stats(ns: NodeState) -> dict:
+    """What this node is, as a whole. Constant size: nothing here is per dataset.
+
+    Cheap enough to poll every second forever, which is the point — a reader
+    watches this, and only fetches holdings when the cursor has moved.
+    """
+    with ns.lock:
+        held, complete = len(ns.torrents), ns.n_complete
+        known, cursor, rates = len(ns.catalog), cursor_of(ns), dict(ns.rates)
+        moving = list(ns.transfers)
+    return {"node_key": ns.node_key, "ts": time.time(),
+            "bt_port": config.bt_port(ns.node_id),
+            "http_port": config.stats_port(ns.node_id),
+            "disk": node_disk(ns.node_id),
+            "known": known, "held": held, "complete": complete,
+            "downloading": held - complete, "moving": len(moving),
+            # Bytes on disk: the completed datasets, plus how far the in-flight
+            # ones have got. Both sides are already to hand, so this stays
+            # O(what is moving) rather than O(what is held).
+            "stored": ns.stored_complete + sum(t["bytes_done"] for t in moving),
+            "cursor": cursor, **rates}
+
 
 def _is_pad(fs, i: int) -> bool:
     if hasattr(fs, "pad_file_at"):
@@ -268,37 +427,57 @@ def file_list(ti) -> list:
     return out
 
 
-def torrent_dict(st, ti, files_meta) -> dict:
-    info_hash_v2 = ""
-    try:
-        info_hash_v2 = str(st.info_hashes.v2)
-    except Exception:
-        pass
-    # Whether this node holds the whole dataset. Decided here, once, so no
-    # viewer has to re-derive it from is_seeding/progress and risk disagreeing
-    # with the next viewer about what "complete" means.
-    complete = bool(st.is_seeding) or st.progress >= 1.0
-    return {
-        "info_hash_v2": info_hash_v2,
-        "name": ti.name(),
-        # Per-piece ownership bitfield: which pieces (=which data) THIS node holds.
-        # This is the authoritative source for the swarm-wide piece map.
-        "pieces": [bool(b) for b in st.pieces],
-        "piece_length": ti.piece_length(),
-        "total_size": ti.total_size(),
-        # Static file -> piece-range map so consumers can do per-file analysis.
-        "files": files_meta,
-        "progress": st.progress,
-        "complete": complete,
-        # libtorrent's download_rate is a decaying average that keeps reporting
-        # for seconds after a torrent finishes. A node holding the whole dataset
-        # is not downloading, so say so here rather than leave every viewer to
-        # subtract the ghost itself (and one of them forget to).
-        "download_rate": 0 if complete else st.download_rate,
-        "upload_rate": st.upload_rate,
-        "total_done": st.total_done,
-        "num_peers": st.num_peers,
-    }
+def dataset_meta(info_hash: str, path: str) -> dict:
+    """A dataset's static shape: name, size, piece layout, file -> piece ranges.
+
+    This belongs to the catalog and not to any node's live state, because it is
+    identical on every node and never changes — a dataset is its v2 info-hash, and
+    the info-hash is a hash of exactly this. Carried in each node's per-torrent
+    status (as it used to be) it arrives at a reader once per node per poll, every
+    copy byte-identical to the last.
+    """
+    ti = lt.torrent_info(path)
+    return {"info_hash": info_hash, "name": ti.name(),
+            "total_size": ti.total_size(), "piece_length": ti.piece_length(),
+            "num_pieces": ti.num_pieces(), "files": file_list(ti)}
+
+
+def transfer_row(info_hash: str, entry: dict, st) -> dict:
+    """One in-flight transfer, as /transfers reports it.
+
+    The only place per-dataset live numbers appear. Everything here changes every
+    second, which is why it is kept out of the holdings stream — and why this
+    list is bounded by what is moving, not by what is held.
+    """
+    return {"info_hash": info_hash, "name": entry["name"],
+            "total_size": entry["ti"].total_size(),
+            "progress": st.progress, "bytes_done": st.total_done,
+            "download_rate": st.download_rate, "upload_rate": st.upload_rate,
+            "num_peers": st.num_peers}
+
+
+def holding_detail(ns: NodeState, info_hash: str) -> dict:
+    """One dataset on this node, with its piece bitfield.
+
+    The bitfield is the one genuinely large per-dataset thing a node knows, so it
+    is served one dataset at a time and never as part of a listing. That split is
+    what keeps the swarm-wide piece map affordable: it costs one request per node
+    for the dataset being looked at, whatever the catalog holds.
+
+    Left as a plain JSON bool array rather than packed. The endpoint is already
+    bounded by a single dataset, so packing would trade away legibility — the
+    thing every other wire format here keeps — for nothing that matters.
+    """
+    with ns.lock:
+        entry = ns.torrents.get(info_hash)
+        state = entry["state"] if entry else None
+    if not entry:
+        raise FileNotFoundError(info_hash)
+    st = entry["handle"].status()
+    return {"info_hash": info_hash, "name": entry["name"], "state": state,
+            "pieces": [bool(b) for b in st.pieces],
+            "progress": st.progress, "bytes_done": st.total_done,
+            "num_peers": st.num_peers}
 
 
 # --- libtorrent session ------------------------------------------------------
@@ -320,11 +499,13 @@ def make_session(node_id: int) -> "lt.session":
         # an IP; without this libtorrent allows only ONE peer connection per IP
         # per torrent, so a single-host swarm couldn't mesh.
         "allow_multiple_connections_per_ip": True,
-        # Only the category the session loop actually reads: fast-resume
-        # checkpoints. all_categories would additionally switch on the per-peer,
+        # Only the two categories the session loop actually reads: fast-resume
+        # checkpoints, and the session counters it turns into this node's
+        # throughput. all_categories would additionally switch on the per-peer,
         # per-piece and per-block log streams, which libtorrent generates at high
         # volume all through a transfer and which we pop only to discard.
-        "alert_mask": lt.alert.category_t.storage_notification,
+        "alert_mask": (lt.alert.category_t.storage_notification
+                       | lt.alert.category_t.stats_notification),
         # Pace the transfer so progress is observable as it happens (see config).
         # By default libtorrent exempts loopback/LAN peers from rate limits, so
         # we must turn that off for the cap to apply within a single-host swarm.
@@ -371,9 +552,13 @@ def add_torrent(ns: NodeState, info_hash: str, serve_path: str = None) -> dict:
     handle = ns.ses.add_torrent(atp)
 
     entry = {"name": tname, "save_path": save_path, "ti": ti,
-             "files": file_list(ti), "handle": handle, "complete": False}
+             "files": file_list(ti), "handle": handle, "state": "downloading"}
     with ns.lock:
         ns.torrents[info_hash] = entry
+        # Even a dataset we already have every byte of starts here: the session
+        # loop promotes it once libtorrent has checked the files. One path in,
+        # so nothing can be held without a transition being published.
+        note_holding(ns, info_hash, "downloading", size=ti.total_size())
     # Persist immediately so a restart before any download still restores it
     # (the session loop writes the actual .resume file from the alert).
     handle.save_resume_data(SAVE_FLAGS)
@@ -388,6 +573,11 @@ def remove_torrent(ns: NodeState, info_hash: str) -> dict:
     use manual mode if you want removals to stick)."""
     with ns.lock:
         entry = ns.torrents.pop(info_hash, None)
+        if entry:
+            # The tombstone: without it a reader following the stream cannot tell
+            # a dropped dataset from one that simply wasn't mentioned.
+            note_holding(ns, info_hash, "gone", entry["state"],
+                         size=entry["ti"].total_size())
     if not entry:
         return {"removed": False, "note": "not held"}
     ns.ses.remove_torrent(entry["handle"])
@@ -461,7 +651,8 @@ def load_resumes(ns: NodeState) -> int:
         with ns.lock:
             ns.torrents[info_hash] = {"name": ti.name(), "save_path": atp.save_path,
                                       "ti": ti, "files": file_list(ti),
-                                      "handle": handle, "complete": False}
+                                      "handle": handle, "state": "downloading"}
+            note_holding(ns, info_hash, "downloading", size=ti.total_size())
         count += 1
         print(f"node {ns.node_id}: resumed '{ti.name()}' [{info_hash[:8]}]", flush=True)
     return count
@@ -486,40 +677,94 @@ def flush_resume(ns: NodeState) -> None:
         time.sleep(0.05)
 
 
+def _note_rates(ns: NodeState, alert, prev, now: float):
+    """Session-wide throughput, from libtorrent's cumulative byte counters.
+
+    Per node rather than per torrent, for two reasons: summing the torrents would
+    mean asking every one of them every second — the thing that must not scale
+    with how much is held — and a node that is only seeding has no torrent it is
+    polling at all, so it would report nothing.
+
+    `now` is the loop's clock, not this function's: the counters are cumulative,
+    so a rate is only as good as the interval it is divided by. The floor under
+    that interval is the same guard from the other side — a reply that arrives a
+    loop late would otherwise turn a whole loop's bytes into an impossible spike.
+    """
+    recv = alert.values.get("net.recv_payload_bytes", 0)
+    sent = alert.values.get("net.sent_payload_bytes", 0)
+    peers = alert.values.get("peer.num_peers_connected", 0)
+    if prev:
+        dt = max(config.NODE_LOOP_INTERVAL / 2, now - prev[0])
+        with ns.lock:
+            ns.rates = {"download_rate": int(max(0, recv - prev[1]) / dt),
+                        "upload_rate": int(max(0, sent - prev[2]) / dt),
+                        "num_peers": peers}
+    return (now, recv, sent)
+
+
 def session_loop(ns: NodeState) -> None:
+    """Live state: what is moving right now, and what this node is doing overall.
+
+    Deliberately never touches the torrents the node merely *holds*. Whether a
+    dataset is held and whether it is complete are recorded where they change
+    (note_holding), so this loop only has to notice the one transition libtorrent
+    doesn't announce to us by itself — a download finishing — and it can look for
+    that in the in-flight set alone. Asking every torrent for its status once a
+    second is what a node cannot afford when it holds far more than it moves, so
+    it doesn't: status() is called here on the transfers in flight, and elsewhere
+    only for the one dataset someone is looking at.
+    """
     loops = 0
+    prev = None                       # (ts, recv, sent), for the rate deltas
     while not ns.stop.is_set():
         ns.stop.wait(config.NODE_LOOP_INTERVAL)  # sleep, but wake promptly on stop
         loops += 1
+        now = time.time()
+        ns.ses.post_session_stats()
+        counters = None
         for a in ns.ses.pop_alerts():
             if isinstance(a, lt.save_resume_data_alert):
                 _write_resume(ns, a)
+            elif isinstance(a, lt.session_stats_alert):
+                # Only the newest: a batch can hold a loop's reply and this
+                # one's, and reading both against the same clock would divide a
+                # loop's worth of bytes by no time at all.
+                counters = a
             # save_resume_data_failed_alert: nothing to persist yet; ignore.
+        if counters is not None:
+            prev = _note_rates(ns, counters, prev, now)
 
         with ns.lock:
-            entries = list(ns.torrents.values())
+            moving = [(ih, e) for ih, e in ns.torrents.items()
+                      if e["state"] == "downloading"]
 
-        torrents = []
-        for e in entries:
-            t = torrent_dict(e["handle"].status(), e["ti"], e["files"])
-            e["complete"] = t["complete"]      # mesh() reads this
-            torrents.append(t)
+        transfers, finished = [], []
+        for info_hash, entry in moving:
+            st = entry["handle"].status()
+            if st.is_seeding or st.progress >= 1.0:
+                finished.append((info_hash, entry))
+            else:
+                transfers.append(transfer_row(info_hash, entry, st))
 
-        snap = {
-            "node_key": ns.node_key,    # stable swarm-wide identity
-            "ts": time.time(),
-            "bt_port": config.bt_port(ns.node_id),
-            "disk": node_disk(ns.node_id),
-            "torrents": torrents,
-        }
         with ns.lock:
-            ns.snapshot = snap
+            for info_hash, entry in finished:
+                # Guard against a /remove that landed between the two locks:
+                # publishing a transition for a dataset we no longer hold would
+                # resurrect it in every reader.
+                if ns.torrents.get(info_hash) is entry:
+                    entry["state"] = "complete"
+                    note_holding(ns, info_hash, "complete", "downloading",
+                                 size=entry["ti"].total_size())
+            ns.transfers = transfers
 
-        # Checkpoint fast-resume for any torrent whose state changed.
+        # A complete torrent never changes again, so this is the last checkpoint
+        # it needs — which is also why the periodic one below can ignore them.
+        for _, entry in finished:
+            entry["handle"].save_resume_data(SAVE_FLAGS)
         if loops % RESUME_EVERY == 0:
-            for e in entries:
-                if e["handle"].need_save_resume_data():
-                    e["handle"].save_resume_data(SAVE_FLAGS)
+            for _, entry in moving:
+                if entry["handle"].need_save_resume_data():
+                    entry["handle"].save_resume_data(SAVE_FLAGS)
 
     flush_resume(ns)
 
@@ -652,7 +897,8 @@ def mesh(ns: NodeState) -> None:
     which is what heals the swarm; a node that restarts holding everything has
     nothing to heal."""
     with ns.lock:
-        handles = [e["handle"] for e in ns.torrents.values() if not e["complete"]]
+        handles = [e["handle"] for e in ns.torrents.values()
+                   if e["state"] != "complete"]
         addrs = [(p["ip"], p["bt"]) for p in ns.peers.values()
                  if p.get("ip") and p.get("bt")]
     for handle in handles:
@@ -730,11 +976,18 @@ def make_handler(ns: NodeState):
             return json.loads(raw or b"{}")
 
         def do_GET(self):
-            path = urlsplit(self.path).path
+            split = urlsplit(self.path)
+            path = split.path
             if path == "/stats":
+                self._send_json(node_stats(ns))
+            elif path == "/holdings":
+                self._holdings(split.query)
+            elif path.startswith("/holdings/"):
+                self._holding(path[len("/holdings/"):])
+            elif path == "/transfers":
                 with ns.lock:
-                    snap = ns.snapshot
-                self._send_json(snap)
+                    rows = list(ns.transfers)
+                self._send_json({"ts": time.time(), "transfers": rows})
             elif path == "/catalog":
                 with ns.lock:
                     cat = [{"name": m["name"], "info_hash": ih}
@@ -760,12 +1013,37 @@ def make_handler(ns: NodeState):
             me.update({"held": held, "known": known})
             return {"self": me, "peers": sorted(peers, key=lambda p: p["node"])}
 
+        def _holdings(self, query: str):
+            since = parse_qs(query).get("since", [None])[0]
+            try:
+                self._send_json(holdings(ns, since))
+            except StaleCursor:
+                # Not a failure: the reader's cursor predates a restart, or the
+                # transitions it asked about have been trimmed away. Saying so is
+                # the whole reason the cursor is opaque — answering with a delta
+                # that silently omits everything before it is the one thing that
+                # must not happen.
+                with ns.lock:
+                    current = cursor_of(ns)
+                self._send_json({"resync": True, "cursor": current}, 409)
+
+        def _holding(self, name: str):
+            info_hash = name.lower()
+            if not _HEX64.match(info_hash):
+                return self._send_json({"error": "not a v2 info-hash"}, 400)
+            try:
+                self._send_json(holding_detail(ns, info_hash))
+            except FileNotFoundError:
+                self._send_json({"error": "not held"}, 404)
+
         def _catalog_file(self, name: str):
             # Addressed by full v2 info-hash. The readable slug is only how the
-            # file is *stored*; no protocol depends on it.
-            if not name.endswith(".torrent"):
-                return self._send_json({"error": "not found"}, 404)
-            info_hash = name[:-len(".torrent")].lower()
+            # file is *stored*; no protocol depends on it. With the .torrent
+            # suffix this is the torrent itself; without it, the same dataset's
+            # shape as JSON, for readers that have no libtorrent to parse it
+            # with — which is every reader here except a node.
+            raw = name.endswith(".torrent")
+            info_hash = (name[:-len(".torrent")] if raw else name).lower()
             if not _HEX64.match(info_hash):
                 return self._send_json({"error": "not a v2 info-hash"}, 400)
             with ns.lock:
@@ -773,6 +1051,8 @@ def make_handler(ns: NodeState):
             if not meta:
                 return self._send_json({"error": "not found"}, 404)
             try:
+                if not raw:
+                    return self._send_json(dataset_meta(info_hash, meta["path"]))
                 with open(meta["path"], "rb") as f:
                     body = f.read()
             except OSError:
