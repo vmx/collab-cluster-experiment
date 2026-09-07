@@ -6,19 +6,19 @@
 //                No per-piece bitfields are fetched here, so it stays cheap to
 //                poll no matter how many datasets/nodes there are.
 //   #<info_hash> the drill-down — full detail for one dataset from
-//                /torrent/<info_hash> (per-node piece maps, availability
+//                /api/dataset/<info_hash> (per-node piece maps, availability
 //                histogram, per-file replication, copies summary).
 //
 // Aggregation lives server-side (swarm_stats) so the web view and the terminal
-// piece_map never drift; this file only does presentation — colouring cells and
-// formatting the numbers each endpoint already computed.
+// map (control.py map) never drift; this file only does presentation — colouring
+// cells and formatting the numbers each endpoint already computed.
 import { component, html, tutuca } from "./tutuca.js";
 
 // Machine endpoints are namespaced under /api/ so they never collide with the
 // SPA's page routes (/, /dataset/<hash>, /transfers, /nodes); the collector serves
 // the app shell for any non-/api path so those routes deep-link and reload.
 const OVERVIEW_URL = "/api/overview";
-const DETAIL_URL = "/api/torrent/"; // + info_hash
+const DETAIL_URL = "/api/dataset/"; // + info_hash
 const TRANSFERS_URL = "/api/transfers";
 const NODES_URL = "/api/nodes";
 const NODE_DETAIL_URL = "/api/node/"; // + label
@@ -101,7 +101,7 @@ function histogramLines(histogram) {
   });
 }
 
-// --- detail-view components (unchanged: backed by /torrent/<info_hash>) ---------
+// --- detail-view components (backed by /api/dataset/<info_hash>) ----------------
 
 // One coloured square in a piece map / availability / spread row.
 const Cell = component({
@@ -915,11 +915,12 @@ const Dashboard = component({
 // --- routing (History API + URLPattern) ----------------------------------------
 
 // Real paths, not hashes: "/" is the overview, "/dataset/<info_hash>" the
-// drill-down. The dataset's detail JSON still lives at the collector's
-// "/torrent/<info_hash>" API — the page route is a distinct noun so the two never
-// collide — and the collector serves index.html for "/dataset/..." so deep links
-// and reloads resolve to the SPA. URLPattern does the matching; the first match
-// wins, so the specific detail route is listed before the catch-all.
+// drill-down, and its JSON comes from the collector's "/api/dataset/<info_hash>".
+// The two share a noun and cannot collide: everything under /api/ is machine
+// endpoints, everything else is a page route the collector answers with
+// index.html, so deep links and reloads resolve to the SPA. URLPattern does the
+// matching; the first match wins, so the specific detail route is listed before
+// the catch-all.
 const ROUTES = [
   { pattern: new URLPattern({ pathname: "/dataset/:hash" }), route: "detail", key: "hash" },
   { pattern: new URLPattern({ pathname: "/node/:label" }), route: "node", key: "label" },

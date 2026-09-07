@@ -6,7 +6,7 @@ nodes find each other — by listening to the multicast beacon. So it is told no
 addresses and configured with nothing, exactly like the nodes it watches. Nor
 are they configured for it: they do not report to it and cannot tell whether
 anyone is watching, since the dashboard only ever listens and never beacons
-back. The same relationship control.py and piece_map.py have.
+back. The same relationship control.py has.
 
 Everything shown is derived from node snapshots alone. There is nothing else to
 ask: the nodes are the only thing that knows who holds what. A node's /stats is
@@ -14,7 +14,8 @@ already public, so there is nothing for a collector to be *sent*.
 
 Stateless: snapshots are pulled on demand and cached for POLL_TTL, so the nodes
 are read at most once a second however many browsers are open — and not at all
-while none is. A node that doesn't answer is simply absent.
+while none is. That one cache is the whole rate limit; each request then renders
+from the snapshots it finds there. A node that doesn't answer is simply absent.
 
 Endpoints:
   Every machine endpoint lives under /api/ so it never collides with the SPA's
@@ -27,7 +28,7 @@ Endpoints:
                    dataset (size, copy counts, live throughput, a per-node
                    held-fraction strip) with NO per-piece bitfields, so it stays
                    small and cheap to poll no matter how many datasets/nodes.
-  GET  /api/torrent/<info_hash>
+  GET  /api/dataset/<info_hash>
                  - full render-ready detail for ONE dataset (per-node piece maps,
                    availability histogram, per-file replication, copies summary).
                    The heavy payload, fetched only on drill-down. 404 if no fresh
@@ -42,7 +43,6 @@ Endpoints:
   GET  /          - the web UI; any other GET path also serves the app shell.
 """
 import argparse
-import hashlib
 import json
 import os
 import select
@@ -158,18 +158,11 @@ def fresh_snapshots(now: float = None) -> list:
         return []
 
 
-def piece_size(i: int, piece_length: int, total_size: int, num_pieces: int) -> int:
-    """Bytes in piece i (the last piece is usually short). Mirrors piece_map."""
-    if i < num_pieces - 1:
-        return piece_length
-    return total_size - piece_length * (num_pieces - 1)
-
-
 def bucket_fracs(bits: list, num_pieces: int, cols: int) -> list:
     """Held-fraction of each display column (one column per piece when they fit).
     The dashboard draws at most WEBUI_MAX_COLS columns, so bucketing here keeps
     the payload tiny regardless of piece count. Column boundaries match
-    piece_map.render_bits so the web and terminal views agree."""
+    control.py's render_bits so the web and terminal views agree."""
     if cols >= num_pieces:
         return [1.0 if b else 0.0 for b in bits]
     out = []
@@ -192,9 +185,9 @@ def torrent_detail(meta: dict, rows: list) -> dict:
     availability row + histogram, per-file replication and the copies summary.
 
     This is the heavy payload — it carries bucketed per-node bitfields — so it
-    backs the on-demand drill-down (/torrent/<info_hash>), not the list view.
-    Aggregation comes straight from swarm_stats (the same code piece_map uses),
-    so the web UI and the terminal view never drift; only presentation differs.
+    backs the on-demand drill-down (/api/dataset/<info_hash>), not the list view.
+    Aggregation comes straight from swarm_stats (the same code the map uses),
+    so the web UI and the terminal map never drift; only presentation differs.
     Piece bitfields are bucketed into display columns here rather than shipped raw,
     so the payload stays small even for torrents with thousands of pieces; holder
     ids are resolved to display labels. Colouring of the columns is left to the UI.
@@ -211,7 +204,7 @@ def torrent_detail(meta: dict, rows: list) -> dict:
 
     out_rows = []
     for r in rows:
-        stored = sum(piece_size(i, piece_length, total_size, num_pieces)
+        stored = sum(swarm_stats.piece_size(i, piece_length, total_size, num_pieces)
                      for i, b in enumerate(r["bits"]) if b)
         have = sum(r["bits"])
         complete = have == num_pieces
@@ -288,7 +281,7 @@ def torrent_overview(meta: dict, rows: list) -> dict:
     spread = [{"label": r["label"], "frac": round(sum(r["bits"]) / num_pieces, 3)}
               for r in sorted(rows, key=lambda r: r["label"])]
 
-    downloading = sum(1 for r in rows if r["progress"] < 1.0)
+    downloading = sum(1 for r in rows if not r["complete"])
 
     return {
         "info_hash": meta["info_hash"], "name": meta["name"],
@@ -324,6 +317,50 @@ def build_torrent_detail(info_hash: str) -> dict:
     return None
 
 
+# --- per-node rows -----------------------------------------------------------
+# The Nodes list, one node's drill-down and the in-flight transfers are three
+# slicings of the same table: one row per (node, dataset) the node holds. Built
+# once here so the three views cannot drift apart, and aggregated before it is
+# served so the endpoints that don't need the rows don't carry them.
+
+def node_label(snap: dict) -> str:
+    """How a node is named in every view: the address we reached it at. A node
+    cannot supply this itself — it never learns its own address."""
+    return snap.get("label", snap.get("node_key", "?"))
+
+
+def node_disk(snap: dict) -> dict:
+    disk = snap.get("disk") or {}
+    return {"disk_free": int(disk.get("free") or 0),
+            "disk_total": int(disk.get("total") or 0)}
+
+
+def node_rows(snap: dict) -> list:
+    """One node's datasets, one row each. `stored` is the bytes actually present
+    on that node; `complete` and the ghost-free `download_rate` are decided by
+    the node itself (see node.torrent_dict), not re-derived here."""
+    return [{"info_hash": t.get("info_hash_v2") or t.get("name"),
+             "name": t.get("name", ""),
+             "progress": float(t.get("progress") or 0.0),
+             "complete": bool(t.get("complete")),
+             "stored": int(t.get("total_done") or 0),
+             "total_size": int(t.get("total_size") or 0),
+             "download_rate": int(t.get("download_rate") or 0),
+             "upload_rate": int(t.get("upload_rate") or 0),
+             "num_peers": int(t.get("num_peers") or 0)}
+            for t in snap.get("torrents", [])]
+
+
+def node_totals(rows: list) -> dict:
+    """What one node adds up to across the datasets it holds."""
+    return {"datasets": len(rows),
+            "complete": sum(1 for r in rows if r["complete"]),
+            "stored": sum(r["stored"] for r in rows),
+            "download_rate": sum(r["download_rate"] for r in rows),
+            "upload_rate": sum(r["upload_rate"] for r in rows),
+            "num_peers": sum(r["num_peers"] for r in rows)}
+
+
 def build_transfers() -> dict:
     """In-flight transfers across the swarm: one row per (node, dataset) that is
     not yet complete, with progress, the live download rate and an ETA.
@@ -337,22 +374,13 @@ def build_transfers() -> dict:
     now = time.time()
     transfers = []
     for snap in fresh_snapshots(now):
-        node = snap.get("label", snap.get("node_key", "?"))
-        for t in snap.get("torrents", []):
-            progress = float(t.get("progress") or 0.0)
-            if progress >= 1.0 or t.get("is_seeding"):
+        for r in node_rows(snap):
+            if r["complete"]:
                 continue
-            dl = int(t.get("download_rate") or 0)
-            total = int(t.get("total_size") or 0)
-            eta = (total * (1.0 - progress) / dl) if dl > 0 else None
-            transfers.append({
-                "node": node, "name": t.get("name", ""),
-                "info_hash": t.get("info_hash_v2") or t.get("name"),
-                "progress": progress,
-                "download_rate": dl, "upload_rate": int(t.get("upload_rate") or 0),
-                "num_peers": int(t.get("num_peers") or 0),
-                "total_size": total, "eta": eta,
-            })
+            dl = r["download_rate"]
+            remaining = r["total_size"] * (1.0 - r["progress"])
+            transfers.append({**r, "node": node_label(snap),
+                              "eta": (remaining / dl) if dl > 0 else None})
     transfers.sort(key=lambda x: (x["eta"] is None,
                                   x["eta"] if x["eta"] is not None else 0.0,
                                   -x["progress"]))
@@ -364,30 +392,16 @@ def build_nodes() -> dict:
     it holds (and how many of those complete), and its current throughput.
 
     The "where is the data" question answered from the infrastructure side, the
-    complement to the overview's per-dataset placement. Derived from the latest
-    snapshots; `total_done` is each torrent's locally-present bytes on that node.
+    complement to the overview's per-dataset placement.
+
+    Aggregated here rather than shipped as rows: this stays one line per node
+    however large the catalog grows, which is what keeps the Nodes screen cheap
+    on a swarm holding thousands of datasets.
     """
     now = time.time()
-    nodes = []
-    for snap in fresh_snapshots(now):
-        ts = snap.get("torrents", [])
-        done = [bool(t.get("is_seeding") or float(t.get("progress") or 0) >= 1.0)
-                for t in ts]
-        disk = snap.get("disk") or {}
-        nodes.append({
-            "label": snap.get("label", snap.get("node_key", "?")),
-            "datasets": len(ts), "complete": sum(done),
-            "stored": sum(int(t.get("total_done") or 0) for t in ts),
-            "disk_free": int(disk.get("free") or 0),
-            "disk_total": int(disk.get("total") or 0),
-            # Skip completed torrents' download_rate: libtorrent's decaying average
-            # lingers after completion, so a node holding only complete copies would
-            # otherwise show an inbound rate while not actually downloading.
-            "download_rate": sum(int(t.get("download_rate") or 0)
-                                 for t, c in zip(ts, done) if not c),
-            "upload_rate": sum(int(t.get("upload_rate") or 0) for t in ts),
-            "num_peers": sum(int(t.get("num_peers") or 0) for t in ts),
-        })
+    nodes = [{"label": node_label(snap), **node_totals(node_rows(snap)),
+              **node_disk(snap)}
+             for snap in fresh_snapshots(now)]
     nodes.sort(key=lambda n: n["label"])
     return {"ts": now, "nodes": nodes}
 
@@ -400,71 +414,12 @@ def build_node_detail(label: str) -> dict:
     included so the UI can link every row back to that dataset's detail.
     """
     for snap in fresh_snapshots():
-        if snap.get("label", snap.get("node_key")) != label:
+        if node_label(snap) != label:
             continue
-        torrents = []
-        for t in snap.get("torrents", []):
-            progress = float(t.get("progress") or 0.0)
-            complete = bool(t.get("is_seeding") or progress >= 1.0)
-            # libtorrent's download_rate is a decaying moving average that lingers
-            # for several seconds after a torrent completes. A node that holds the
-            # whole dataset isn't downloading, so report 0 — otherwise a "complete"
-            # row keeps showing an inbound rate and looks like it's still pulling.
-            torrents.append({
-                "info_hash": t.get("info_hash_v2") or t.get("name"),
-                "name": t.get("name", ""),
-                "state": t.get("state", ""), "progress": progress,
-                "stored": int(t.get("total_done") or 0),
-                "total_size": int(t.get("total_size") or 0),
-                "download_rate": 0 if complete else int(t.get("download_rate") or 0),
-                "upload_rate": int(t.get("upload_rate") or 0),
-                "num_peers": int(t.get("num_peers") or 0),
-                "complete": complete,
-            })
-        torrents.sort(key=lambda x: x["name"])
-        disk = snap.get("disk") or {}
-        return {
-            "ts": time.time(),
-            "label": label, "datasets": len(torrents),
-            "complete": sum(1 for t in torrents if t["complete"]),
-            "stored": sum(t["stored"] for t in torrents),
-            "disk_free": int(disk.get("free") or 0),
-            "disk_total": int(disk.get("total") or 0),
-            "download_rate": sum(t["download_rate"] for t in torrents),
-            "upload_rate": sum(t["upload_rate"] for t in torrents),
-            "num_peers": sum(t["num_peers"] for t in torrents),
-            "torrents": torrents,
-        }
+        rows = sorted(node_rows(snap), key=lambda r: r["name"])
+        return {"ts": time.time(), "label": label,
+                **node_totals(rows), **node_disk(snap), "torrents": rows}
     return None
-
-
-# Each cached endpoint shares one build per tick across all viewers. The ETag is
-# keyed to the payload state (not the timestamp), so an idle swarm keeps a stable
-# ETag and viewers get cheap 304s instead of resent bytes.
-_CACHE_LOCK = threading.Lock()
-# endpoint key -> {built_at, body, etag}. /overview is polled by every viewer;
-# the heavy per-torrent detail is cached per info_hash so several operators
-# drilled into different datasets don't evict each other. This caches the
-# *rendering*; the snapshots underneath have their own poll cache.
-_CACHE: dict = {}
-
-
-def cached_payload(key: str, builder, state_key) -> tuple:
-    """(body_bytes, etag) for `key`, rebuilt at most once per POLL_TTL.
-
-    `builder()` returns the dict to serve; `state_key(data)` returns the part the
-    ETag should track (so the timestamp alone doesn't churn it)."""
-    now = time.time()
-    with _CACHE_LOCK:
-        entry = _CACHE.get(key)
-        if entry is None or now - entry["built_at"] >= config.POLL_TTL:
-            data = builder()
-            digest = hashlib.md5(
-                json.dumps(state_key(data), sort_keys=True).encode()).hexdigest()
-            entry = {"built_at": now, "body": json.dumps(data).encode(),
-                     "etag": f'"{digest}"'}
-            _CACHE[key] = entry
-        return entry["body"], entry["etag"]
 
 
 def make_handler():
@@ -495,16 +450,18 @@ def make_handler():
             self.end_headers()
             self.wfile.write(body)
 
-        def _send_cached_json(self, body: bytes, etag: str) -> None:
-            """Serve a cached JSON body, honouring If-None-Match with a 304."""
-            if self.headers.get("If-None-Match") == etag:
-                self.send_response(304)
-                self.send_header("ETag", etag)
-                self.send_header("Content-Length", "0")
-                self.end_headers()
+        def _send_json(self, data, code: int = 200) -> None:
+            self._send(json.dumps(data).encode(), "application/json", code,
+                       {"Cache-Control": "no-cache"})
+
+        def _send_or_404(self, data) -> None:
+            """A builder returns None when no fresh node reports what was asked
+            for — an unknown dataset or node, which is a 404 and not an empty
+            page of data."""
+            if data is None:
+                self._send_json({"error": "unknown"}, 404)
             else:
-                self._send(body, "application/json",
-                           extra_headers={"ETag": etag, "Cache-Control": "no-cache"})
+                self._send_json(data)
 
         def _send_static(self, filename: str, ctype: str) -> None:
             try:
@@ -524,51 +481,26 @@ def make_handler():
                 filename, ctype = STATIC_FILES[path]
                 self._send_static(filename, ctype)
             elif path == "/api/overview":
-                body, etag = cached_payload("overview", build_overview,
-                                            lambda d: d["datasets"])
-                self._send_cached_json(body, etag)
-            elif path.startswith("/api/torrent/"):
-                # On-demand detail for one dataset (the drill-down). Cached per
-                # info_hash; build_torrent_detail returns None when no fresh node
-                # reports it, which we serve as a 404 rather than caching empty.
-                info_hash = path[len("/api/torrent/"):]
-                body, etag = cached_payload(
-                    "torrent:" + info_hash,
-                    lambda: build_torrent_detail(info_hash) or {"error": "unknown"},
-                    lambda d: d)
-                if b'"info_hash"' not in body:  # the {"error": ...} sentinel
-                    self._send(body, "application/json", 404)
-                else:
-                    self._send_cached_json(body, etag)
+                self._send_json(build_overview())
+            elif path.startswith("/api/dataset/"):
+                # On-demand detail for one dataset (the drill-down).
+                self._send_or_404(build_torrent_detail(path[len("/api/dataset/"):]))
             elif path == "/api/transfers":
-                body, etag = cached_payload("transfers", build_transfers,
-                                            lambda d: d["transfers"])
-                self._send_cached_json(body, etag)
+                self._send_json(build_transfers())
             elif path == "/api/nodes":
-                body, etag = cached_payload("nodes", build_nodes,
-                                            lambda d: d["nodes"])
-                self._send_cached_json(body, etag)
+                self._send_json(build_nodes())
             elif path.startswith("/api/node/"):
-                # Drill-down for one node. Cached per label; None (node not
-                # reporting) is served as a 404 rather than cached empty. The
-                # label is a URL-encoded "ip:port" (the ':' is percent-escaped by
-                # the client), so decode it back before matching.
-                label = unquote(path[len("/api/node/"):])
-                body, etag = cached_payload(
-                    "node:" + label,
-                    lambda: build_node_detail(label) or {"error": "unknown"},
-                    lambda d: d)
-                if b'"label"' not in body:  # the {"error": ...} sentinel
-                    self._send(body, "application/json", 404)
-                else:
-                    self._send_cached_json(body, etag)
+                # Drill-down for one node. The label is a URL-encoded "ip:port"
+                # (the ':' is percent-escaped by the client), so decode it back
+                # before matching.
+                self._send_or_404(
+                    build_node_detail(unquote(path[len("/api/node/"):])))
             elif path.startswith("/api/"):
                 # The /api/ namespace is machine-only, so an unknown endpoint
                 # under it is an error — never the app shell. Falling through
                 # would hand a JSON client a 200 and a page of HTML, which reads
                 # as success right up until it tries to parse it.
-                self._send(json.dumps({"error": "no such endpoint"}).encode(),
-                           "application/json", 404)
+                self._send_json({"error": "no such endpoint"}, 404)
             else:
                 # SPA fallback: any other GET is a client-side page route
                 # (/, /dataset/<hash>, /transfers, /nodes, ...). Serve the app

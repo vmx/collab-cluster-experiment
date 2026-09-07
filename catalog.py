@@ -11,7 +11,6 @@ that need to parse a .torrent bdecode the bytes themselves.
 import concurrent.futures
 import json
 import urllib.error
-import urllib.parse
 import urllib.request
 
 import config
@@ -47,26 +46,16 @@ def fetch_torrent_bytes(base: str, info_hash: str, timeout: float = 10.0) -> byt
         raise
 
 
-def fetch_peers(base: str, me: dict = None, timeout: float = 5.0) -> dict:
+def fetch_peers(base: str, timeout: float = 5.0) -> dict:
     """A node's view of the swarm: {"self": {...}, "peers": [...]}.
 
-    `self` is that node's own identity, so dialling a single known address is
-    enough to learn it *and* everyone it can see — which is how --peer
-    bootstrapping works where multicast doesn't reach.
-
-    Pass `me` (a node's own beacon dict) to introduce yourself in the same
-    breath. Gossip would otherwise be one-directional: a bootstrapped node would
-    learn the whole swarm while remaining invisible to it, so nothing it
-    published would ever be noticed. The callee reads our address off the
-    connection, exactly as a beacon's is read off its datagram."""
-    path = "/peers"
-    if me:
-        path += "?" + urllib.parse.urlencode(me)
-    return json.loads(_get(base, path, timeout).decode())
+    `self` is that node's own identity, so asking a single node names the whole
+    swarm — which is what lets any viewer read every node through one of them."""
+    return json.loads(_get(base, "/peers", timeout).decode())
 
 
 def fetch_stats(base: str, timeout: float = 2.0) -> dict:
-    """A node's live snapshot: session metrics, per-torrent status, per-peer info."""
+    """A node's live snapshot: per-torrent status and piece ownership."""
     return json.loads(_get(base, "/stats", timeout).decode())
 
 
@@ -76,7 +65,7 @@ def fetch_swarm(base: str, timeout: float = 2.0) -> tuple:
     Returns (snapshots, addresses). One /peers call names the whole swarm, then
     each node is asked for its own /stats — the same payload it would have to
     publish anyway. This is all any swarm-wide view needs, which is why neither
-    piece_map.py nor collector.py has to be told about nodes, or nodes about it.
+    control.py nor collector.py has to be told about nodes, or nodes about them.
 
     A node that doesn't answer is simply absent: liveness is "responded", not a
     staleness timer. `addresses` is every endpoint we tried, so a caller can

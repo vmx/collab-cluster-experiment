@@ -6,7 +6,6 @@ multicast beacon on the local network. Services can be co-located on one host fo
 a deterministic dev run or spread across a real network.
 """
 import os
-import socket
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -25,32 +24,6 @@ HOST = "127.0.0.1"
 # Nodes may live on other hosts, so they bind all interfaces rather than loopback.
 BIND_HOST = "0.0.0.0"
 
-
-def primary_ip() -> str:
-    """This host's primary outbound IPv4.
-
-    Opens a throwaway UDP socket toward a public address (a UDP connect sends no
-    packet) and reads back the local endpoint the OS picked as the source, which
-    is the routable interface even on a multi-homed host. Falls back to loopback
-    when the host is offline, e.g. a self-contained single-machine dev run.
-
-    Only used to print a node's reachable URL when it starts, as a convenience
-    for whoever is looking at the log. Connectivity never depends on it: a
-    peer's address is read off the source of its beacon datagram, so nothing has
-    to guess or declare its own routable address, and viewers label a node by
-    the address they reached it at.
-    """
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))
-        return s.getsockname()[0]
-    except OSError:
-        return "127.0.0.1"
-    finally:
-        s.close()
-
-
-ADVERTISE_IP = os.environ.get("SWARM_ADVERTISE_IP") or primary_ip()
 
 BT_PORT_BASE = 6881      # node i listens for BitTorrent on BT_PORT_BASE + i
 STATS_PORT_BASE = 8001   # node i serves its HTTP API on STATS_PORT_BASE + i
@@ -87,18 +60,8 @@ BEACON_INTERVAL = 2.0
 # Forget a peer we haven't heard a beacon from in this long. Must comfortably
 # exceed BEACON_INTERVAL so a single dropped datagram doesn't evict a live node.
 PEER_STALE_AFTER = 3 * BEACON_INTERVAL
-# Ask peers for *their* peer list every Nth tick. Beacons already cover everyone
-# on the segment; this is what lets a node bootstrapped with --peer (where
-# multicast doesn't reach) learn about the rest, and be learned about.
-GOSSIP_EVERY = 5
 
 NODE_LOOP_INTERVAL = 1.0   # how often a node refreshes its stats snapshot
-
-# What a node does with a dataset it discovers but doesn't hold. "manual" takes
-# nothing unless an operator asks for it with control.py add; "all" mirrors
-# every dataset the node learns about. Defaults to manual, so a node never
-# commits disk that wasn't asked for. See node.make_want().
-REPLICATE_DEFAULT = "manual"
 
 # --- Dashboard (optional) ----------------------------------------------------
 # Purely observability, and purely a client: it reads the swarm through any one

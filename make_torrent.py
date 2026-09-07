@@ -41,22 +41,13 @@ SAMPLE_GROUPS = {
 }
 
 
-def _is_pad(fs, i: int) -> bool:
-    if hasattr(fs, "pad_file_at"):
-        try:
-            return fs.pad_file_at(i)
-        except Exception:
-            pass
-    return "/.pad/" in fs.file_path(i).replace(os.sep, "/")
-
-
 # --- building ----------------------------------------------------------------
 
 def build(source: str) -> tuple:
     """Hash a local file/dir into a .torrent. Returns (name, info_hash, blob).
 
     Returns the bencoded bytes rather than writing them: the caller decides where
-    they live (a node drops them in its own catalog, then gossips them to peers).
+    they live (a node drops them in its own catalog, where peers then find it).
     Raises ValueError on bad input — this runs inside a node's HTTP handler, so
     it must not exit the process.
     """

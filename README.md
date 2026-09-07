@@ -106,7 +106,7 @@ datasets as they appear, and keeps ignoring them.
 Which nodes hold what is entirely up to you, and nothing has to agree: one
 dataset can live on every node, another on two, another on none at all. Nothing
 keeps track of that for you: `control.py status <node>` is the per-node answer,
-and `piece_map.py <node>` is the swarm-wide one — including how many copies of
+and `control.py map <node>` is the swarm-wide one — including how many copies of
 each file exist, which is the number that matters when you place datasets by
 hand.
 
@@ -191,6 +191,7 @@ python control.py peers   [node]             # nodes a node can see  <- start he
 python control.py status  [node]             # datasets a node actually holds
 python control.py add     <node> <dataset>   # tell it to store this one
 python control.py remove  <node> <dataset>   # tell it to stop holding it
+python control.py map     [node]             # who holds which pieces, swarm-wide
 ```
 
 Nodes are addressed by their HTTP endpoint, `host[:port]`; the port defaults to
@@ -236,23 +237,14 @@ there is nothing to configure on a multi-homed or NAT'd host. The optional
 dashboard joins the same group to find a node to read through, and only ever
 listens: it discovers the swarm without the swarm discovering it.
 
-Beacons and gossip are the only sources of peers. Torrents are built private and
+The beacon is the only source of peers. Torrents are built private and
 trackerless — the private flag is what keeps libtorrent from using PEX — and DHT,
 LSD, UPnP and NAT-PMP are switched off at the session level as well, so a node
-talks only to peers it heard from directly or was handed with `--peer`.
-`control.py peers` shows you exactly what a node believes, which is where to look
-when something isn't replicating.
+talks only to peers whose beacon it heard. `control.py peers` shows you exactly
+what a node believes, which is where to look when something isn't replicating.
 
-Where multicast doesn't flood — some bridges, or across segments — bootstrap from
-any one node you can reach, by address:
-
-```bash
-python node.py --peer 127.0.0.1:8001    # node 0 here; on another host, that host's address
-```
-
-One address is enough. Asking a node for its peer list also introduces you to it,
-so the swarm learns about the new node in the same exchange, including datasets
-it goes on to publish.
+The flip side is that multicast has to reach between your nodes: same segment,
+TTL 1. A node that cannot hear the others does not join.
 
 ## The optional dashboard
 
@@ -272,8 +264,9 @@ it exists or can tell whether anyone is watching. It shows an overview sorted
 rarest-copies-first, a per-dataset piece map, in-flight transfers, and per-node
 storage.
 
-Where multicast doesn't reach, name any node instead — the same escape hatch as
-`node.py --peer`:
+Where multicast doesn't reach the machine you are watching from, name any node
+instead. The dashboard is a plain HTTP client, so this works from anywhere that
+can reach a node, even where the beacon can't:
 
 ```bash
 python collector.py 127.0.0.1:8001
@@ -289,15 +282,15 @@ and not at all while none is.
 The same data in the terminal, the same way:
 
 ```bash
-python piece_map.py 127.0.0.1:8001    # who has which pieces, and how many copies exist
-watch -n 2 python piece_map.py 127.0.0.1:8001
+python control.py map 127.0.0.1:8001    # who has which pieces, and how many copies exist
+watch -n 2 python control.py map 127.0.0.1:8001
 curl -s http://127.0.0.1:8001/stats | python -m json.tool     # one node, directly
 ```
 
 ## A node's HTTP API
 
 ```
-GET  /stats                          snapshot: session metrics, per-torrent status, per-peer info
+GET  /stats                          snapshot: per-torrent status and piece ownership
 GET  /catalog                        [{"name","info_hash"}] — every dataset it knows of
 GET  /catalog/<info_hash>.torrent    the raw .torrent
 GET  /peers                          {"self": …, "peers": […]} — its view of the swarm
@@ -311,13 +304,12 @@ POST /remove   {"name"|"info_hash"}  drop one
 | File | Role |
 |---|---|
 | `node.py` | **The system.** libtorrent session + the sync tick (beacon, peers, catalog, want, mesh) + the HTTP API. Run one per machine. |
-| `control.py` | CLI to talk to a node: publish, list, peers, status, add, remove. |
+| `control.py` | CLI to talk to a node: publish, list, peers, status, add, remove, map. |
 | `make_torrent.py` | Builds v2-only, private, trackerless torrents (`build()`), reads a catalog directory (`list_catalog()`). As a script, generates the sample content. |
 | `catalog.py` | Stdlib client for another node's HTTP API, including `fetch_swarm()` — every node's stats, gathered through one node's peer table. No libtorrent, so `control.py` doesn't need it. |
 | `beacon.py` | The discovery datagram: join the group, send, drain. No libtorrent either, which is how the dashboard finds its way in without running a node. |
-| `config.py` | Ports, beacon group, timing, paths, the default replication policy. |
-| `swarm_stats.py` | Groups node snapshots by dataset and aggregates per-piece/per-file copy counts. Shared by `piece_map.py` and `collector.py`. |
-| `piece_map.py` | Terminal view, through any node: who holds which pieces, and how many copies of each file exist. |
+| `config.py` | Ports, beacon group, timing, paths. |
+| `swarm_stats.py` | Groups node snapshots by dataset and aggregates per-piece/per-file copy counts. Shared by `control.py map` and `collector.py`. |
 | `collector.py` | *Optional.* Stateless: finds a node on the beacon, reads the swarm through it, and serves the `/api/*` dashboard endpoints and the web UI. |
 | `webui/` | *Optional.* Zero-build [Tutuca](https://github.com/marianoguerra/tutuca) SPA, framework vendored as one file. Served by `collector.py`. |
 
@@ -361,8 +353,9 @@ to 0. A node's real identity is a persisted UUID in `nodes/<id>/node_key`.
 - **Everything on the segment is trusted.** Any node can publish anything and is
   believed, and a beacon can claim to be any node — nothing is signed or
   authenticated. This suits a private network, which is the assumed environment.
-- **Discovery needs working multicast** between nodes, or a `--peer` address to
-  start from — and the same for the dashboard, which is otherwise given a node.
+- **Discovery needs working multicast** between nodes: a node that cannot hear
+  the beacon cannot join, and there is no address to bootstrap from. (The
+  dashboard is the exception — it can be handed a node instead.)
 - **The mesh is complete.** Every node connects to every other node for every
   dataset it holds, which is deterministic and fast at cluster scale but grows
   quadratically.

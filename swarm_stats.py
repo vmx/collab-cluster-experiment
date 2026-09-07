@@ -1,37 +1,21 @@
 """Shared helpers to aggregate per-node /stats snapshots into swarm-wide views.
 
-Both collector.py (for the DB time-series) and piece_map.py (for the live
-display) use these so they always compute "copies" the same way. A node may hold
-several torrents at once, so everything is grouped per torrent (by v2 info-hash).
+The web dashboard (collector.py) and the terminal map (control.py map) both
+render from these, so the two can never disagree about how many copies of
+something exist. A node may hold several torrents at once, so everything is
+grouped per torrent (by v2 info-hash).
+
+Stdlib only, deliberately: control.py must work on a machine with no libtorrent.
 """
 import math
 
-# libtorrent peer_info.source bit flags -> label. These are stable library
-# values; we keep them here (plain ints) so viewers without a libtorrent import
-# can decode the `source` a node reports. Nodes hand libtorrent its peers
-# directly (connect_peer), with every discovery mechanism disabled, so in
-# practice only "incoming" and the manual-add source ever show up.
-PEER_SOURCE_FLAGS = [
-    (0x1, "tracker"),
-    (0x2, "dht"),
-    (0x4, "pex"),
-    (0x8, "lsd"),
-    (0x10, "resume"),
-    (0x20, "incoming"),
-]
 
-
-def source_labels(source: int) -> list:
-    """Decode a peer_info.source bitmask into its source labels."""
-    return [label for bit, label in PEER_SOURCE_FLAGS if source & bit]
-
-
-def peer_addr(ip: str, port) -> dict:
-    """The canonical shape for a peer's network address in any stats payload.
-
-    Kept structured (not a joined "ip:port" string) so consumers compare and
-    aggregate addresses without re-parsing."""
-    return {"ip": ip, "port": int(port)}
+def piece_size(i: int, piece_length: int, total_size: int, num_pieces: int) -> int:
+    """Bytes in piece i. Every piece is piece_length except the last, which is
+    whatever is left over."""
+    if i < num_pieces - 1:
+        return piece_length
+    return total_size - piece_length * (num_pieces - 1)
 
 
 def collect_by_torrent(nodes: list) -> list:
@@ -39,10 +23,10 @@ def collect_by_torrent(nodes: list) -> list:
 
     Returns a list of (meta, rows), one per distinct torrent, sorted by name:
       rows: [{"id", "label", "bits": list[bool] of length num_pieces,
-              "state", "progress", "dl", "ul", "num_peers"}]
-            id = node_key (stable swarm-wide identity, used for the DB / holders);
+              "complete", "progress", "dl", "ul", "num_peers"}]
+            id = node_key (stable swarm-wide identity, used for holders);
             label = short human name for display;
-            state/progress/dl/ul/num_peers = this node's live transfer activity
+            complete/progress/dl/ul/num_peers = this node's live transfer activity
             for the torrent (aggregate throughput / "replicating" signal, and the
             live connection count the detail view shows). Ownership views ignore
             these; only `bits` matters there.
@@ -66,7 +50,7 @@ def collect_by_torrent(nodes: list) -> list:
                 "rows": []})
             g["rows"].append({"id": key, "label": label,
                               "bits": bits,
-                              "state": t.get("state", ""),
+                              "complete": bool(t.get("complete")),
                               "progress": float(t.get("progress") or 0.0),
                               "dl": int(t.get("download_rate") or 0),
                               "ul": int(t.get("upload_rate") or 0),

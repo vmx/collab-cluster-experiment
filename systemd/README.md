@@ -1,8 +1,8 @@
 # systemd services
 
 One `systemd --user` unit per long-running component. Both are standalone (no
-dependency on each other) so either can run alone in a container; `control.py`,
-`make_torrent.py` and `piece_map.py` are one-shot tools, not services.
+dependency on each other) so either can run alone in a container; `control.py`
+and `make_torrent.py` are one-shot tools, not services.
 
 | Unit | Component | Listens on |
 | --- | --- | --- |
@@ -96,5 +96,4 @@ Nothing to do — that's the point. Nodes advertise nothing and are told nothing
 each learns its peers' addresses from the beacons it receives.
 
 The one prerequisite is that multicast reaches between them (same segment,
-TTL 1). Where it doesn't, give a node one address to start from and it learns the
-rest by gossip — add `--peer <a-known-node>` to the unit's `ExecStart=`.
+TTL 1). A node that cannot hear the beacon cannot join.

@@ -60,8 +60,8 @@ def send(sock, message: dict) -> None:
         sock.sendto(json.dumps(message).encode(),
                     (config.BEACON_GROUP, config.BEACON_PORT))
     except OSError as exc:
-        # No multicast route (offline host, restricted container). Not fatal:
-        # --peer bootstrapping still works.
+        # No multicast route (offline host, restricted container). Not fatal in
+        # itself — a lone node runs fine — but it will not meet anyone.
         if exc.errno not in (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EPERM):
             raise
 

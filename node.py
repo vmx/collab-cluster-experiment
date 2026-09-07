@@ -4,9 +4,10 @@ Run one per host. Nodes find each other with a UDP multicast beacon, learn what
 datasets exist by pulling each other's catalogs, and move the bytes with
 BitTorrent v2. There is no tracker, no central catalog and no coordinator.
 
-  GET  /stats                    JSON snapshot (session metrics + per-torrent
-                                 status + per-peer info). Already public, so
-                                 there is nothing for a node to report anywhere.
+  GET  /stats                    JSON snapshot: per-torrent status and the
+                                 piece bitfield behind every swarm-wide view.
+                                 Already public, so there is nothing for a node
+                                 to report anywhere.
   GET  /catalog                  [{"name","info_hash"}] — every dataset this node
                                  knows of, held or not.
   GET  /catalog/<info_hash>.torrent   the raw .torrent for one dataset.
@@ -36,7 +37,7 @@ import time
 import traceback
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 import libtorrent as lt
 
@@ -44,7 +45,6 @@ import beacon
 import catalog
 import config
 import make_torrent
-import swarm_stats
 
 # Persist torrents natively via libtorrent fast-resume. save_info_dict embeds the
 # torrent's metadata in the resume file, so a restarted node can re-add a torrent
@@ -75,13 +75,10 @@ class NodeState:
         # of `torrents`: in manual mode a node knows of far more than it holds.
         self.catalog: dict = {}
         self.digest = ""            # fingerprint of `catalog`, sent in the beacon
-        # node_key -> {ip, bt, http, cat, last_seen} — other nodes we can see
+        # node_key -> {ip, bt, http, cat, last_seen} — other nodes we can see.
+        # Beacons are the only way in: a node we cannot hear, we do not know.
         self.peers: dict = {}
-        # [(host, http_port)] from --peer: dialed directly every gossip round, so
-        # a node can join where multicast doesn't reach.
-        self.static: list = []
-        self.session_stats: dict = {}
-        self.snapshot: dict = {"node_key": node_key, "torrents": [], "peers": []}
+        self.snapshot: dict = {"node_key": node_key, "torrents": []}
         self.stop = threading.Event()
 
 
@@ -231,17 +228,11 @@ def resolve(ns: NodeState, info_hash: str = None, name: str = None) -> str:
     return matches[0]
 
 
-# --- snapshot helpers (unchanged shape; the collector reads these) -----------
-
-def state_name(state) -> str:
-    return str(state).split(".")[-1] if state is not None else ""
-
-
-def collect_session_stats(values: dict) -> dict:
-    """libtorrent 2.0's session_stats_alert.values is already keyed by metric
-    name (e.g. 'net.sent_bytes'), so just copy it into a plain dict."""
-    return {name: value for name, value in values.items()}
-
+# --- snapshot helpers ---------------------------------------------------------
+# What /stats carries, and nothing more: every field below is read by something
+# (the dashboard, control.py, the swarm map). A node reports its own view once
+# and every viewer derives the rest, so anything no viewer reads is not measured
+# here at all.
 
 def _is_pad(fs, i: int) -> bool:
     if hasattr(fs, "pad_file_at"):
@@ -281,10 +272,13 @@ def torrent_dict(st, ti, files_meta) -> dict:
         info_hash_v2 = str(st.info_hashes.v2)
     except Exception:
         pass
+    # Whether this node holds the whole dataset. Decided here, once, so no
+    # viewer has to re-derive it from is_seeding/progress and risk disagreeing
+    # with the next viewer about what "complete" means.
+    complete = bool(st.is_seeding) or st.progress >= 1.0
     return {
         "info_hash_v2": info_hash_v2,
         "name": ti.name(),
-        "state": state_name(st.state),
         # Per-piece ownership bitfield: which pieces (=which data) THIS node holds.
         # This is the authoritative source for the swarm-wide piece map.
         "pieces": [bool(b) for b in st.pieces],
@@ -293,48 +287,15 @@ def torrent_dict(st, ti, files_meta) -> dict:
         # Static file -> piece-range map so consumers can do per-file analysis.
         "files": files_meta,
         "progress": st.progress,
-        "download_rate": st.download_rate,
+        "complete": complete,
+        # libtorrent's download_rate is a decaying average that keeps reporting
+        # for seconds after a torrent finishes. A node holding the whole dataset
+        # is not downloading, so say so here rather than leave every viewer to
+        # subtract the ghost itself (and one of them forget to).
+        "download_rate": 0 if complete else st.download_rate,
         "upload_rate": st.upload_rate,
-        "download_payload_rate": st.download_payload_rate,
-        "upload_payload_rate": st.upload_payload_rate,
         "total_done": st.total_done,
-        "total_wanted": st.total_wanted,
-        "total_download": st.total_download,
-        "total_upload": st.total_upload,
-        "all_time_download": st.all_time_download,
-        "all_time_upload": st.all_time_upload,
         "num_peers": st.num_peers,
-        "num_seeds": st.num_seeds,
-        "num_connections": st.num_connections,
-        "num_pieces": st.num_pieces,
-        "distributed_copies": st.distributed_copies,
-        "last_seen_complete": st.last_seen_complete,
-        "is_seeding": bool(st.is_seeding),
-        "is_finished": bool(st.is_finished),
-    }
-
-
-def peer_dict(p, torrent_name) -> dict:
-    client = p.client
-    if isinstance(client, bytes):
-        client = client.decode("utf-8", "replace")
-    return {
-        "torrent": torrent_name,
-        **swarm_stats.peer_addr(p.ip[0], p.ip[1]),
-        "client": client,
-        "down_speed": p.down_speed,
-        "up_speed": p.up_speed,
-        "payload_down_speed": p.payload_down_speed,
-        "payload_up_speed": p.payload_up_speed,
-        "progress": p.progress,
-        "total_download": p.total_download,
-        "total_upload": p.total_upload,
-        "flags": int(p.flags),
-        "source": int(p.source),
-        # Decoded source bits. With no tracker/DHT/PEX/LSD these are only
-        # "incoming" or, for peers we dialled ourselves, the manual-add source.
-        "source_flags": swarm_stats.source_labels(int(p.source)),
-        "rtt": p.rtt,
     }
 
 
@@ -357,7 +318,11 @@ def make_session(node_id: int) -> "lt.session":
         # an IP; without this libtorrent allows only ONE peer connection per IP
         # per torrent, so a single-host swarm couldn't mesh.
         "allow_multiple_connections_per_ip": True,
-        "alert_mask": lt.alert.category_t.all_categories,
+        # Only the category the session loop actually reads: fast-resume
+        # checkpoints. all_categories would additionally switch on the per-peer,
+        # per-piece and per-block log streams, which libtorrent generates at high
+        # volume all through a transfer and which we pop only to discard.
+        "alert_mask": lt.alert.category_t.storage_notification,
         # Pace the transfer so progress is observable as it happens (see config).
         # By default libtorrent exempts loopback/LAN peers from rate limits, so
         # we must turn that off for the cap to apply within a single-host swarm.
@@ -367,16 +332,13 @@ def make_session(node_id: int) -> "lt.session":
     return lt.session(settings)
 
 
-def add_torrent(ns: NodeState, info_hash: str, mode: str,
-                serve_path: str = None) -> dict:
+def add_torrent(ns: NodeState, info_hash: str, serve_path: str = None) -> dict:
     """Start holding a dataset this node knows about.
 
-    `mode` says where the data comes from: "serve" hosts a copy already on this
-    host (`serve_path` is what was handed to /publish), while "download" fetches
-    a fresh copy into nodes/<id>/data/<slug>/. Returns a status dict.
+    `serve_path` says where the data comes from: given, it is a copy already on
+    this host (what /publish was handed) and we seed it in place; omitted, we
+    download a fresh copy into nodes/<id>/data/<slug>/. Returns a status dict.
     """
-    if mode not in ("serve", "download"):
-        raise ValueError(f"mode must be 'serve' or 'download', got {mode!r}")
     with ns.lock:
         meta = ns.catalog.get(info_hash)
         held = ns.torrents.get(info_hash)
@@ -389,9 +351,7 @@ def add_torrent(ns: NodeState, info_hash: str, mode: str,
     ti = lt.torrent_info(meta["path"])
     tname = ti.name()
 
-    if mode == "serve":
-        if not serve_path:
-            raise ValueError("serve mode needs the local path to host from")
+    if serve_path:
         content = os.path.abspath(serve_path)
         if not os.path.exists(content):
             raise ValueError(f"serve path does not exist: {content}")
@@ -415,9 +375,9 @@ def add_torrent(ns: NodeState, info_hash: str, mode: str,
     # Persist immediately so a restart before any download still restores it
     # (the session loop writes the actual .resume file from the alert).
     handle.save_resume_data(SAVE_FLAGS)
-    print(f"node {ns.node_id}: +{mode} '{tname}' [{info_hash[:8]}] "
-          f"({len(entry['files'])} files) save_path={save_path}", flush=True)
-    return {"info_hash": info_hash, "name": tname, "mode": mode, "added": True}
+    print(f"node {ns.node_id}: +'{tname}' [{info_hash[:8]}] "
+          f"({len(entry['files'])} files) -> {save_path}", flush=True)
+    return {"info_hash": info_hash, "name": tname, "added": True}
 
 
 def remove_torrent(ns: NodeState, info_hash: str) -> dict:
@@ -452,15 +412,27 @@ def publish(ns: NodeState, path: str) -> dict:
         known = info_hash in ns.catalog
     if not known:
         store_torrent(ns, name, info_hash, blob)
-    res = add_torrent(ns, info_hash, "serve", path)
+    res = add_torrent(ns, info_hash, serve_path=path)
     return {"name": name, "info_hash": info_hash, "published": not known,
             "serving": res.get("added", False), "note": res.get("note")}
 
 
-def _write_resume(node_id: int, alert) -> None:
-    os.makedirs(resume_dir(node_id), exist_ok=True)
-    info_hash = str(alert.handle.info_hashes().v2)
-    path = os.path.join(resume_dir(node_id),
+def _write_resume(ns: NodeState, alert) -> None:
+    """Checkpoint one torrent's fast-resume data.
+
+    The name comes from the alert's own params, not from its handle: a handle
+    whose torrent has already been removed reports an all-zero info-hash, so the
+    checkpoint would be filed under a name that does not match its contents,
+    that /remove never cleans up, and that silently brings the dataset back on
+    the next restart. For the same reason a checkpoint still in flight when the
+    torrent is dropped is discarded rather than written."""
+    info_hash = str(alert.params.info_hashes.v2)
+    with ns.lock:
+        held = info_hash in ns.torrents
+    if not held:
+        return
+    os.makedirs(resume_dir(ns.node_id), exist_ok=True)
+    path = os.path.join(resume_dir(ns.node_id),
                         f"{slug(alert.torrent_name, info_hash)}.resume")
     with open(path, "wb") as f:
         f.write(lt.write_resume_data_buf(alert.params))
@@ -505,7 +477,7 @@ def flush_resume(ns: NodeState) -> None:
     while pending > 0 and time.time() < deadline:
         for a in ns.ses.pop_alerts():
             if isinstance(a, lt.save_resume_data_alert):
-                _write_resume(ns.node_id, a)
+                _write_resume(ns, a)
                 pending -= 1
             elif isinstance(a, lt.save_resume_data_failed_alert):
                 pending -= 1
@@ -515,34 +487,23 @@ def flush_resume(ns: NodeState) -> None:
 def session_loop(ns: NodeState) -> None:
     loops = 0
     while not ns.stop.is_set():
-        ns.ses.post_session_stats()
         ns.stop.wait(config.NODE_LOOP_INTERVAL)  # sleep, but wake promptly on stop
         loops += 1
         for a in ns.ses.pop_alerts():
-            if isinstance(a, lt.session_stats_alert):
-                ns.session_stats = collect_session_stats(a.values)
-            elif isinstance(a, lt.save_resume_data_alert):
-                _write_resume(ns.node_id, a)
+            if isinstance(a, lt.save_resume_data_alert):
+                _write_resume(ns, a)
             # save_resume_data_failed_alert: nothing to persist yet; ignore.
 
         with ns.lock:
             entries = list(ns.torrents.values())
 
-        torrents, peers = [], []
-        for e in entries:
-            st = e["handle"].status()
-            torrents.append(torrent_dict(st, e["ti"], e["files"]))
-            for p in e["handle"].get_peer_info():
-                peers.append(peer_dict(p, e["name"]))
-
         snap = {
             "node_key": ns.node_key,    # stable swarm-wide identity
             "ts": time.time(),
             "bt_port": config.bt_port(ns.node_id),
-            "session": ns.session_stats,
             "disk": node_disk(ns.node_id),
-            "torrents": torrents,
-            "peers": peers,
+            "torrents": [torrent_dict(e["handle"].status(), e["ti"], e["files"])
+                         for e in entries],
         }
         with ns.lock:
             ns.snapshot = snap
@@ -586,9 +547,8 @@ def make_want(policy: str):
 
 def self_beacon(ns: NodeState) -> dict:
     """Who we are, as the swarm sees us. Deliberately says nothing about our
-    address: a receiver reads that off the datagram's source (or, for the /peers
-    hello this doubles as, off the connection), so no node ever has to work out
-    (or be told) its own routable IP."""
+    address: a receiver reads that off the datagram's source, so no node ever has
+    to work out (or be told) its own routable IP."""
     with ns.lock:
         digest = ns.digest
     return {"v": beacon.VERSION, "node": ns.node_key,
@@ -603,7 +563,7 @@ def note_peer(ns: NodeState, key: str, ip: str, bt: int, http: int,
         return
     with ns.lock:
         peer = ns.peers.setdefault(key, {"pulled": None})
-        # Don't let a stale gossiped entry pull a fresher one backwards.
+        # Never let an older sighting overwrite a fresher one.
         if last_seen >= peer.get("last_seen", 0):
             peer.update({"ip": ip, "bt": bt, "http": http, "cat": cat,
                          "last_seen": last_seen})
@@ -656,26 +616,6 @@ def pull_catalog(ns: NodeState, key: str, peer: dict) -> None:
             ns.peers[key]["pulled"] = digest
 
 
-def gossip(ns: NodeState, base: str, fallback_ip: str = None) -> None:
-    """Ask one node for its view of the swarm and merge it into ours.
-
-    This is what makes --peer enough to join: dialling a single address teaches
-    us that node (its "self" block) *and* everyone it can see. Peers learned this
-    way carry the age they had at the source, so a node that actually died decays
-    out of everyone's table instead of being resurrected by gossip.
-    """
-    view = catalog.fetch_peers(base, me=self_beacon(ns))
-    now = time.time()
-    me = view.get("self") or {}
-    if me.get("node"):
-        note_peer(ns, me["node"], me.get("ip") or fallback_ip, me.get("bt"),
-                  me.get("http"), me.get("cat"), now)
-    for p in view.get("peers") or []:
-        if p.get("ip") and p.get("node"):
-            note_peer(ns, p["node"], p["ip"], p.get("bt"), p.get("http"),
-                      p.get("cat"), now - (p.get("age") or 0))
-
-
 def take_wanted(ns: NodeState) -> None:
     """Step 4: the policy. Everything the node knows of but doesn't hold gets
     offered to want(); whatever it accepts starts downloading."""
@@ -686,7 +626,7 @@ def take_wanted(ns: NodeState) -> None:
         if not ns.want(meta):
             continue
         try:
-            add_torrent(ns, info_hash, "download")
+            add_torrent(ns, info_hash)
         except Exception as exc:
             print(f"node {ns.node_id}: can't take {meta['name']!r} "
                   f"[{info_hash[:8]}]: {exc}", flush=True)
@@ -709,23 +649,6 @@ def mesh(ns: NodeState) -> None:
                 pass  # torrent not ready, or peer already known
 
 
-def gossip_round(ns: NodeState) -> None:
-    """Trade peer lists with everyone we can reach.
-
-    Beacons already cover the local segment, so this exists for the edges: it is
-    how a --peer bootstrap joins (static peers are dialled whether or not we have
-    ever heard a beacon from them) and, because asking is also introducing
-    ourselves, how the rest of the swarm comes to know about *us*."""
-    with ns.lock:
-        known = [(p["ip"], p["http"]) for p in ns.peers.values()
-                 if p.get("ip") and p.get("http")]
-    for host, port in list(ns.static) + known:
-        try:
-            gossip(ns, f"http://{host}:{port}", fallback_ip=host)
-        except Exception:
-            pass  # a peer that is down is not our problem; it will expire
-
-
 def pull_catalogs(ns: NodeState) -> None:
     """Step 3: learn what everyone else knows exists."""
     with ns.lock:
@@ -742,20 +665,16 @@ def pull_catalogs(ns: NodeState) -> None:
 
 def sync_loop(ns: NodeState, sock) -> None:
     """The engine. One tick of the five steps, forever."""
-    tick = 0
     while not ns.stop.is_set():
         try:
             beacon.send(sock, self_beacon(ns))       # 1. say who we are
             drain_beacons(ns, sock)                  # 2. hear who else is here
             expire_peers(ns)
-            if tick % config.GOSSIP_EVERY == 0:
-                gossip_round(ns)                     #    (and, for the edges)
             pull_catalogs(ns)                        # 3. learn what exists
             take_wanted(ns)                          # 4. decide what to hold
             mesh(ns)                                 # 5. wire peers into torrents
         except Exception:
             traceback.print_exc()
-        tick += 1
         ns.stop.wait(config.BEACON_INTERVAL)
 
 
@@ -808,32 +727,11 @@ def make_handler(ns: NodeState):
                            for ih, m in ns.catalog.items()]
                 self._send_json(sorted(cat, key=lambda m: (m["name"], m["info_hash"])))
             elif path == "/peers":
-                # A GET here is also a hello: whoever asked told us who they are
-                # in the query string, and their address is the connection's.
-                self._note_caller(parse_qs(urlsplit(self.path).query))
                 self._send_json(self._peers_view())
             elif path.startswith("/catalog/"):
                 self._catalog_file(path[len("/catalog/"):])
             else:
                 self._send_json({"error": "not found"}, 404)
-
-        def _note_caller(self, query: dict) -> None:
-            """Record a peer that introduced itself by asking us for /peers.
-
-            The mirror image of a beacon: identity from the message, address from
-            the connection. This is what makes a --peer bootstrap two-way, so a
-            node that multicast can't reach still becomes visible to the swarm."""
-            def one(key, cast=str):
-                vals = query.get(key)
-                try:
-                    return cast(vals[0]) if vals else None
-                except (TypeError, ValueError):
-                    return None
-            key = one("node")
-            if not key:
-                return
-            note_peer(ns, key, self.client_address[0], one("bt", int),
-                      one("http", int), one("cat"), time.time())
 
         def _peers_view(self) -> dict:
             now = time.time()
@@ -875,7 +773,7 @@ def make_handler(ns: NodeState):
                     self._send_json(publish(ns, body["path"]))
                 elif self.path == "/add":
                     info_hash = resolve(ns, body.get("info_hash"), body.get("name"))
-                    self._send_json(add_torrent(ns, info_hash, "download"))
+                    self._send_json(add_torrent(ns, info_hash))
                 elif self.path == "/remove":
                     info_hash = resolve(ns, body.get("info_hash"), body.get("name"))
                     self._send_json(remove_torrent(ns, info_hash))
@@ -908,16 +806,13 @@ def main() -> None:
     # how the node is identified in the swarm (that's the node_key UUID). One
     # node per host is the common case, so it defaults to 0.
     ap.add_argument("--id", type=int, default=0)
-    ap.add_argument("--replicate", choices=["manual", "all"],
-                    default=config.REPLICATE_DEFAULT,
+    # What a node does with a dataset it discovers but doesn't hold. Defaults to
+    # manual, so a node never commits disk that wasn't asked for.
+    ap.add_argument("--replicate", choices=["manual", "all"], default="manual",
                     help="what to do with datasets this node discovers: "
                          "'manual' (default) takes nothing unless told to with "
                          "control.py add; 'all' mirrors every dataset it learns "
                          "about")
-    ap.add_argument("--peer", action="append", default=[], metavar="HOST[:PORT]",
-                    help="bootstrap from a known node instead of relying on the "
-                         "multicast beacon; repeatable. One is enough - the rest "
-                         "of the swarm is learned by gossip.")
     args = ap.parse_args()
 
     # Treat SIGTERM like Ctrl-C (raise KeyboardInterrupt) so the node shuts down
@@ -927,7 +822,6 @@ def main() -> None:
 
     node_key = load_or_create_node_key(args.id)
     ns = NodeState(args.id, node_key, make_session(args.id), make_want(args.replicate))
-    ns.static = [config.parse_endpoint(p) for p in args.peer]
     load_catalog(ns)                 # what this node already knows exists
     resumed = load_resumes(ns)       # what it was holding before a restart
 
@@ -947,11 +841,10 @@ def main() -> None:
     # threads they'd keep the process alive after Ctrl-C, hanging shutdown.
     srv.daemon_threads = True
     state = f"{len(ns.catalog)} known, {resumed} held"
-    boot = f"  bootstrap:{','.join(f'{h}:{p}' for h, p in ns.static)}" if ns.static else ""
     print(f"node {args.id} up [{node_key[:8]}] - bt:{config.bt_port(args.id)} "
-          f"http://{config.ADVERTISE_IP}:{config.stats_port(args.id)}/  "
+          f"http:{config.stats_port(args.id)}  "
           f"beacon:{config.BEACON_GROUP}:{config.BEACON_PORT}  "
-          f"replicate:{args.replicate}  ({state}){boot}", flush=True)
+          f"replicate:{args.replicate}  ({state})", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

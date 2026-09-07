@@ -6,6 +6,7 @@
     python control.py status   10.0.0.5           # datasets it actually holds
     python control.py add      10.0.0.6 photos    # manual mode: take that one
     python control.py remove   10.0.0.6 photos    # drop it
+    python control.py map      10.0.0.5           # who holds which pieces, swarm-wide
 
 Nodes are addressed by their HTTP endpoint, "host[:port]" (port defaults to the
 standard control port, so on its own IP a node is just its address). Several
@@ -25,6 +26,7 @@ import urllib.request
 
 import catalog
 import config
+import swarm_stats
 
 # A dataset reference that looks like hex is treated as an info-hash, in full or
 # shortened to any unique leading portion — so the 16-character forms `list` and
@@ -96,7 +98,7 @@ def cmd_list(args) -> None:
         t = held.get(m["info_hash"])
         if not t:
             state = "-"
-        elif t.get("is_seeding") or (t.get("progress") or 0) >= 1.0:
+        elif t.get("complete"):
             state = "complete"
         else:
             state = f"{(t.get('progress') or 0) * 100:.0f}%"
@@ -113,8 +115,8 @@ def cmd_peers(args) -> None:
           f"({me.get('held',0)} held / {me.get('known',0)} known)")
     peers = view.get("peers") or []
     if not peers:
-        print("\nno peers seen yet. If they're on another segment, start the node "
-              "with --peer <a-known-node>.")
+        print("\nno peers seen yet. Nodes find each other by multicast beacon, so "
+              "they must share a segment.")
         return
     print(f"\n{'node':<10} {'address':<22} {'catalog':<13} last seen")
     for p in peers:
@@ -136,8 +138,7 @@ def cmd_status(args) -> None:
         return
     parts = []
     for t in torrents:
-        complete = t.get("is_seeding") or (t.get("progress") or 0) >= 1.0
-        role = "seed" if complete else "leech"
+        role = "seed" if t.get("complete") else "leech"
         parts.append(f"{t.get('name', '?')}[{role} "
                      f"{(t.get('progress') or 0) * 100:.0f}% p{t.get('num_peers') or 0}]")
     print(f"{args.endpoint}: " + "  ".join(parts))
@@ -180,7 +181,132 @@ def cmd_remove(args) -> None:
           "- it stays in the catalog, and the files stay on disk")
 
 
+# --- the swarm map -----------------------------------------------------------
+# Who holds which pieces, and equivalently how many copies of each file exist.
+# Every node's /stats carries its own piece bitfield; catalog.fetch_swarm reads
+# all of them through whichever node you name, so nothing but the nodes
+# themselves has to be running. The arithmetic is swarm_stats, shared with the
+# web dashboard, so the two views can never disagree about how many copies exist.
+
+MAX_COLS = 100            # max width of the piece map (pieces are bucketed above this)
+HAVE, MISS = "█", "·"   # full block / middle dot
+SHADES = "▁▂▃▄▅▆▇█"  # 1/8 .. 8/8 blocks
+
+
+def human(n: float) -> str:
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if n < 1024 or unit == "GiB":
+            return f"{n:.1f} {unit}" if unit != "B" else f"{int(n)} B"
+        n /= 1024
+
+
+def render_bits(bits: list, num_pieces: int, cols: int) -> str:
+    if cols >= num_pieces:
+        return "".join(HAVE if b else MISS for b in bits)
+    out = []
+    for c in range(cols):
+        seg = bits[c * num_pieces // cols:(c + 1) * num_pieces // cols]
+        frac = sum(seg) / len(seg)
+        if frac == 0:
+            out.append(MISS)
+        elif frac >= 1:
+            out.append(HAVE)
+        else:
+            out.append(SHADES[min(len(SHADES) - 2, int(frac * len(SHADES)))])
+    return "".join(out)
+
+
+def render_avail(avail: list, num_pieces: int, cols: int) -> str:
+    def cell(v):
+        return str(v) if v < 10 else "+"
+    if cols >= num_pieces:
+        return "".join(cell(a) for a in avail)
+    return "".join(cell(min(avail[c * num_pieces // cols:(c + 1) * num_pieces // cols]))
+                   for c in range(cols))
+
+
+def render_torrent(meta: dict, rows: list) -> None:
+    num_pieces = meta["num_pieces"]
+    piece_length = meta["piece_length"]
+    total_size = meta["total_size"]
+    name = meta["name"]
+    files = meta["files"]
+
+    avail = swarm_stats.availability(rows, num_pieces)
+    min_avail = min(avail)
+    total_have = sum(avail)
+    labels = {r["id"]: r["label"] for r in rows}  # node_key -> short display name
+    full_copies = [r["label"] for r in rows if all(r["bits"])]
+    cols = min(num_pieces, MAX_COLS)
+
+    print(f"Swarm piece map  -  '{name}'  {human(total_size)} in {len(files)} file(s), "
+          f"{num_pieces} pieces x {human(piece_length)}")
+    print(f"info hash (v2): {meta['info_hash'][:16]}...  |  nodes seen: {len(rows)}")
+    if cols < num_pieces:
+        print(f"(map bucketed: {num_pieces} pieces into {cols} columns)")
+
+    print("\nCopies of the complete dataset:")
+    print(f"  full copies (one node has everything) : {len(full_copies)}"
+          f"{'  (nodes: ' + ','.join(map(str, full_copies)) + ')' if full_copies else ''}")
+    print(f"  complete copies incl. partial holders : {min_avail}"
+          f"   (rarest piece is held by {min_avail} node(s))")
+    print(f"  redundancy (avg copies per piece)     : {total_have / num_pieces:.2f}x")
+    print(f"  fully available in swarm              : {'yes' if min_avail >= 1 else 'NO - missing pieces!'}")
+    print(f"  total data stored across swarm        : {human(total_have * piece_length)}")
+
+    label_w = 24
+    print(f"\nPer-node ownership ({HAVE} = has piece, {MISS} = missing):")
+    for r in rows:
+        have = sum(r["bits"])
+        pct = 100 * have / num_pieces
+        stored = sum(swarm_stats.piece_size(i, piece_length, total_size, num_pieces)
+                     for i, b in enumerate(r["bits"]) if b)
+        role = "seed" if have == num_pieces else "leech"
+        label = f"  {r['label']} {role:<5} {pct:5.1f}% {have:>4}/{num_pieces:<4}"
+        print(f"{label:<{label_w}} {render_bits(r['bits'], num_pieces, cols)}  {human(stored)}")
+    print(f"{'  availability  (#holders)':<{label_w}} {render_avail(avail, num_pieces, cols)}")
+
+    print("\nAvailability histogram (pieces grouped by #holders):")
+    for k in range(len(rows), -1, -1):
+        cnt = sum(1 for a in avail if a == k)
+        if cnt:
+            tag = "  <- MISSING from swarm" if k == 0 else ""
+            print(f"  {k} node(s): {cnt:>4} pieces{tag}")
+
+    if files:
+        print("\nPer-file copies (full = a node holds the entire file):")
+        print(f"  {'file':<34} {'size':>9} {'full':>5} {'recon':>6}  "
+              f"holders / partial%")
+        for f in sorted(swarm_stats.per_file(rows, files, avail),
+                        key=lambda f: f["path"]):
+            disp = f["path"]
+            if name and disp.startswith(name + "/"):
+                disp = disp[len(name) + 1:]
+            holders = ",".join(f"{labels.get(i, i)}" for i in f["full_holders"]) or "-"
+            partial = " ".join(f"{labels.get(i, i)}={pct:.0f}%" for i, pct in f["partial"])
+            extra = ("  partial: " + partial) if partial else ""
+            print(f"  {disp:<34} {human(f['size']):>9} {f['full_copies']:>5} "
+                  f"{f['recon_copies']:>6}  {holders}{extra}")
+
+
+def cmd_map(args) -> None:
+    try:
+        snaps, _ = catalog.fetch_swarm(catalog.base_url(args.endpoint))
+    except Exception:
+        _unreachable(args.endpoint)
+    torrents = swarm_stats.collect_by_torrent(snaps)
+    if not torrents:
+        print("No node is holding anything yet "
+              "(check: python control.py peers, then status).")
+        return
+    for i, (meta, rows) in enumerate(torrents):
+        if i:
+            print("\n" + "=" * 78)
+        render_torrent(meta, rows)
+
+
 def main() -> None:
+
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -201,6 +327,7 @@ def main() -> None:
     with_endpoint("list", "datasets a node knows of", cmd_list)
     with_endpoint("peers", "nodes a node can see", cmd_peers)
     with_endpoint("status", "datasets a node actually holds", cmd_status)
+    with_endpoint("map", "who holds which pieces, swarm-wide", cmd_map)
 
     p_pub = with_endpoint("publish", "put a local file/dir into the swarm",
                           cmd_publish, required=True)
