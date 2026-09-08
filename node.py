@@ -376,10 +376,13 @@ def cursor_since(ns: NodeState, token: str) -> int:
 def holdings(ns: NodeState, since: str = None) -> dict:
     """What this node holds: everything, or only what changed since a cursor.
 
-    Rows are deliberately no more than (info_hash, state). Progress and rates are
-    left out on purpose — they move every second, so including them would put
-    every in-flight transfer into the stream continuously and defeat the cursor
-    entirely. They are on /transfers instead.
+    A row is the dataset's identity (info_hash, name, total_size, piece_length)
+    and what this node has of it (state). Progress and rates are left out on
+    purpose — they move every second, so including them would put every in-flight
+    transfer into the stream continuously and defeat the cursor entirely. They
+    are on /transfers instead. The identity fields are exempt from that reasoning
+    because they never change, and they are what lets a reader union these
+    streams into a catalog without a lookup per dataset.
 
     `state` is "downloading" or "complete", and in a delta also "gone": the
     tombstone that tells a reader a dataset was dropped rather than merely
