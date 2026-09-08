@@ -1,20 +1,19 @@
 """Peer discovery: the multicast beacon, on the wire.
 
 Every node multicasts a tiny datagram to the local segment every tick — who it
-is, its ports, and where it is in its own stream of what it holds — and reads
-everyone else's. That one mechanism replaces the tracker: it answers both "which
-nodes exist" and "has anyone got something I haven't seen", and a peer's address
-comes free as the datagram's source, so no node ever has to work out (or be told)
-its own routable address.
+is and where to reach it — and reads everyone else's. That one mechanism replaces
+the tracker: it answers "which nodes exist", and a peer's address comes free as
+the datagram's source, so no node ever has to work out (or be told) its own
+routable address.
 
 The message is JSON, and this is the whole of it:
 
-    {"v": 1, "node": <node_key>, "bt": <port>, "http": <port>, "hold": <cursor>}
+    {"v": 1, "node": <node_key>, "bt": <port>, "http": <port>}
 
-`hold` is that node's holdings cursor. It replaced a digest of the node's
-catalog, which had to be recomputed over everything known on every change — and
-which, once publishing never stops, was never equal twice, so it gated nothing.
-A cursor says the same thing in a form that also says *where to carry on from*.
+Identity and ports, and nothing about what the node holds. What a peer does with
+another is ask it for a .torrent or move bytes with it, and both need only an
+address; what everyone holds is a question for whoever is reading the whole
+swarm, over HTTP, and not something to put on a datagram every tick.
 
 Deliberately no address field — see above. `v` is the only thing a receiver
 insists on; anything else is ignored, so the datagram can grow.
@@ -75,7 +74,7 @@ def drain(sock) -> list:
     """Every beacon waiting on the socket, as (message, sender_ip) pairs.
 
     Takes in one tick's worth without blocking (hence no listener thread). At
-    ~120 bytes every couple of seconds the socket buffer holds far more than a
+    ~80 bytes every couple of seconds the socket buffer holds far more than a
     tick's worth, so nothing is missed between drains. Garbage on a well-known
     port is somebody else's traffic, not an error: it is skipped silently.
     """

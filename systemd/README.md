@@ -31,13 +31,9 @@ That is the whole install on every machine. A node needs no configuration and no
 addresses at all — it discovers its peers on the local network, and nothing,
 including the optional dashboard, has to be pointed at it.
 
-As shipped, the unit stores nothing it wasn't asked for: the node joins, tracks
-the whole catalog and serves what it holds, and you name the datasets it should
-keep. To have a machine mirror everything instead, add the flag:
-
-```ini
-ExecStart=python3 node.py --replicate all
-```
+The unit stores nothing it wasn't asked for: the node joins, serves what it
+holds, and you name the datasets it should keep. Nothing arrives on a machine
+unasked.
 
 Editing a unit after it is running takes a `systemctl --user daemon-reload` and a
 `restart` of it to take effect.
@@ -58,13 +54,11 @@ Then put some data in, from wherever you can reach a node:
 # confirm they found each other
 python control.py peers   <node-address>
 python control.py publish <node-address> /path/to/data
-# every node now knows about it
+# the swarm's catalog, read through any node
 python control.py list    <other-node>
 # ...and this one keeps a copy
 python control.py add     <other-node> <name>
 ```
-
-The last step is only needed on nodes that aren't running `--replicate all`.
 
 ## The optional dashboard
 
@@ -84,7 +78,8 @@ either — they have no dashboard setting, and because it only ever listens and
 never beacons back, they cannot tell whether anyone is watching.
 
 Only where multicast doesn't reach does it need naming a node in the unit's
-`ExecStart=`, the same escape hatch a node has:
+`ExecStart=` — the dashboard's one escape hatch, and one a node has no equivalent
+of:
 
 ```ini
 ExecStart=python3 collector.py node0.example:8001

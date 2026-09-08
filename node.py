@@ -1,8 +1,8 @@
 """A collab-cluster node: the whole system, in one program.
 
-Run one per host. Nodes find each other with a UDP multicast beacon, learn what
-datasets exist by pulling each other's catalogs, and move the bytes with
-BitTorrent v2. There is no tracker, no central catalog and no coordinator.
+Run one per host. Nodes find each other with a UDP multicast beacon and move the
+bytes with BitTorrent v2. There is no tracker, no central catalog and no
+coordinator.
 
   GET  /stats                    what this node is, as a whole: disk, counts,
                                  throughput, and the cursor below. Constant
@@ -23,10 +23,9 @@ BitTorrent v2. There is no tracker, no central catalog and no coordinator.
                                  whoever holds the data has the torrent.
   GET  /peers                    {"self": {...}, "peers": [...]} — this node's
                                  view of the swarm.
-  POST /publish  {"path": ...}   hash a local file/dir into a dataset, put it in
-                                 this node's catalog, and seed it in place. This
-                                 is the only way data enters the swarm, and it
-                                 works the same in every replication mode.
+  POST /publish  {"path": ...}   hash a local file/dir into a dataset and seed it
+                                 in place. This is the only way data enters the
+                                 swarm.
   POST /add      {"info_hash": ...}            take a dataset from whoever has it
   POST /remove   {"info_hash"|"name": ...}     drop one
 
@@ -45,11 +44,14 @@ much this node holds.
 There is no catalog here, and that is the second half of the same idea.
 Publishing seeds the data in place, so a dataset has a holder from the instant it
 exists and the union of every node's holdings is exactly the set of datasets in
-the swarm. A node learns what exists by following its peers' streams and
-forgetting the rows it doesn't act on; it keeps a .torrent only for what it
-holds. Nothing it stores scales with the catalog either. Two things follow:
-"which datasets exist" is a question for whoever is watching the whole swarm and
-not for any one node, and a dataset lives exactly as long as someone holds it.
+the swarm. A node knows only what it holds — it keeps a .torrent for that and
+nothing about any other dataset — so nothing it stores scales with the catalog
+either. Two things follow: "which datasets exist" is a question for whoever is
+watching the whole swarm and not for any one node, and a dataset lives exactly as
+long as someone holds it.
+
+What a node holds is only ever what it was given: /publish puts local data in,
+/add takes a copy of somebody else's. Nothing arrives unasked.
 """
 import argparse
 import glob
@@ -90,7 +92,7 @@ CHANGE_LOG_LIMIT = 10000
 
 
 class NodeState:
-    def __init__(self, node_id: int, node_key: str, ses: "lt.session", want):
+    def __init__(self, node_id: int, node_key: str, ses: "lt.session"):
         self.node_id = node_id
         # Stable swarm-wide identity (a persisted UUID). The integer node_id is a
         # local convenience (ports, data dirs); node_key is how peers tell each
@@ -98,22 +100,21 @@ class NodeState:
         # keeps the same series.
         self.node_key = node_key
         self.ses = ses
-        # want(meta) -> bool: the one policy knob. See make_want().
-        self.want = want
         self.lock = threading.Lock()
         # info_hash(v2 str) -> {name, save_path, ti, files, handle, state,
         # total_size, piece_length} — the data we hold, and the whole of what
         # this node knows about any dataset. There is no second dict of datasets
-        # it merely knows of: the holdings streams are the catalog, so a node
-        # follows its peers' and keeps only what it took. `state` is
-        # "downloading" or "complete", set where the transition happens (add,
-        # finish, remove) rather than rediscovered by polling every torrent, and
-        # read by mesh(), which only offers peers to torrents still missing data.
+        # it merely knows of: a node holds what it was given or told to take and
+        # knows nothing at all about the rest, so "which datasets exist" is a
+        # question for whoever can see every node. `state` is "downloading" or
+        # "complete", set where the transition happens (add, finish, remove)
+        # rather than rediscovered by polling every torrent, and read by mesh(),
+        # which only offers peers to torrents still missing data.
         self.torrents: dict = {}
-        # node_key -> {ip, bt, http, hold, followed, last_seen} — other nodes we
-        # can see. Beacons are the only way in: a node we cannot hear, we do not
-        # know. `hold` is where that peer says it is in its own holdings stream,
-        # `followed` is where we have read it to.
+        # node_key -> {ip, bt, http, last_seen} — other nodes we can see.
+        # Beacons are the only way in: a node we cannot hear, we do not know.
+        # Addresses are all we want from them: a peer is somewhere to fetch a
+        # .torrent from and somewhere to point a torrent that still needs bytes.
         self.peers: dict = {}
         # --- how a reader follows what we hold -------------------------------
         # `torrents` changes only on a transition, so it is published as a stream
@@ -672,14 +673,14 @@ def remove_torrent(ns: NodeState, info_hash: str) -> dict:
 
 
 def publish(ns: NodeState, path: str) -> dict:
-    """Put local data into the swarm. The only way in, identical in every mode.
+    """Put local data into the swarm. The only way in.
 
     Hash the path into a v2 torrent and seed it in place — nothing is copied.
     Publishing *is* starting to hold it, which is what makes the holdings streams
     the catalog: a dataset exists from the moment someone has it, and there is no
     separate list for it to be added to. The transition goes into this node's
-    stream, peers see it on the next tick, and what they do about it is their own
-    want() decision.
+    stream, where anyone watching the swarm sees it; putting a copy on another
+    node is a separate instruction to that node.
     """
     name, info_hash, blob = make_torrent.build(path)   # raises ValueError
     with ns.lock:
@@ -851,36 +852,15 @@ def session_loop(ns: NodeState) -> None:
 
 # --- the engine --------------------------------------------------------------
 # One tick, every BEACON_INTERVAL:
-#   1. beacon   say who we are and where we are in our holdings stream
+#   1. beacon   say who we are
 #   2. peers    drain everyone else's beacons
-#   3. holdings follow any peer whose cursor moved — which is how a node learns
-#               what exists, since the holdings streams are the catalog
-#   4. want()   offered each dataset once, as it appears
-#   5. mesh     hand every known peer to every torrent still missing data
-# That's the whole distributed system. Everything below is those five steps.
-
-def make_want(policy: str):
-    """The single policy knob: shown a dataset we don't hold, do we want a copy?
-
-    A standing rule, evaluated on a dataset as it appears in a peer's stream
-    rather than re-run over everything every tick. So it must decide from the
-    dataset alone — it cannot wait for free space and change its mind later. That
-    is deliberate: placing a dataset on a particular node is an instruction
-    (/add), not something a node talks itself into.
-
-    "manual" wants nothing on its own, so a node only holds what someone asked it
-    for. It is the default because storing data is the one thing a node cannot
-    undo cheaply — everything else it does (discovery, following its peers,
-    serving what it has) costs nothing and happens regardless.
-
-    "all" mirrors everything, so the swarm converges on one complete copy per
-    node with no operator input at all.
-    """
-    if policy == "manual":
-        return lambda row: False
-    if policy == "all":
-        return lambda row: True
-    raise ValueError(f"unknown replication policy: {policy!r}")
+#   3. mesh     hand every known peer to every torrent still missing data
+# That's the whole distributed system. Everything below is those three steps.
+#
+# Nothing here decides what to store. A node holds what it published and what it
+# was told to take, and nothing arrives on it unasked — storing is the one thing
+# a node cannot undo cheaply, so it is always an instruction (/add) rather than
+# something a node talks itself into.
 
 
 def self_beacon(ns: NodeState) -> dict:
@@ -888,31 +868,23 @@ def self_beacon(ns: NodeState) -> dict:
     address: a receiver reads that off the datagram's source, so no node ever has
     to work out (or be told) its own routable IP.
 
-    `hold` is our position in our own holdings stream, so a peer can tell from
-    the datagram alone whether there is anything new to follow. It replaced a
-    digest of the catalog, which had to be recomputed over everything known on
-    every change and, once publishing is continuous, was never equal twice."""
-    with ns.lock:
-        cursor = cursor_of(ns)
+    Identity and ports, and nothing else: what a peer does with us is to ask us
+    for a .torrent or to send us bytes, and both need only an address."""
     return {"v": beacon.VERSION, "node": ns.node_key,
             "bt": config.bt_port(ns.node_id),
-            "http": config.stats_port(ns.node_id), "hold": cursor}
+            "http": config.stats_port(ns.node_id)}
 
 
 def note_peer(ns: NodeState, key: str, ip: str, bt: int, http: int,
-              hold: str, last_seen: float) -> None:
-    """Record (or refresh) a peer. Never records ourselves.
-
-    `hold` is where that peer says it is in its own holdings stream; `followed`
-    is where we last read it to. They differ exactly when there is something to
-    pull."""
+              last_seen: float) -> None:
+    """Record (or refresh) a peer. Never records ourselves."""
     if not key or key == ns.node_key:
         return
     with ns.lock:
-        peer = ns.peers.setdefault(key, {"followed": None})
+        peer = ns.peers.setdefault(key, {})
         # Never let an older sighting overwrite a fresher one.
         if last_seen >= peer.get("last_seen", 0):
-            peer.update({"ip": ip, "bt": bt, "http": http, "hold": hold,
+            peer.update({"ip": ip, "bt": bt, "http": http,
                          "last_seen": last_seen})
 
 
@@ -920,8 +892,7 @@ def drain_beacons(ns: NodeState, sock) -> None:
     """Record everyone who announced themselves since the last tick."""
     now = time.time()
     for msg, ip in beacon.drain(sock):
-        note_peer(ns, msg.get("node"), ip, msg.get("bt"), msg.get("http"),
-                  msg.get("hold"), now)
+        note_peer(ns, msg.get("node"), ip, msg.get("bt"), msg.get("http"), now)
 
 
 def expire_peers(ns: NodeState) -> None:
@@ -932,74 +903,8 @@ def expire_peers(ns: NodeState) -> None:
             del ns.peers[key]
 
 
-def pull_holdings(ns: NodeState, key: str, peer: dict) -> None:
-    """Steps 3 and 4: follow a peer's holdings stream, and want() what it shows.
-
-    This is how a node learns what exists. There is no catalog to pull: every
-    dataset has a holder from the moment it is published, so the union of these
-    streams is the set of datasets in the swarm — and following them costs the
-    changes rather than the whole list.
-
-    Rows are processed and forgotten. The only things kept are the cursor and
-    whatever want() decided to take, so a node's memory is bounded by what it
-    stores rather than by how large the swarm's catalog has grown. want() sees
-    each dataset once per peer that announces it; it is a standing rule, so
-    seeing it again is harmless and says the same thing.
-
-    Gated on the peer's beacon cursor, so a settled swarm does no HTTP at all.
-    """
-    if peer.get("hold") and peer["hold"] == peer.get("followed"):
-        return
-    base = f"http://{peer['ip']}:{peer['http']}"
-    for cursor in (peer.get("followed"), None):
-        try:
-            while True:
-                page = catalog.fetch_holdings(base, since=cursor)
-                for row in page.get("holdings") or []:
-                    consider(ns, key, row)
-                cursor = page["cursor"]
-                if not page.get("more"):
-                    break
-        except catalog.Resync:
-            # That peer restarted, or trimmed away what we asked for. Drop the
-            # cursor and read its whole stream once — it is telling us so rather
-            # than answering "nothing new", which is the point of the cursor
-            # being its to interpret and not ours.
-            continue
-        with ns.lock:
-            if key in ns.peers:
-                ns.peers[key]["followed"] = cursor
-        return
-
-
-def consider(ns: NodeState, key: str, row: dict) -> None:
-    """One row of a peer's stream: a dataset it holds, so a dataset that exists.
-
-    A "gone" row is nothing to act on — it says that peer stopped holding it,
-    which is a fact about the peer. Whether any copy is left is a question about
-    the whole swarm, and so a question for whoever is watching all of it.
-    """
-    info_hash = row.get("info_hash")
-    if not info_hash or row.get("state") == "gone":
-        return
-    with ns.lock:
-        if info_hash in ns.torrents:
-            return
-    if not ns.want(row):
-        return
-    try:
-        take(ns, info_hash)
-    except FileNotFoundError:
-        print(f"node {ns.node_id}: wanted {row.get('name')!r} "
-              f"[{info_hash[:8]}] but no peer would serve its torrent",
-              flush=True)
-    except Exception as exc:
-        print(f"node {ns.node_id}: can't take {row.get('name')!r} "
-              f"[{info_hash[:8]}]: {exc}", flush=True)
-
-
 def mesh(ns: NodeState) -> None:
-    """Step 5: what the tracker used to do. Hand every known peer to every
+    """Step 3: what the tracker used to do. Hand every known peer to every
     torrent that still needs data, and let libtorrent take it from there.
 
     A complete torrent is skipped because it needs nobody: in BitTorrent the
@@ -1008,8 +913,8 @@ def mesh(ns: NodeState) -> None:
     anything to offer. So a settled swarm holds no peer connections at all and
     does nothing here — the tick costs what is moving, not what is stored. A
     node that restarts and still wants data re-offers on its own next tick,
-    which is what heals the swarm; a node that restarts holding everything has
-    nothing to heal."""
+    which is what heals the swarm; one that restarts complete has nothing to
+    heal."""
     with ns.lock:
         handles = [e["handle"] for e in ns.torrents.values()
                    if e["state"] != "complete"]
@@ -1023,29 +928,14 @@ def mesh(ns: NodeState) -> None:
                 pass  # torrent not ready, or peer already known
 
 
-def follow_peers(ns: NodeState) -> None:
-    """Steps 3 and 4, over every peer: learn what exists, take what we want."""
-    with ns.lock:
-        peers = [(k, dict(p)) for k, p in ns.peers.items()]
-    for key, peer in peers:
-        if not peer.get("ip") or not peer.get("http"):
-            continue
-        try:
-            pull_holdings(ns, key, peer)
-        except Exception as exc:
-            print(f"node {ns.node_id}: following {key[:8]} failed: {exc}",
-                  flush=True)
-
-
 def sync_loop(ns: NodeState, sock) -> None:
-    """The engine. One tick of the five steps, forever."""
+    """The engine. One tick of the three steps, forever."""
     while not ns.stop.is_set():
         try:
             beacon.send(sock, self_beacon(ns))       # 1. say who we are
             drain_beacons(ns, sock)                  # 2. hear who else is here
             expire_peers(ns)
-            follow_peers(ns)                         # 3+4. learn, and want()
-            mesh(ns)                                 # 5. wire peers into torrents
+            mesh(ns)                                 # 3. wire peers into torrents
         except Exception:
             traceback.print_exc()
         ns.stop.wait(config.BEACON_INTERVAL)
@@ -1112,7 +1002,7 @@ def make_handler(ns: NodeState):
             now = time.time()
             with ns.lock:
                 peers = [{"node": key, "ip": p.get("ip"), "bt": p.get("bt"),
-                          "http": p.get("http"), "hold": p.get("hold"),
+                          "http": p.get("http"),
                           "age": round(now - p.get("last_seen", now))}
                          for key, p in ns.peers.items()]
                 held = len(ns.torrents)
@@ -1207,20 +1097,13 @@ def run(target, *args):
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="A collab-cluster node: peer discovery, catalog and "
-                    "replication in one self-sufficient process.")
+        description="A collab-cluster node: peer discovery, storage and "
+                    "transfer in one self-sufficient process.")
     # A node-local slot number: picks this node's data dir (nodes/<id>/) and, so
     # several nodes can share one host in a dev run, offsets its ports. It is not
     # how the node is identified in the swarm (that's the node_key UUID). One
     # node per host is the common case, so it defaults to 0.
     ap.add_argument("--id", type=int, default=0)
-    # What a node does with a dataset it discovers but doesn't hold. Defaults to
-    # manual, so a node never commits disk that wasn't asked for.
-    ap.add_argument("--replicate", choices=["manual", "all"], default="manual",
-                    help="what to do with datasets this node discovers: "
-                         "'manual' (default) takes nothing unless told to with "
-                         "control.py add; 'all' mirrors every dataset it learns "
-                         "about")
     args = ap.parse_args()
 
     # Treat SIGTERM like Ctrl-C (raise KeyboardInterrupt) so the node shuts down
@@ -1229,7 +1112,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, signal.default_int_handler)
 
     node_key = load_or_create_node_key(args.id)
-    ns = NodeState(args.id, node_key, make_session(args.id), make_want(args.replicate))
+    ns = NodeState(args.id, node_key, make_session(args.id))
     os.makedirs(catalog_dir(args.id), exist_ok=True)
     resumed = load_resumes(ns)       # what it was holding before a restart
 
@@ -1252,7 +1135,7 @@ def main() -> None:
     print(f"node {args.id} up [{node_key[:8]}] - bt:{config.bt_port(args.id)} "
           f"http:{config.stats_port(args.id)}  "
           f"beacon:{config.BEACON_GROUP}:{config.BEACON_PORT}  "
-          f"replicate:{args.replicate}  ({state})", flush=True)
+          f"({state})", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

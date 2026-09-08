@@ -4,7 +4,7 @@
     python control.py list     10.0.0.5           # every dataset, + what this node has
     python control.py peers    10.0.0.5           # nodes it can see
     python control.py status   10.0.0.5           # datasets it actually holds
-    python control.py add      10.0.0.6 photos    # manual mode: take that one
+    python control.py add      10.0.0.6 photos    # tell that node to take it
     python control.py remove   10.0.0.6 photos    # drop it
     python control.py map      10.0.0.5           # copies of every dataset
     python control.py map      10.0.0.5 photos     # ...and one dataset's pieces
@@ -128,14 +128,13 @@ def cmd_peers(args) -> None:
         print("\nno peers seen yet. Nodes find each other by multicast beacon, so "
               "they must share a segment.")
         return
-    print(f"\n{'node':<10} {'address':<22} {'holdings':<13} last seen")
+    print(f"\n{'node':<10} {'address':<22} last seen")
     for p in peers:
         # Its control address, not its BitTorrent one: this is the column you
-        # copy into the next command. The holdings column is that peer's cursor
-        # as it announced it - where it is in its own stream of what it holds.
+        # copy into the next command.
         addr = f"{p.get('ip')}:{p.get('http')}"
         print(f"{(p.get('node') or '?')[:8]:<10} {addr:<22} "
-              f"{(p.get('hold') or '-'):<13} {p.get('age', '?')}s ago")
+              f"{p.get('age', '?')}s ago")
 
 
 def _held(base: str) -> tuple:
@@ -210,9 +209,8 @@ def cmd_publish(args) -> None:
               f"[{res['info_hash'][:16]}] - nothing to do")
         return
     print(f"{args.endpoint}: published {res['name']!r} [{res['info_hash'][:16]}]")
-    print(f"every node learns about it within a tick (~{config.BEACON_INTERVAL:.0f}s). "
-          "Nodes running --replicate all\nfetch it on their own; tell any other "
-          "node to keep a copy with:")
+    print("it exists for as long as this node holds it - tell another node to "
+          "keep a copy with:")
     print(f"  python control.py add <node> {res['info_hash'][:16]}")
 
 

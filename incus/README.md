@@ -112,19 +112,18 @@ incus exec node0 -- su --login debian --command 'python3 collab-cluster-experime
 python control.py publish 10.x.x.5 /home/debian/collab-cluster-experiment/data/sample/media
 ```
 
-Within a tick every node knows the dataset exists. Storing it is a separate
-decision, made per node:
+The dataset now exists because `node0` holds it. Putting it on another node is
+a separate decision, made per node:
 
 ```sh
-# node1 knows about it...
+# the swarm's catalog, read through node1...
 python control.py list   10.x.x.6
-# ...and now keeps a copy
+# ...and now node1 keeps a copy
 python control.py add    10.x.x.6 media
 python control.py status 10.x.x.6
 ```
 
-Nodes store only what they're told to unless their unit passes `--replicate all`,
-in which case the `add` step is unnecessary and the data arrives on its own.
+Nodes store only what they're told to store; nothing arrives on one unasked.
 
 ## 5. Optional: the dashboard
 

@@ -1,21 +1,21 @@
-# A self-replicating cluster, in one program
+# A zero-configuration cluster, in one program
 
-Run `node.py` on a few machines on the same network. Hand one of them a file.
-Every machine has it.
+Run `node.py` on a few machines on the same network. Hand one of them a file,
+tell another to keep a copy, and the bytes move on their own.
 
 ```bash
-python node.py --replicate all      # on each machine. That's the whole setup.
-python control.py publish 127.0.0.1:8001 ~/photos    # to the node on this machine
+python node.py                              # on each machine. The whole setup.
+python control.py publish 10.0.0.5 ~/photos # to the node on that machine
+python control.py add     10.0.0.6 photos   # ...and this one keeps a copy
 ```
 
 Every node runs the same program and is self-sufficient: it discovers its peers,
-learns what datasets exist, decides what to store, and serves all of that to
-anyone who asks. A node started next week joins and catches up on its own.
+holds what it was given, and serves all of that to anyone who asks. A node
+started next week joins with nothing configured and is usable immediately.
 
-`--replicate all` is what makes each node mirror everything, and it is not the
-default. Left off, a node still joins and still tracks every dataset — it just
-stores nothing until you name one, which is what you want as soon as a disk has
-a size. That is the only policy in the system, and all of it is in
+A node stores what it was told to store and nothing else. Storing is the one
+thing a node cannot undo cheaply — everything else it does costs nothing — so
+nothing ever lands on a machine unasked. See
 [what a node stores](#what-a-node-stores).
 
 Underneath is plain **BitTorrent v2** — content-addressed, hash-verified, and
@@ -27,30 +27,29 @@ Every node runs the same tick, roughly every two seconds:
 
 | | | |
 |---|---|---|
-| 1 | **beacon** | multicast "here I am, and here's where I am in my holdings stream" |
+| 1 | **beacon** | multicast "here I am, and here's how to reach me" |
 | 2 | **peers** | read everyone else's beacons — a peer's address is the datagram's source |
-| 3 | **holdings** | for any peer whose cursor moved, read what changed — which is how a node learns what exists |
-| 4 | **want()** | each dataset it hasn't got, once, as it appears — do we want it? |
-| 5 | **mesh** | hand every known peer to every torrent still missing data, and let BitTorrent move the bytes |
+| 3 | **mesh** | hand every known peer to every torrent still missing data, and let BitTorrent move the bytes |
 
-Steps 1, 2, 3 and 5 are the same on every node and are not configurable. Step 4
-is the only policy — see [what a node stores](#what-a-node-stores).
+All three are the same on every node, and none of them is configurable. Nothing
+in the tick decides what to store: a node holds what was published to it and what
+it was told to take — see [what a node stores](#what-a-node-stores).
 
-A node's peer table and its storage decisions are all its own. Two nodes
-converge because they see the same beacons, not because anything tells them to.
+A node's peer table is its own, and built only from beacons it heard. Nothing
+tells a node who exists, and nothing tells it what to do.
 
 There is no catalog anywhere — not centrally, and not on a node. Publishing
 seeds the data in place, so a dataset has a holder from the moment it exists, and
 **the set of datasets in the swarm is just the union of what its nodes hold.** A
-node learns what exists by following its peers' holdings streams and forgetting
-the rows it doesn't act on; it keeps a `.torrent` only for what it holds. So
-nothing a node stores grows with the swarm's catalog, only with its own disk —
-and "which datasets exist" is a question for something looking at every node
-(`control.py list`, the dashboard), not for any one of them.
+node knows what it holds and nothing at all about the datasets it doesn't; it
+keeps a `.torrent` only for what it holds. So nothing a node stores grows with
+the swarm's catalog, only with its own disk — and "which datasets exist" is a
+question for something looking at every node (`control.py list`, the dashboard),
+not for any one of them.
 
 ## Getting data in
 
-One operation, whatever the node's storage policy:
+One operation, on any node:
 
 ```bash
 python control.py publish <node> <path>
@@ -59,23 +58,22 @@ python control.py publish <node> <path>
 That node hashes the path — resolved on its own filesystem, not on the machine
 you typed the command from — into a v2 torrent and **seeds it in place**:
 nothing is copied, the data stays where it is. Publishing *is* starting to hold
-it, which is what makes a dataset exist. Its beacon cursor moves, peers notice
-within a tick, and each decides for itself. Any node can publish.
+it, which is what makes a dataset exist — from that moment it is in the swarm's
+catalog, because that catalog is the union of what the nodes hold. Any node can
+publish.
 
 Publishing does not put the data on other nodes; that is the next section.
 
 ## What a node stores
 
-By default, only what you ask it to. A node with no `--replicate` flag joins the
-swarm completely — it hears every beacon, follows every peer's holdings, and
-serves what it has to any peer that asks — but it holds no data until you name a
-dataset, and it keeps nothing about the datasets it passed over. Everything a
-node does *except* storing costs nothing; storing is the one thing it cannot undo
-cheaply, so it isn't done unasked.
+Only what you ask it to. A node joins the swarm completely — it hears every
+beacon, answers for everything it has, and serves it to any peer that asks — but
+it holds no data until you name a dataset, and it keeps nothing at all about the
+datasets it doesn't hold. Everything a node does *except* storing costs nothing;
+storing is the one thing it cannot undo cheaply, so it isn't done unasked.
 
 ```bash
-python node.py                    # joins, tracks everything, stores nothing
-python node.py --replicate manual # the same thing, said out loud
+python node.py                    # joins the swarm, stores nothing
 ```
 
 Such a node holds nothing. `list` is read *through* it rather than *from* it —
@@ -111,9 +109,8 @@ The name is resolved across the swarm before the node is asked — a node has no
 catalog to look one up in — so what it receives is an info-hash. It fetches the
 `.torrent` from a peer that holds the dataset, then downloads exactly that
 dataset and nothing else, into `nodes/<id>/data/<slug>/`, pulling from every peer
-that already holds it. Nothing
-else about the node changes: it keeps discovering peers, keeps tracking new
-datasets as they appear, and keeps ignoring them.
+that already holds it. Nothing else about the node changes: it keeps discovering
+peers and serving what it has, and takes nothing else.
 
 Which nodes hold what is entirely up to you, and nothing has to agree: one
 dataset can live on every node and another on two. Nothing
@@ -147,22 +144,10 @@ a byte over the network. Another is that (4) is recoverable — re-publishing th
 same path reproduces the same dataset, byte for byte and hash for hash, because
 the dataset *is* its content.
 
-### Mirroring everything
-
-```bash
-python node.py --replicate all
-```
-
-`want()` becomes unconditionally true — the mode from the example at the top. On
-such a node `add` is redundant and `remove` is futile: the dataset is taken again
-on the next tick. Mirrors and hand-picked nodes share a swarm with no special
-handling.
-
 ## Try it on one machine
 
 Several nodes on one host work fine — they share the beacon port and are told
-apart by their other ports. These run without `--replicate all`, so you can watch
-the storage decision being made rather than have it made for you.
+apart by their other ports.
 
 ```bash
 python make_torrent.py                          # generate some sample content
@@ -173,8 +158,8 @@ python node.py --id 2 &
 python control.py peers 127.0.0.1:8001          # they already found each other
 python control.py publish 127.0.0.1:8001 data/sample/media
 
-python control.py list   127.0.0.1:8002         # node 1 knows about it...
-python control.py add    127.0.0.1:8002 media   # ...and now keeps a copy
+python control.py list   127.0.0.1:8002         # the catalog, read through node 1...
+python control.py add    127.0.0.1:8002 media   # ...and node 1 keeps a copy
 python control.py status 127.0.0.1:8002         # arriving
 python control.py status 127.0.0.1:8003         # node 2: holding nothing yet
 ```
@@ -185,15 +170,12 @@ seeder, and quicker once more nodes hold it.
 
 Things worth trying from there:
 
-- **Mirror instead of choosing.** Restart node 2 as `python node.py --id 2
-  --replicate all` — it takes `media` a few seconds later without being asked,
-  and everything published afterwards too.
 - **Drop it again.** `python control.py remove 127.0.0.1:8002 media`, then look at
   `status`, at `list`, and at `nodes/1/data/` — see
   [dropping a dataset](#dropping-a-dataset).
-- **Start a fourth node.** It joins and sees the whole swarm with nothing
-  configured — including, with `--replicate all`, everything published before it
-  existed: it reads each peer's holdings stream from the beginning.
+- **Start a fourth node.** It joins with nothing configured, and `list` read
+  through it shows the whole swarm — including everything published before it
+  existed.
 - **Publish from a different node.** Every node is equal.
 - **Kill a node and restart it.** It resumes with progress intact and re-meshes.
 - **Publish two different directories with the same name.** They coexist; see
@@ -252,15 +234,15 @@ are already usable.
 
 ## Discovery
 
-The beacon is a ~100-byte UDP datagram to `239.255.42.1:6772` (override with
+The beacon is a ~80-byte UDP datagram to `239.255.42.1:6772` (override with
 `SWARM_BEACON_GROUP` / `SWARM_BEACON_PORT`), TTL 1, so it stays on the local
-segment. It carries a node's identity, its ports and its holdings cursor — where
-it is in its own stream of what it holds, so a peer can tell from the datagram
-alone whether there is anything new to read. A
-node never states its own address — the receiver takes it from the packet — so
-there is nothing to configure on a multi-homed or NAT'd host. The optional
-dashboard joins the same group to find a node to read through, and only ever
-listens: it discovers the swarm without the swarm discovering it.
+segment. It carries a node's identity and its ports, and nothing about what it
+holds — that is an HTTP question, and one for whoever is reading the whole swarm
+rather than for a datagram sent every tick. A node never states its own address —
+the receiver takes it from the packet — so there is nothing to configure on a
+multi-homed or NAT'd host. The optional dashboard joins the same group to find a
+node to read through, and only ever listens: it discovers the swarm without the
+swarm discovering it.
 
 The beacon is the only source of peers. Torrents are built private and
 trackerless — the private flag is what keeps libtorrent from using PEX — and DHT,
@@ -330,10 +312,10 @@ POST /remove   {"name"|"info_hash"}  drop one
 There is no endpoint for "what datasets exist", because no node knows. That is
 the deliberate half of this: publishing seeds the data in place, so a dataset has
 a holder from the instant it exists, and the union of every node's `/holdings`
-**is** the catalog. A node learns what exists by following its peers' streams and
-forgetting what it doesn't take; it keeps a `.torrent` only for what it holds
-(~14 KB against ~100 MiB of data, so it costs nothing next to holding the data at
-all). Nothing a node stores grows with the swarm — only with its own disk.
+**is** the catalog. A node keeps a `.torrent` only for what it holds (~14 KB
+against ~100 MiB of data, so it costs nothing next to holding the data at all),
+and nothing whatsoever about a dataset it doesn't hold. Nothing a node stores
+grows with the swarm — only with its own disk.
 
 The split across the first four is the one thing here that decides whether
 watching a swarm stays affordable, so it is worth saying why it is drawn where it
@@ -377,7 +359,7 @@ kind there is.
 
 | File | Role |
 |---|---|
-| `node.py` | **The system.** libtorrent session + the sync tick (beacon, peers, holdings, want, mesh) + the HTTP API. Run one per machine. |
+| `node.py` | **The system.** libtorrent session + the sync tick (beacon, peers, mesh) + the HTTP API. Run one per machine. |
 | `control.py` | CLI to talk to a node: publish, list, peers, status, add, remove, map. |
 | `make_torrent.py` | Builds v2-only, private, trackerless torrents (`build()`). As a script, generates the sample content. |
 | `catalog.py` | Stdlib client for another node's HTTP API: `fetch_stats`/`fetch_holdings` (cursor-following, raises `Resync`)/`fetch_transfers`/`fetch_holding`/`fetch_meta`, plus `fetch_swarm()` — every node's `/stats`, gathered through one node's peer table. Named for the thing it assembles rather than fetches: no node has a catalog. No libtorrent, so `control.py` doesn't need it. |
@@ -422,9 +404,9 @@ to 0. A node's real identity is a persisted UUID in `nodes/<id>/node_key`.
   the dashboard's job rather than a node's.
 - **`remove` doesn't delete the files.** It stops serving a dataset and forgets
   it across restarts, but the downloaded copy stays in `nodes/<id>/data/`.
-- **Nothing weighs a dataset against free space.** `add` never refuses, and
-  `--replicate all` will fill a small disk. Placing datasets is manual, and no
-  node warns you that a copy count has dropped to one.
+- **Nothing weighs a dataset against free space.** `add` never refuses, however
+  little room is left. Placing datasets is manual, and no node warns you that a
+  copy count has dropped to one.
 - **Datasets are immutable.** v2 torrents are fixed at publish time. Changing the
   content means publishing it again, which produces a separate dataset.
 - **Everything on the segment is trusted.** Any node can publish anything and is
