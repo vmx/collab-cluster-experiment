@@ -118,8 +118,8 @@ def main() -> None:
     ).parse_args()
     roots = build_sample(config.SAMPLE_DIR)
     rel = os.path.relpath(roots[0], config.BASE_DIR)
-    print("\nnow publish it to any running node, e.g.:")
-    print(f"  python control.py publish {config.HOST}:{config.STATS_PORT_BASE} {rel}")
+    print("\nnow publish it to any running node:")
+    print(f"  python control.py publish <node> {rel}")
 
 
 if __name__ == "__main__":

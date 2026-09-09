@@ -454,16 +454,12 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    default_ep = f"{config.HOST}:{config.STATS_PORT_BASE}"
     ep_help = ("node endpoint host[:port] (port defaults to the standard control "
-               f"port {config.STATS_PORT_BASE}; default: {default_ep})")
+               f"port {config.STATS_PORT_BASE})")
 
-    def with_endpoint(name, help_text, func, required=False):
+    def with_endpoint(name, help_text, func):
         p = sub.add_parser(name, help=help_text)
-        if required:
-            p.add_argument("endpoint", help=ep_help)
-        else:
-            p.add_argument("endpoint", nargs="?", default=default_ep, help=ep_help)
+        p.add_argument("endpoint", help=ep_help)
         p.set_defaults(func=func)
         return p
 
@@ -472,19 +468,19 @@ def main() -> None:
     with_endpoint("peers", "nodes a node can see", cmd_peers)
     with_endpoint("status", "datasets a node actually holds", cmd_status)
     p_map = with_endpoint("map", "copies of every dataset, or one dataset's "
-                          "pieces", cmd_map, required=True)
+                          "pieces", cmd_map)
     p_map.add_argument("dataset", nargs="?",
                        help="a dataset name or info-hash; without one, every "
                             "dataset with its copy count")
 
     p_pub = with_endpoint("publish", "put a local file/dir into the swarm",
-                          cmd_publish, required=True)
+                          cmd_publish)
     p_pub.add_argument("path", help="the file/dir to publish, local to that node")
 
     for name, help_text, func in [
             ("add", "tell a node to take a dataset (manual mode)", cmd_add),
             ("remove", "tell a node to drop a dataset", cmd_remove)]:
-        p = with_endpoint(name, help_text, func, required=True)
+        p = with_endpoint(name, help_text, func)
         p.add_argument("dataset", help="dataset name, or its v2 info-hash")
 
     args = ap.parse_args()

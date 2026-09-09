@@ -185,9 +185,9 @@ Things worth trying from there:
 
 ```bash
 python control.py publish <node> <path>      # put local data into the swarm
-python control.py list    [node]             # datasets a node knows of
-python control.py peers   [node]             # nodes a node can see  <- start here when debugging
-python control.py status  [node]             # datasets a node actually holds
+python control.py list    <node>             # datasets a node knows of
+python control.py peers   <node>             # nodes a node can see  <- start here when debugging
+python control.py status  <node>             # datasets a node actually holds
 python control.py add     <node> <dataset>   # tell it to store this one
 python control.py remove  <node> <dataset>   # tell it to stop holding it
 python control.py map     <node>             # copies of every dataset, rarest first

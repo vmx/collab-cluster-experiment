@@ -17,10 +17,6 @@ NODES_DIR = os.path.join(BASE_DIR, "nodes")
 SAMPLE_DIR = os.path.join(DATA_DIR, "sample")
 
 # --- Network -----------------------------------------------------------------
-# HOST is the loopback address for reaching a co-located node's control endpoint
-# in a single-host dev run.
-HOST = "127.0.0.1"
-
 # Nodes may live on other hosts, so they bind all interfaces rather than loopback.
 BIND_HOST = "0.0.0.0"
 
