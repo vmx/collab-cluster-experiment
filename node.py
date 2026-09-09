@@ -542,6 +542,34 @@ def make_session(node_id: int) -> "lt.session":
         # volume all through a transfer and which we pop only to discard.
         "alert_mask": (lt.alert.category_t.storage_notification
                        | lt.alert.category_t.stats_notification),
+        # libtorrent's queue is written for a client seeding a few torrents it
+        # chose: it keeps `active_seeds` unpaused and rotates the rest out, and
+        # a paused torrent refuses peers. A node has to answer for everything it
+        # holds, so seeding is never queued (-1 is "no limit"). At the default a
+        # node serves only the handful it has not paused.
+        "active_seeds": -1,
+        "active_limit": -1,
+        # Downloading *is* queued, for the same reason copies are complete
+        # holders: half a dataset is worth nothing. Run at once they advance in
+        # lockstep and finish together, so a large batch moves bytes for a long
+        # stretch without producing one copy. A few dozen at a time is no slower
+        # overall.
+        "active_downloads": 32,
+        # How long a queued torrent waits paused to be looked at again. At the
+        # default (30s), a node told to take one dataset can sit still for most
+        # of that.
+        "auto_manage_interval": 2,
+        # Publishing seeds in place, so a dataset is complete once libtorrent
+        # has checked the files already sitting there. Serialised, a batch of
+        # publishes is confirmed one at a time, and until then each one counts
+        # as a dataset with no copies.
+        "active_checking": 64,
+        # Choking rations upload slots against strangers who give nothing back.
+        # There are none here. Rationed, a seed rotates who it answers and a
+        # choked leecher sits on its requests until request_timeout drops the
+        # connection a minute later; a few such stalls add that minute to a
+        # whole batch.
+        "unchoke_slots_limit": -1,
         # Pace the transfer so progress is observable as it happens (see config).
         # By default libtorrent exempts loopback/LAN peers from rate limits, so
         # we must turn that off for the cap to apply within a single-host swarm.
