@@ -84,6 +84,11 @@ SAVE_FLAGS = lt.torrent_handle.save_info_dict | lt.torrent_handle.flush_disk_cac
 # How often (session loops) to checkpoint resume data for torrents that changed.
 RESUME_EVERY = 5
 
+# The states in which libtorrent is still reading what is on disk rather than
+# missing anything. A torrent in one of these wants no peers — see mesh().
+CHECKING_STATES = (lt.torrent_status.checking_files,
+                   lt.torrent_status.checking_resume_data)
+
 # How many holding transitions to keep so a reader can be told what changed
 # rather than re-sent everything. A reader whose cursor is older than the oldest
 # retained transition is told to re-list instead; the bound is what stops the log
@@ -624,6 +629,10 @@ def add_torrent(ns: NodeState, blob: bytes, serve_path: str = None) -> dict:
 
     entry = {"name": tname, "save_path": save_path, "ti": ti,
              "files": file_list(ti), "handle": handle, "state": "downloading",
+             # Checked against what is on disk first — for a published torrent
+             # that is the whole dataset — so until it finishes, nothing is
+             # known to be missing and no peer is wanted. See mesh().
+             "checking": True,
              "total_size": ti.total_size(), "piece_length": ti.piece_length()}
     with ns.lock:
         ns.torrents[info_hash] = entry
@@ -759,6 +768,7 @@ def load_resumes(ns: NodeState) -> int:
         handle = ns.ses.add_torrent(atp)
         entry = {"name": ti.name(), "save_path": atp.save_path, "ti": ti,
                  "files": file_list(ti), "handle": handle, "state": "downloading",
+                 "checking": True,   # as in add_torrent, and here it is all of them
                  "total_size": ti.total_size(), "piece_length": ti.piece_length()}
         with ns.lock:
             ns.torrents[info_hash] = entry
@@ -848,15 +858,20 @@ def session_loop(ns: NodeState) -> None:
             moving = [(ih, e) for ih, e in ns.torrents.items()
                       if e["state"] == "downloading"]
 
-        transfers, finished = [], []
+        transfers, finished, checked = [], [], []
         for info_hash, entry in moving:
             st = entry["handle"].status()
+            # Free, since we hold the status anyway: recorded for mesh() rather
+            # than asked for a second time.
+            checked.append((entry, st.state in CHECKING_STATES))
             if st.is_seeding or st.progress >= 1.0:
                 finished.append((info_hash, entry))
             else:
                 transfers.append(transfer_row(info_hash, entry, st))
 
         with ns.lock:
+            for entry, is_checking in checked:
+                entry["checking"] = is_checking
             for info_hash, entry in finished:
                 # Guard against a /remove that landed between the two locks:
                 # publishing a transition for a dataset we no longer hold would
@@ -942,10 +957,17 @@ def mesh(ns: NodeState) -> None:
     does nothing here — the tick costs what is moving, not what is stored. A
     node that restarts and still wants data re-offers on its own next tick,
     which is what heals the swarm; one that restarts complete has nothing to
-    heal."""
+    heal.
+
+    A torrent being *checked* is skipped too: not complete, but not missing
+    anything either — publishing seeds in place, and a restart re-checks
+    everything held. An offer is not a request but a lasting entry in that
+    torrent's peer list, which a torrent that turns out to be a seed keeps, and
+    keeps dialling: a node that has just published a batch nobody asked for
+    would dial at connection_speed, indefinitely."""
     with ns.lock:
         handles = [e["handle"] for e in ns.torrents.values()
-                   if e["state"] != "complete"]
+                   if e["state"] != "complete" and not e["checking"]]
         addrs = [(p["ip"], p["bt"]) for p in ns.peers.values()
                  if p.get("ip") and p.get("bt")]
     for handle in handles:
