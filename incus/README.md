@@ -146,11 +146,23 @@ either: they are read, have no setting for this, and never hear from it.
 Then expose just the UI:
 
 ```sh
-# non-NAT (wildcard listen ok), fine for a web UI:
 incus config device add collector web proxy listen=tcp:0.0.0.0:8100 connect=tcp:127.0.0.1:8100
-
-# or NAT mode (kernel-forwarded, faster) — listen must be a concrete host IP:
-incus config device add collector web proxy listen=tcp:<host-ip>:8100 connect=tcp:0.0.0.0:8100 nat=true
 ```
 
 See the [proxy device docs](https://linuxcontainers.org/incus/docs/main/reference/devices_proxy/).
+
+## Clean up
+
+Nothing lives outside the containers, so deleting them is the whole teardown —
+the proxy device and the datasets go with them.
+
+```sh
+# --force stops them first
+incus delete --force node0 node1 node2 collector
+```
+
+The profile keeps no state; drop it too if you're done with the setup:
+
+```sh
+incus profile delete collab-cluster
+```
