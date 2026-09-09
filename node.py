@@ -137,6 +137,11 @@ class NodeState:
         # so /stats answers without walking everything this node holds.
         self.n_complete = 0
         self.stored_complete = 0
+        # The info-hashes in state "downloading", kept the same way and for the
+        # same reason: the session loop and mesh() want the in-flight set every
+        # tick, and finding it by scanning is the one thing left in the tick
+        # that grows with what this node holds.
+        self.in_flight: set = set()
         # The transfers still moving, with their live progress and rates. The
         # only place per-dataset per-second numbers exist, and bounded by what is
         # in flight rather than by how much this node holds.
@@ -346,6 +351,10 @@ def note_holding(ns: NodeState, row: dict, previous: str = None) -> None:
     became = (row["state"] == "complete") - (previous == "complete")
     ns.n_complete += became
     ns.stored_complete += became * row["total_size"]
+    if row["state"] == "downloading":
+        ns.in_flight.add(row["info_hash"])
+    else:                       # complete, or the "gone" tombstone
+        ns.in_flight.discard(row["info_hash"])
     excess = len(ns.changes) - CHANGE_LOG_LIMIT
     if excess > 0:
         # What we drop we can no longer answer for: a cursor from before this
@@ -855,8 +864,7 @@ def session_loop(ns: NodeState) -> None:
             prev = _note_rates(ns, counters, prev, now)
 
         with ns.lock:
-            moving = [(ih, e) for ih, e in ns.torrents.items()
-                      if e["state"] == "downloading"]
+            moving = [(ih, ns.torrents[ih]) for ih in ns.in_flight]
 
         transfers, finished, checked = [], [], []
         for info_hash, entry in moving:
@@ -966,8 +974,8 @@ def mesh(ns: NodeState) -> None:
     keeps dialling: a node that has just published a batch nobody asked for
     would dial at connection_speed, indefinitely."""
     with ns.lock:
-        handles = [e["handle"] for e in ns.torrents.values()
-                   if e["state"] != "complete" and not e["checking"]]
+        entries = [ns.torrents[ih] for ih in ns.in_flight]
+        handles = [e["handle"] for e in entries if not e["checking"]]
         addrs = [(p["ip"], p["bt"]) for p in ns.peers.values()
                  if p.get("ip") and p.get("bt")]
     for handle in handles:
