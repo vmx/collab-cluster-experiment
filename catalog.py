@@ -69,10 +69,12 @@ def fetch_holdings(base: str, since: str = None, timeout: float = 30.0) -> dict:
     a dataset without asking anyone anything else, which is what lets the union
     of these streams stand in for a catalog.
 
-    With no cursor this is everything it holds; with one, only what has changed
-    since — which is what makes following 25 nodes cost nothing while they are
-    idle. Either way the response carries the cursor to send next time. It is
-    opaque: store it, hand it back, never take it apart.
+    With no cursor this is the first page of everything it holds; with one,
+    either the next page or only what has changed since — which is what makes
+    following 25 nodes cost nothing while they are idle. `more` says whether to
+    call again with the cursor just handed back; fetch_all_holdings does that
+    for callers that just want the lot. The cursor is opaque: store it, hand it
+    back, never take it apart.
 
     Raises Resync when the node says it cannot answer from that cursor. That is
     not an error but the mechanism working: call again with since=None and take
@@ -87,6 +89,21 @@ def fetch_holdings(base: str, since: str = None, timeout: float = 30.0) -> dict:
         if e.code == 409:
             raise Resync(since)
         raise
+
+
+def fetch_all_holdings(base: str, timeout: float = 30.0) -> list:
+    """Everything a node holds, paging to the end.
+
+    For readers that keep no cursor between runs — control.py lists in full
+    every time. Anything following the stream (collector.py) pages the same way
+    but keeps the cursor it ends with, so its next call is a delta."""
+    rows, cursor = [], None
+    while True:
+        page = fetch_holdings(base, since=cursor, timeout=timeout)
+        rows += page.get("holdings") or []
+        cursor = page["cursor"]
+        if not page.get("more"):
+            return rows
 
 
 def fetch_holding(base: str, info_hash: str, timeout: float = 5.0) -> dict:

@@ -55,6 +55,7 @@ What a node holds is only ever what it was given: /publish puts local data in,
 """
 import argparse
 import glob
+import heapq
 import json
 import os
 import re
@@ -88,6 +89,11 @@ RESUME_EVERY = 5
 # missing anything. A torrent in one of these wants no peers — see mesh().
 CHECKING_STATES = (lt.torrent_status.checking_files,
                    lt.torrent_status.checking_resume_data)
+
+# How many rows a full listing hands back at a time. A reader with no cursor
+# takes the held set this many rows per request, following `more`, so neither
+# the response nor the time the state lock is held grows with what a node holds.
+LISTING_PAGE = 10_000
 
 # How many holding transitions to keep so a reader can be told what changed
 # rather than re-sent everything. A reader whose cursor is older than the oldest
@@ -405,19 +411,45 @@ def holdings(ns: NodeState, since: str = None) -> dict:
     left the swarm — this stream is the catalog, so there is nothing else for it
     to still be in.
 
-    `more` is always false for now — a full listing is not paged yet — but it is
-    in the response so a reader's loop is already written to follow one, and
-    paging can be added behind the same cursor without the reader changing.
+    A full listing comes in pages, `more` saying whether to ask again with the
+    cursor just handed back. That the cursor is one opaque string is what makes
+    this possible: mid-listing it carries a position as well, and no reader had
+    to learn about it.
     """
     with ns.lock:
         if since is None:
-            rows = [holding_row(ih, e) for ih, e in ns.torrents.items()]
-        else:
-            after = cursor_since(ns, since)
-            rows = [row for seq, row in ns.changes if seq > after]
+            return _listing_page(ns, after="", snapshot=ns.seq)
+        epoch, _, rest = since.partition(":")
+        seq, _, position = rest.partition(":")
+        if position:
+            # Mid-listing. Validated against the seq the listing started at, so
+            # a listing whose snapshot has been trimmed away is told to start
+            # over now rather than after it has paged to the end for nothing.
+            cursor_since(ns, f"{epoch}:{seq}")
+            return _listing_page(ns, position, int(seq))
+        after = cursor_since(ns, since)
         # Read under the same lock as the rows, so the cursor we hand back can
         # never claim to cover a transition the reader was not given.
-        return {"cursor": cursor_of(ns), "more": False, "holdings": rows}
+        return {"cursor": cursor_of(ns), "more": False,
+                "holdings": [row for seq, row in ns.changes if seq > after]}
+
+
+def _listing_page(ns: NodeState, after: str, snapshot: int) -> dict:
+    """One page of a full listing, in info-hash order. Caller holds ns.lock.
+
+    The page is what this node held when the page was read; `snapshot` is where
+    its stream stood when the listing began, and the last page hands that back
+    as an ordinary cursor. So a dataset taken while the listing was running is
+    missed by the pages but arrives as a transition, and one dropped may appear
+    in a page but is retracted by its tombstone. The reader converges either
+    way, which is the same property following the stream already relies on.
+    """
+    keys = heapq.nsmallest(LISTING_PAGE, (ih for ih in ns.torrents if ih > after))
+    more = len(keys) == LISTING_PAGE
+    return {"cursor": f"{ns.epoch}:{snapshot}:{keys[-1]}" if more
+                      else f"{ns.epoch}:{snapshot}",
+            "more": more,
+            "holdings": [holding_row(ih, ns.torrents[ih]) for ih in keys]}
 
 
 def node_stats(ns: NodeState) -> dict:

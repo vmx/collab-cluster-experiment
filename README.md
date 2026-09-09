@@ -248,6 +248,11 @@ settled swarm does no holdings traffic at all. The cursor is opaque: store it,
 return it, never take it apart. A node that cannot answer from one, after a
 restart, says so with HTTP 409 rather than an empty delta.
 
+A reader with no cursor gets the held set in pages: `more` says whether to ask
+again with the cursor just handed back, and the last page hands back an ordinary
+cursor to follow from. Nothing a reader asks for is ever the whole catalog in one
+response.
+
 A holdings row is `{info_hash, state, name, total_size, piece_length}`, where
 `state` is `downloading`, `complete`, or — only ever in a delta — `gone`, the
 tombstone for a dropped dataset. **Copies = holders in state `complete`**: a

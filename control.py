@@ -145,8 +145,7 @@ def _held(base: str) -> tuple:
     control.py keeps no cursor between runs, so it always lists in full; a
     long-running reader follows the cursor instead (see collector.py)."""
     try:
-        held = {r["info_hash"]: r
-                for r in (catalog.fetch_holdings(base).get("holdings") or [])}
+        held = {r["info_hash"]: r for r in catalog.fetch_all_holdings(base)}
         moving = {t["info_hash"]: t for t in catalog.fetch_transfers(base)}
     except Exception:
         return {}, {}
