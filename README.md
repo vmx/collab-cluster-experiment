@@ -237,8 +237,8 @@ GET  /stats                          what the node is: disk, counts, rates, curs
 GET  /holdings[?since=<cursor>]      which datasets it holds — all, or just what changed
 GET  /holdings/<info_hash>           one dataset here, with its piece bitfield
 GET  /transfers                      what is moving right now: progress and rates
-GET  /catalog/<info_hash>            one dataset's file -> piece map (holders only)
-GET  /catalog/<info_hash>.torrent    the raw .torrent (holders only)
+GET  /dataset/<info_hash>            the dataset: name, size, file -> piece map (holders only)
+GET  /dataset/<info_hash>.torrent    the same, as the raw .torrent (holders only)
 GET  /peers                          {"self": …, "peers": […]} — its view of the swarm
 POST /publish  {"path": …}           hash a local path in and seed it
 POST /add      {"info_hash": …}      take a dataset from whoever has it
@@ -270,9 +270,11 @@ per-dataset lookup.
 Per-second numbers live in `/transfers`, bounded by what is in flight rather
 than by what is stored. Piece bitfields come one dataset at a time from
 `/holdings/<info_hash>`, so a swarm-wide piece map costs one request per node
-holding *that* dataset. `/catalog/<info_hash>` carries the file → piece map,
-which the piece-level per-file counts need; it is fixed for the dataset's
-lifetime, so a reader fetches it once from any holder and keeps it.
+holding *that* dataset. `/dataset/<info_hash>` carries the file → piece map,
+which the piece-level per-file counts need. `/holdings/<info_hash>` is this
+node's holding of a dataset and changes as it downloads; `/dataset/<info_hash>`
+is the dataset itself, the same on every holder and fixed for its lifetime, so a
+reader fetches it once from any holder and keeps it.
 
 ## Files
 

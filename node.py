@@ -18,10 +18,12 @@ coordinator.
                                  drill-down, one dataset at a time.
   GET  /transfers                what is moving right now: progress, rates, and
                                  why one is not moving, for in-flight only.
-  GET  /catalog/<info_hash>      one dataset's file -> piece-range map, for the
+  GET  /dataset/<info_hash>      the dataset itself, the same on every holder:
+                                 name, size and file -> piece-range map, for the
                                  per-file views. Held datasets only.
-  GET  /catalog/<info_hash>.torrent   the raw .torrent. Held datasets only —
-                                 whoever holds the data has the torrent.
+  GET  /dataset/<info_hash>.torrent   the same, as the raw .torrent. Held
+                                 datasets only — whoever holds the data has the
+                                 torrent.
   GET  /peers                    {"self": {...}, "peers": [...]} — this node's
                                  view of the swarm.
   POST /publish  {"path": ...}   hash a local file/dir into a dataset and seed it
@@ -336,7 +338,7 @@ def resolve(ns: NodeState, info_hash: str = None, name: str = None) -> str:
 # about things which *churn*, and these never change — but what makes the union
 # of these streams usable as a catalog without a per-dataset lookup for every
 # dataset in it. Everything else about a dataset (the file -> piece map, which is
-# the large part) stays behind /catalog/<info_hash>, for the views that need it.
+# the large part) stays behind /dataset/<info_hash>, for the views that need it.
 
 
 class StaleCursor(Exception):
@@ -1105,7 +1107,7 @@ def make_handler(ns: NodeState):
 
         def handle_one_request(self):
             # Peers and CLI clients come and go mid-request — a timed-out
-            # /catalog fetch, an interrupted `control.py status`. socketserver
+            # /dataset fetch, an interrupted `control.py status`. socketserver
             # would print a traceback for each one, which in a service log looks
             # like the node is failing when it is only being read from.
             try:
@@ -1143,8 +1145,8 @@ def make_handler(ns: NodeState):
                 self._send_json({"ts": time.time(), "transfers": rows})
             elif path == "/peers":
                 self._send_json(self._peers_view())
-            elif path.startswith("/catalog/"):
-                self._catalog_file(path[len("/catalog/"):])
+            elif path.startswith("/dataset/"):
+                self._dataset(path[len("/dataset/"):])
             else:
                 self._send_json({"error": "not found"}, 404)
 
@@ -1187,7 +1189,7 @@ def make_handler(ns: NodeState):
             except FileNotFoundError:
                 self._send_json({"error": "not held"}, 404)
 
-        def _catalog_file(self, name: str):
+        def _dataset(self, name: str):
             # Addressed by full v2 info-hash. The readable slug is only how the
             # file is *stored*; no protocol depends on it. With the .torrent
             # suffix this is the torrent itself; without it, the same dataset's

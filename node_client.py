@@ -55,7 +55,7 @@ def fetch_meta(base: str, info_hash: str, timeout: float = 10.0) -> dict:
     Only the per-file views need this. Everything a list view wants is already in
     the holdings row."""
     try:
-        return json.loads(_get(base, f"/catalog/{info_hash}", timeout).decode())
+        return json.loads(_get(base, f"/dataset/{info_hash}", timeout).decode())
     except urllib.error.HTTPError as e:
         if e.code == 404:
             raise FileNotFoundError(info_hash)
@@ -148,7 +148,7 @@ def fetch_torrent_bytes(base: str, info_hash: str, timeout: float = 10.0) -> byt
     it has and nothing else. Raises FileNotFoundError otherwise, which is how a
     node taking a dataset walks its peers until one serves it."""
     try:
-        return _get(base, f"/catalog/{info_hash}.torrent", timeout)
+        return _get(base, f"/dataset/{info_hash}.torrent", timeout)
     except urllib.error.HTTPError as e:
         if e.code == 404:
             raise FileNotFoundError(info_hash)
