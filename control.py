@@ -35,6 +35,8 @@ import swarm_stats
 # the ambiguity errors print can be pasted straight back in. Below 8 characters
 # it's too collision-prone to be worth guessing at, and reads as a name.
 HEXREF = re.compile(r"^[0-9a-f]{8,64}$", re.I)
+# A whole v2 info-hash: the one reference that needs nobody's help to resolve.
+_FULL_HASH = re.compile(r"^[0-9a-f]{64}$", re.I)
 
 # Publishing hashes the content before returning, which takes as long as it takes
 # on a big tree — so this deliberately isn't the short timeout the other calls use.
@@ -152,6 +154,14 @@ def _held(base: str) -> tuple:
     return held, moving
 
 
+def swarm_bases(base: str) -> list:
+    """Every node reachable through the one named, as addresses and nothing
+    else. What a caller wants when it has a question for each node rather than
+    a use for everything they hold."""
+    stats, _ = catalog.fetch_swarm(base)
+    return [f"http://{st.get('label')}" for st in stats if st.get("label")]
+
+
 def swarm_nodes(base: str) -> list:
     """Every node reachable through the one named, with what each holds."""
     stats, _ = catalog.fetch_swarm(base)
@@ -218,14 +228,13 @@ def cmd_add(args) -> None:
 
     The name is resolved here, not there: a node has no catalog to look one up
     in, so it takes an info-hash and fetches the .torrent from whoever holds the
-    dataset."""
+    dataset. Resolving it asks each node about that one reference; an info-hash
+    given in full is not a question at all."""
     base = catalog.base_url(args.endpoint)
     try:
-        entries = swarm_catalog(swarm_nodes(base))
+        info_hash = resolve_across(base, args.dataset)
     except Exception:
         _unreachable(args.endpoint)
-    info_hash = resolve_ref({h: m["name"] for h, (m, _) in entries.items()},
-                            args.dataset)
     res = _checked(args.endpoint, _post(args.endpoint, "/add",
                                         {"info_hash": info_hash}))
     ref = f"{res['name']!r} [{res['info_hash'][:16]}]"
@@ -383,6 +392,26 @@ def render_overview(rows: list) -> None:
         print(f"{row['name']:<24} {row['info_hash'][:16]:<18} "
               f"{human(row['total_size']):>10} {row['full_copies']:>7}  "
               f"{spread:<14} {rate}{flag}")
+
+
+def resolve_across(base: str, ref: str) -> str:
+    """A dataset reference as typed -> its full info-hash, asking the swarm only
+    as much as it has to.
+
+    A full info-hash is already the answer and costs nothing. Anything else — a
+    name, or a shortened hash — is a question each node can answer about its own
+    holdings, so it is one small filtered request per node rather than every
+    node's entire stream read into memory to look one thing up."""
+    if _FULL_HASH.match(ref):
+        return ref.lower()
+    names = {}
+    for node in swarm_bases(base):
+        try:
+            for row in catalog.fetch_matching(node, ref):
+                names[row["info_hash"]] = row.get("name") or ""
+        except Exception:
+            continue          # a node that doesn't answer simply has no match
+    return resolve_ref(names, ref)
 
 
 def resolve_ref(names: dict, ref: str) -> str:

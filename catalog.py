@@ -106,6 +106,15 @@ def fetch_all_holdings(base: str, timeout: float = 30.0) -> list:
             return rows
 
 
+def fetch_matching(base: str, ref: str, timeout: float = 10.0) -> list:
+    """The rows for datasets this node holds that `ref` names — an exact name or
+    an info-hash prefix. How a name becomes an info-hash without reading every
+    node's whole stream to find it: one small request per node, answered from
+    what that node holds."""
+    path = "/holdings?match=" + urllib.parse.quote(ref)
+    return json.loads(_get(base, path, timeout).decode()).get("holdings") or []
+
+
 def fetch_holding(base: str, info_hash: str, timeout: float = 5.0) -> dict:
     """One dataset on one node, with its piece bitfield — or None if not held.
 

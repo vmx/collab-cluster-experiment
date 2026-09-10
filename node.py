@@ -7,7 +7,8 @@ coordinator.
   GET  /stats                    what this node is, as a whole: disk, counts,
                                  throughput, and the cursor below. Constant
                                  size — it says nothing per dataset.
-  GET  /holdings[?since=<cursor>]     which datasets this node holds and whether
+  GET  /holdings[?since=<cursor>|?match=<ref>]   which datasets this node holds
+                                 and whether
                                  each is complete, with each one's name, size and
                                  piece length. With a cursor, only what has
                                  changed since; the response carries the next
@@ -460,6 +461,19 @@ def _listing_page(ns: NodeState, after: str, snapshot: int) -> dict:
                       else f"{ns.epoch}:{snapshot}",
             "more": more,
             "holdings": [holding_row(ih, ns.torrents[ih]) for ih in keys]}
+
+
+def matching(ns: NodeState, ref: str) -> dict:
+    """The datasets this node holds that a reference names: an exact name, or an
+    info-hash it is the start of. Same rules as resolve(), same rows and shape
+    as /holdings, so a reader resolving a name asks every node this instead of
+    reading every node's whole stream to look one thing up. Capped like a
+    listing: a caller only has to know whether more than one thing matched."""
+    with ns.lock:
+        rows = [holding_row(ih, e) for ih, e in ns.torrents.items()
+                if ih.startswith(ref.lower()) or e["name"] == ref]
+        return {"cursor": cursor_of(ns), "more": len(rows) > LISTING_PAGE,
+                "holdings": rows[:LISTING_PAGE]}
 
 
 def node_stats(ns: NodeState) -> dict:
@@ -1111,7 +1125,11 @@ def make_handler(ns: NodeState):
             return {"self": me, "peers": sorted(peers, key=lambda p: p["node"])}
 
         def _holdings(self, query: str):
-            since = parse_qs(query).get("since", [None])[0]
+            params = parse_qs(query)
+            ref = params.get("match", [None])[0]
+            if ref:
+                return self._send_json(matching(ns, ref))
+            since = params.get("since", [None])[0]
             try:
                 self._send_json(holdings(ns, since))
             except StaleCursor:
