@@ -106,13 +106,39 @@ _POLL_LOCK = threading.Lock()
 # When we last fanned out, and every node address it reached — which is what lets
 # us carry on when our way in goes away.
 _POLL: dict = {"at": 0.0, "bases": []}
-# node_key -> {"base", "label", "stats", "cursor", "holdings", "transfers",
-#              "live"} — what we know about each node, carried between polls.
-# `holdings` (info_hash -> state) is built up from the transitions each node
-# reports and kept; `cursor` is where we are in that node's stream, opaque and
-# handed straight back. This is the only state the dashboard keeps, and it exists
-# so a refresh costs the changes rather than the whole world.
+# node_key -> {"base", "label", "stats", "cursor", "transfers", "live", "seen"}
+# — what we know about each node, carried between polls. `cursor` is where we
+# are in that node's stream, opaque and handed straight back. What it *holds*
+# is not kept here but folded into the catalog below.
 _NODES: dict = {}
+
+# How long a node has to stay silent before its copies stop counting. A poll it
+# misses is a blip and costs nothing; longer than this and it is treated as gone,
+# which means listing in full when it returns.
+GONE_AFTER = 15.0
+
+# --- the catalog, maintained rather than rebuilt ------------------------------
+# The union of what the nodes hold. It is folded together as they report changes
+# instead of being reassembled on every request, because the nodes send changes
+# and rebuilding from them throws that away.
+#
+# A dataset's identity is the same on every node that holds it — it is what the
+# info-hash hashes — so it is stored once, and who holds it is a list of node
+# ids rather than a row per node per dataset. The two indexes answer the two
+# questions the views actually ask.
+_AGG_LOCK = threading.Lock()
+_NODE_ID: dict = {}      # node_key -> small int, stable for this process
+_NODE_KEY: dict = {}     # and back again
+# info_hash -> [name, total_size, piece_length, complete ids, partial ids]
+_DATASETS: dict = {}
+# copies -> the datasets that have that many. The list view is ordered by this,
+# so its first page is a walk of the first few entries, and "how many datasets
+# are down to one copy" is a length rather than a scan.
+_BY_COPIES: dict = {}
+# node id -> the datasets it holds: the transpose of the holder lists above. It
+# is what makes a node going away, or re-listing itself, cost what that node
+# holds rather than a pass over the whole catalog.
+_HELD_BY: dict = {}
 
 _META_LOCK = threading.Lock()
 # info_hash -> a dataset's file -> piece map. Fixed for the life of the dataset —
@@ -170,67 +196,168 @@ def ways_in() -> list:
     return out
 
 
+# --- keeping the catalog ------------------------------------------------------
+# Every change to the three structures above goes through here, under _AGG_LOCK,
+# so the one invariant — that they agree with the rows that produced them — has
+# a single home.
+
+def node_id(key: str) -> int:
+    """A node's place in the holder lists. Caller holds _AGG_LOCK."""
+    if key not in _NODE_ID:
+        _NODE_ID[key] = len(_NODE_ID)
+        _NODE_KEY[_NODE_ID[key]] = key
+    return _NODE_ID[key]
+
+
+def _recount(info_hash: str, before: int, after: int) -> None:
+    if before != after:
+        _BY_COPIES.get(before, set()).discard(info_hash)
+        _BY_COPIES.setdefault(after, set()).add(info_hash)
+
+
+def _without(info_hash: str, ds: list, nid: int) -> None:
+    """Take one node out of a dataset's holders, and forget the dataset if that
+    was the last of them: nobody holds it, so it has left the swarm."""
+    before = len(ds[3])
+    ds[3] = tuple(i for i in ds[3] if i != nid)
+    ds[4] = tuple(i for i in ds[4] if i != nid)
+    _recount(info_hash, before, len(ds[3]))
+    if not ds[3] and not ds[4]:
+        _DATASETS.pop(info_hash, None)
+        _BY_COPIES.get(0, set()).discard(info_hash)
+
+
+def apply_rows(nid: int, rows: list) -> None:
+    """Fold one node's holdings rows in. Caller holds _AGG_LOCK."""
+    held = _HELD_BY.setdefault(nid, set())
+    for row in rows:
+        info_hash, state = row["info_hash"], row.get("state")
+        ds = _DATASETS.get(info_hash)
+        if ds is None:
+            if state == "gone":
+                continue
+            ds = _DATASETS[info_hash] = [row.get("name") or "",
+                                         int(row.get("total_size") or 0),
+                                         int(row.get("piece_length") or 0), (), ()]
+            _BY_COPIES.setdefault(0, set()).add(info_hash)
+        if state == "gone":
+            held.discard(info_hash)
+            _without(info_hash, ds, nid)
+            continue
+        held.add(info_hash)
+        before = len(ds[3])
+        ds[3] = tuple(i for i in ds[3] if i != nid)
+        ds[4] = tuple(i for i in ds[4] if i != nid)
+        if state == "complete":
+            ds[3] += (nid,)
+        else:
+            ds[4] += (nid,)
+        _recount(info_hash, before, len(ds[3]))
+
+
+def drop_node(nid: int) -> None:
+    """Forget everything one node was reporting — it is gone, or about to say
+    everything again. Caller holds _AGG_LOCK."""
+    for info_hash in _HELD_BY.pop(nid, ()):
+        ds = _DATASETS.get(info_hash)
+        if ds is not None:
+            _without(info_hash, ds, nid)
+
+
+def _label(nid: int) -> str:
+    return (_NODES.get(_NODE_KEY.get(nid, "")) or {}).get("label") or str(nid)
+
+
+def _moving() -> dict:
+    """(node id, info_hash) -> that node's live transfer row, for the datasets
+    being looked at. Bounded by what is moving, not by what is held."""
+    out = {}
+    for key, rec in _NODES.items():
+        nid = _NODE_ID.get(key)
+        if nid is not None:
+            for t in rec.get("transfers") or []:
+                out[(nid, t["info_hash"])] = t
+    return out
+
+
+def dataset_meta(info_hash: str, ds: list) -> dict:
+    return {"info_hash": info_hash, "name": ds[0],
+            "total_size": ds[1], "piece_length": ds[2]}
+
+
+def holders_of(info_hash: str, ds: list, moving: dict) -> list:
+    """The holder rows swarm_stats.overview_row expects, rebuilt from the ids —
+    O(copies), and only for the datasets on the page."""
+    rows = [{"label": _label(nid), "state": "complete", "progress": 1.0,
+             "download_rate": 0} for nid in ds[3]]
+    for nid in ds[4]:
+        live = moving.get((nid, info_hash))
+        rows.append({"label": _label(nid), "state": "downloading",
+                     "progress": float(live["progress"]) if live else 0.0,
+                     "download_rate": int(live["download_rate"]) if live else 0})
+    return rows
+
+
 # --- following the nodes ------------------------------------------------------
 # One refresh, and the two rules that keep it from growing with the swarm: ask
 # every node what it is (cheap, always), and ask what it holds only when it says
 # that changed (and then only for the change).
 
-def follow(rec: dict, base: str) -> None:
-    """Bring one node's holdings up to date by following its cursor.
+def follow(rec: dict, base: str) -> tuple:
+    """What one node holds, as far as it will tell us: (cursor, rows, listed).
 
     Two attempts at most: with the cursor we hold, and — if the node says it
-    cannot answer from that one — with none, taking the full list. Nothing here
-    parses the cursor. That is the node's business, which is exactly why it can
-    tell us the cursor is stale instead of us having to work it out: a restarted
-    node would otherwise answer "nothing has changed since 4417233" forever, and
-    be believed.
+    cannot answer from that one — with none, taking the full list, which comes
+    in pages. Nothing here parses the cursor. That is the node's business, which
+    is exactly why it can tell us the cursor is stale instead of us having to
+    work it out: a restarted node would otherwise answer "nothing has changed
+    since 4417233" forever, and be believed.
+
+    `listed` says which of the two it was, because the answers mean different
+    things: a full listing is the whole truth for that node and replaces what we
+    had of it, a delta only amends it.
     """
     for cursor in (rec["cursor"], None):
-        held = dict(rec["holdings"]) if cursor else {}
+        listed, rows = cursor is None, []
         try:
             while True:
                 page = catalog.fetch_holdings(base, since=cursor)
-                for row in page.get("holdings") or []:
-                    if row.get("state") == "gone":
-                        # The tombstone. Without it a dropped dataset would be
-                        # indistinguishable from one simply not mentioned — and
-                        # since holding is what makes a dataset exist, the last
-                        # of these is a dataset leaving the swarm.
-                        held.pop(row["info_hash"], None)
-                    else:
-                        held[row["info_hash"]] = row
+                rows += page.get("holdings") or []
                 cursor = page["cursor"]
                 if not page.get("more"):
                     break
         except catalog.Resync:
             continue
-        rec["cursor"], rec["holdings"] = cursor, held
-        return
+        return cursor, rows, listed
+    return rec["cursor"], [], False
 
 
-def refresh(st: dict, now: float) -> None:
-    """Take in one node's current state. Called per node, in parallel."""
+def refresh(st: dict, now: float) -> tuple:
+    """Read one node: (key, what it holds or None, what it is moving).
+
+    Called per node in parallel, so it touches only that node's own record and
+    hands the rows back to be folded in one place rather than writing the
+    catalog from sixteen threads."""
     key, label = st["node_key"], st.get("label", st["node_key"])
     base = f"http://{label}"
-    rec = _NODES.setdefault(key, {"cursor": None, "holdings": {}, "transfers": []})
+    rec = _NODES.setdefault(key, {"cursor": None, "transfers": []})
     rec.update({"base": base, "label": label, "stats": st, "at": now})
     try:
         # The whole economy of this file: holdings are refetched only when the
         # node's cursor says something actually changed.
-        if st.get("cursor") != rec["cursor"]:
-            follow(rec, base)
-        rec["transfers"] = catalog.fetch_transfers(base)
+        followed = follow(rec, base) if st.get("cursor") != rec["cursor"] else None
+        return key, followed, catalog.fetch_transfers(base)
     except Exception:
-        pass
+        return key, None, None
 
 
 def poll(now: float = None) -> list:
     """Every live node's record, refreshed at most once per POLL_TTL.
 
-    Every view in this file is a pure function of this list plus the dataset
-    metadata cache. A node that doesn't answer drops out of it but keeps its
-    record, so a node that blips comes back on its cursor rather than re-listing
-    everything it holds."""
+    A node that doesn't answer drops out of this list but keeps its record and
+    its cursor, so a node that blips comes back on the cursor rather than
+    re-listing everything it holds. One that stays silent longer than GONE_AFTER
+    is treated as gone: what it was holding stops counting."""
     now = now if now is not None else time.time()
     with _POLL_LOCK:
         if now - _POLL["at"] >= config.POLL_TTL:
@@ -242,10 +369,28 @@ def poll(now: float = None) -> list:
                     continue
                 _POLL["bases"] = bases
                 with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
-                    list(pool.map(lambda st: refresh(st, now), stats))
+                    read = list(pool.map(lambda st: refresh(st, now), stats))
                 answered = {st["node_key"] for st in stats}
-                for key, rec in _NODES.items():
-                    rec["live"] = key in answered
+                with _AGG_LOCK:
+                    for key, followed, transfers in read:
+                        rec = _NODES[key]
+                        if transfers is not None:
+                            rec["transfers"] = transfers
+                        if followed:
+                            cursor, rows, listed = followed
+                            nid = node_id(key)
+                            if listed:
+                                drop_node(nid)   # the listing is the whole truth
+                            apply_rows(nid, rows)
+                            rec["cursor"] = cursor
+                    for key, rec in _NODES.items():
+                        rec["live"] = key in answered
+                        if key in answered:
+                            rec["seen"] = now
+                        elif (now - rec.get("seen", now) > GONE_AFTER
+                              and _NODE_ID.get(key) in _HELD_BY):
+                            drop_node(_NODE_ID[key])
+                            rec["cursor"] = None    # it must list in full again
                 break
         return [rec for rec in _NODES.values() if rec.get("live")]
 
@@ -384,11 +529,13 @@ def build_overview() -> dict:
     holdings stream itself.
     """
     now = time.time()
-    catalog = swarm_stats.catalog_from(
-        [(rec["label"], rec["holdings"], rec["transfers"]) for rec in poll(now)])
-    return {"ts": now,
-            "datasets": [swarm_stats.overview_row(meta, holders)
-                         for meta, holders in catalog.values()]}
+    poll(now)
+    with _AGG_LOCK:
+        moving = _moving()
+        rows = [swarm_stats.overview_row(dataset_meta(info_hash, ds),
+                                         holders_of(info_hash, ds, moving))
+                for info_hash, ds in _DATASETS.items()]
+    return {"ts": now, "datasets": rows}
 
 
 def build_torrent_detail(info_hash: str) -> dict:
@@ -399,7 +546,11 @@ def build_torrent_detail(info_hash: str) -> dict:
     in the catalog. That is the whole reason the bitfield lives on its own
     endpoint."""
     nodes = poll()
-    have = [rec for rec in nodes if info_hash in rec["holdings"]]
+    with _AGG_LOCK:
+        ds = _DATASETS.get(info_hash)
+        holders = {_NODE_KEY.get(nid) for nid in (ds[3] + ds[4])} if ds else set()
+    have = [rec for rec in nodes
+            if (rec.get("stats") or {}).get("node_key") in holders]
     # Asked of a holder, which is the only kind of node that has the .torrent to
     # answer from — and, since holding is what makes a dataset exist, the only
     # kind there is when the dataset is there at all.
@@ -460,7 +611,7 @@ def node_summary(rec: dict) -> dict:
     st = rec.get("stats") or {}
     disk = st.get("disk") or {}
     return {"label": rec["label"],
-            "datasets": len(rec["holdings"]),
+            "datasets": int(st.get("held") or 0),
             "complete": int(st.get("complete") or 0),
             "stored": int(st.get("stored") or 0),
             "download_rate": int(st.get("download_rate") or 0),
@@ -493,14 +644,17 @@ def build_node_detail(label: str) -> dict:
             continue
         moving = {t["info_hash"]: t for t in rec["transfers"]}
         rows = []
-        for info_hash, row in rec["holdings"].items():
+        with _AGG_LOCK:
+            nid = _NODE_ID.get((rec.get("stats") or {}).get("node_key"))
+            held = [(ih, _DATASETS[ih]) for ih in _HELD_BY.get(nid, ())
+                    if ih in _DATASETS]
+        for info_hash, ds in held:
             live = moving.get(info_hash)
-            state = row.get("state")
-            complete = state == "complete"
-            size = int(row.get("total_size") or 0)
+            complete = nid in ds[3]
+            size = ds[1]
             rows.append({
                 "info_hash": info_hash,
-                "name": row.get("name") or info_hash[:12],
+                "name": ds[0] or info_hash[:12],
                 "total_size": size,
                 "complete": complete,
                 "progress": 1.0 if complete
