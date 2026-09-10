@@ -407,9 +407,14 @@ def refresh(st: dict, now: float) -> tuple:
     rec.update({"base": base, "label": label, "stats": st, "at": now})
     try:
         # The whole economy of this file: holdings are refetched only when the
-        # node's cursor says something actually changed.
+        # node's cursor says something actually changed, and what is moving is
+        # asked for only when /stats says something is. An empty list, not None
+        # — None means the node did not answer and what we had of it stands,
+        # while a node with nothing in flight has nothing in flight, and the
+        # rows from the transfer that just finished are not to be kept.
         followed = follow(rec, base) if st.get("cursor") != rec["cursor"] else None
-        return key, followed, catalog.fetch_transfers(base)
+        moving = catalog.fetch_transfers(base) if st.get("moving") else []
+        return key, followed, moving
     except Exception:
         return key, None, None
 
