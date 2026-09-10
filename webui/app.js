@@ -385,6 +385,8 @@ const TransferRow = component({
     etaText: "",
     peersText: "",
     peersClass: "nnum",
+    errorText: "",
+    hasError: false,
   },
   statics: {
     fromData(tr) {
@@ -394,6 +396,10 @@ const TransferRow = component({
       return this.make({
         node: tr.node,
         name: tr.name,
+        // A node that cannot read or write the files says so; without it a
+        // transfer that cannot proceed looks like one that is merely slow.
+        errorText: tr.error ? `cannot write: ${tr.error}` : "",
+        hasError: Boolean(tr.error),
         href: `/dataset/${encodeURIComponent(tr.info_hash)}`,
         pctText: `${pct}%`,
         barStyle: `width:${pct}%`,
@@ -401,12 +407,13 @@ const TransferRow = component({
         rateText: active ? `▼${human(tr.download_rate)}/s` : "—",
         etaText: formatEta(tr.eta),
         peersText: stuck ? "0 · stuck" : String(tr.num_peers),
-        peersClass: stuck ? "nnum bad" : "nnum",
+        peersClass: tr.error || stuck ? "nnum bad" : "nnum",
       });
     },
   },
   view: html`<div class="transferrow">
-    <a class="tlink" data-link="1" :href=".href" @text=".name"></a>
+    <a class="tlink" data-link="1" :href=".href" @text=".name">
+      </a><span class="bad small" @show=".hasError" @text=".errorText"></span>
     <span @text=".node"></span>
     <span class="pbar"><span :class=".barClass" :style=".barStyle"></span></span>
     <span class="nnum" @text=".pctText"></span>

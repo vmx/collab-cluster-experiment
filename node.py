@@ -16,8 +16,8 @@ coordinator.
                                  unioned across nodes, it is the catalog.
   GET  /holdings/<info_hash>     one dataset here, with its piece bitfield — the
                                  drill-down, one dataset at a time.
-  GET  /transfers                what is moving right now: progress and rates,
-                                 for in-flight transfers only.
+  GET  /transfers                what is moving right now: progress, rates, and
+                                 why one is not moving, for in-flight only.
   GET  /catalog/<info_hash>      one dataset's file -> piece-range map, for the
                                  per-file views. Held datasets only.
   GET  /catalog/<info_hash>.torrent   the raw .torrent. Held datasets only —
@@ -496,6 +496,10 @@ def node_stats(ns: NodeState) -> dict:
             # ones have got. Both sides are already to hand, so this stays
             # O(what is moving) rather than O(what is held).
             "stored": ns.stored_complete + sum(t["bytes_done"] for t in moving),
+            # Transfers that cannot proceed because this node cannot read or
+            # write their files. Bounded by what is in flight, like the rest of
+            # this, and enough for a reader to know to look.
+            "errors": sum(1 for t in moving if t.get("error")),
             "cursor": cursor, **rates}
 
 
@@ -559,7 +563,7 @@ def transfer_row(info_hash: str, entry: dict, st) -> dict:
             "total_size": entry["ti"].total_size(),
             "progress": st.progress, "bytes_done": st.total_done,
             "download_rate": st.download_rate, "upload_rate": st.upload_rate,
-            "num_peers": st.num_peers}
+            "num_peers": st.num_peers, "error": entry.get("error")}
 
 
 def holding_detail(ns: NodeState, info_hash: str) -> dict:
@@ -813,6 +817,34 @@ def _write_resume(ns: NodeState, alert) -> None:
         f.write(lt.write_resume_data_buf(alert.params))
 
 
+def _note_file_error(ns: NodeState, alert) -> None:
+    """A node that cannot read or write a dataset's files says so.
+
+    libtorrent reports this once and carries nothing about it afterwards — the
+    torrent's own status is clean — so without this a dataset that cannot be
+    written looks exactly like a slow transfer, for as long as anyone watches.
+    Recorded on the entry as well as logged, so /transfers carries it too, and
+    kept against the progress at the time: it clears if the transfer moves
+    again, and otherwise stands, because it is still true. libtorrent does not
+    pick such a torrent back up in place — it connects no peers to it, and
+    clear_error, resume and force_recheck change none of that, nor does
+    restarting the node, which resumes it into the same state. Dropping the
+    dataset and taking it again does, in seconds. So the error stands until
+    someone does that, which is exactly when it stops being true."""
+    info_hash = str(alert.handle.info_hashes().v2)
+    message = alert.error.message()
+    done = alert.handle.status().total_done
+    with ns.lock:
+        entry = ns.torrents.get(info_hash)
+        if not entry:
+            return
+        said, entry["error"] = entry.get("error"), message
+        entry["error_at"] = done
+    if said != message:      # libtorrent repeats itself; a log need not
+        print(f"node {ns.node_id}: !'{alert.torrent_name}' [{info_hash[:8]}] "
+              f"{message}: {alert.filename()}", flush=True)
+
+
 def load_resumes(ns: NodeState) -> int:
     """Re-add every torrent saved as a .resume file (native fast-resume). The
     resume file is self-contained (save_info_dict), so no catalog lookup needed."""
@@ -910,6 +942,8 @@ def session_loop(ns: NodeState) -> None:
         for a in ns.ses.pop_alerts():
             if isinstance(a, lt.save_resume_data_alert):
                 _write_resume(ns, a)
+            elif isinstance(a, lt.file_error_alert):
+                _note_file_error(ns, a)
             elif isinstance(a, lt.session_stats_alert):
                 # Only the newest: a batch can hold a loop's reply and this
                 # one's, and reading both against the same clock would divide a
@@ -928,6 +962,8 @@ def session_loop(ns: NodeState) -> None:
             # Free, since we hold the status anyway: recorded for mesh() rather
             # than asked for a second time.
             checked.append((entry, st.state in CHECKING_STATES))
+            if entry.get("error") and st.total_done > entry["error_at"]:
+                entry["error"] = None          # moving again, so it is over
             if st.is_seeding or st.progress >= 1.0:
                 finished.append((info_hash, entry))
             else:

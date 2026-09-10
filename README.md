@@ -319,6 +319,10 @@ to 0. A node's real identity is a persisted UUID in `nodes/<id>/node_key`.
   along with any record that it existed, and a node that is *down* looks, in a
   single fan-out, like one that never had the data. Watching copy counts over
   time tells the two apart; that is the dashboard's job.
+- **A transfer that hits a disk error stays stopped.** The node says so — in its
+  log, in `/transfers`, and as a count in `/stats` — but libtorrent will not pick
+  that torrent back up, and neither a restart nor fixing the disk restarts it.
+  `remove` then `add` does, in seconds.
 - **`remove` doesn't delete the files.** It stops serving a dataset and forgets
   it across restarts, but the downloaded copy stays in `nodes/<id>/data/`.
 - **Nothing weighs a dataset against free space.** `add` never refuses, however
