@@ -153,7 +153,7 @@ directories published as `media` coexist as separate datasets. On disk each gets
 a readable slug, `<name>_<first 8 hex of hash>`:
 
 ```
-nodes/0/catalog/30/media_3005dbcc.torrent    # the torrent, for a dataset it holds
+nodes/0/torrents/30/media_3005dbcc.torrent   # the torrent, for a dataset it holds
 nodes/0/data/30/media_3005dbcc/media/…       # the copy it downloaded
 nodes/0/.resume/30/media_3005dbcc.resume     # libtorrent fast-resume
 ```
@@ -307,7 +307,7 @@ to 0. A node's real identity is a persisted UUID in `nodes/<id>/node_key`.
 
 ## Generated files (safe to delete)
 
-- `nodes/<id>/catalog/` — the .torrent files for the datasets it holds
+- `nodes/<id>/torrents/` — the .torrent files for the datasets it holds
 - `nodes/<id>/data/` — datasets it downloaded (published ones stay in place)
 - `nodes/<id>/.resume/` — libtorrent fast-resume, so a restart doesn't re-download
 - `nodes/<id>/node_key` — its persisted identity

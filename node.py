@@ -189,9 +189,9 @@ def node_dir(node_id: int) -> str:
     return os.path.join(config.NODES_DIR, str(node_id))
 
 
-def catalog_dir(node_id: int) -> str:
-    """This node's .torrent files — its answer to "what datasets exist"."""
-    return os.path.join(node_dir(node_id), "catalog")
+def torrents_dir(node_id: int) -> str:
+    """The .torrent of each dataset this node holds, and of no other."""
+    return os.path.join(node_dir(node_id), "torrents")
 
 
 def data_dir(node_id: int) -> str:
@@ -249,7 +249,7 @@ def store_torrent(ns: NodeState, name: str, info_hash: str, blob: bytes) -> str:
     what holding the dataset already costs.
 
     Written via a temp file + rename so a reader never sees a partial torrent."""
-    directory = catalog_dir(ns.node_id)
+    directory = torrents_dir(ns.node_id)
     os.makedirs(directory, exist_ok=True)
     path = held_path(directory, name, info_hash, ".torrent")
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -264,7 +264,7 @@ def drop_torrent(ns: NodeState, name: str, info_hash: str) -> None:
     """Forget a dataset's .torrent when the data goes. The directory holds what
     this node holds, so a dropped dataset leaves nothing behind to serve."""
     try:
-        os.remove(held_path(catalog_dir(ns.node_id), name, info_hash, ".torrent"))
+        os.remove(held_path(torrents_dir(ns.node_id), name, info_hash, ".torrent"))
     except FileNotFoundError:
         pass
 
@@ -1207,7 +1207,7 @@ def make_handler(ns: NodeState):
             if not raw:
                 return self._send_json(dataset_meta(info_hash, entry))
             try:
-                with open(held_path(catalog_dir(ns.node_id), entry["name"],
+                with open(held_path(torrents_dir(ns.node_id), entry["name"],
                                     info_hash, ".torrent"), "rb") as f:
                     body = f.read()
             except OSError:
@@ -1266,7 +1266,7 @@ def main() -> None:
 
     node_key = load_or_create_node_key(args.id)
     ns = NodeState(args.id, node_key, make_session(args.id))
-    os.makedirs(catalog_dir(args.id), exist_ok=True)
+    os.makedirs(torrents_dir(args.id), exist_ok=True)
     resumed = load_resumes(ns)       # what it was holding before a restart
 
     threads = [threading.Thread(target=run, args=(session_loop, ns), daemon=True)]

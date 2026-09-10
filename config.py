@@ -12,8 +12,8 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 NODES_DIR = os.path.join(BASE_DIR, "nodes")
 
 # Where the built-in sample datasets are generated (make_torrent.py). Nothing
-# else lives under data/ any more — each node keeps its own catalog of .torrent
-# files under nodes/<id>/catalog/, because there is no central catalog.
+# else lives under data/ any more — each node keeps the .torrent files of what it
+# holds under nodes/<id>/torrents/, and nothing keeps anyone else's.
 SAMPLE_DIR = os.path.join(DATA_DIR, "sample")
 
 # --- Network -----------------------------------------------------------------
