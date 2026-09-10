@@ -281,7 +281,7 @@ lifetime, so a reader fetches it once from any holder and keeps it.
 | `node.py` | **The system.** libtorrent session + the sync tick (beacon, peers, mesh) + the HTTP API. Run one per machine. |
 | `control.py` | CLI to talk to a node: publish, list, peers, status, add, remove, map. |
 | `make_torrent.py` | Builds v2-only, private, trackerless torrents (`build()`). As a script, generates the sample content. |
-| `catalog.py` | Stdlib client for another node's HTTP API: `fetch_stats`/`fetch_holdings` (cursor-following, raises `Resync`)/`fetch_transfers`/`fetch_holding`/`fetch_meta`, plus `fetch_swarm()` — every node's `/stats`, gathered through one node's peer table. No libtorrent. |
+| `node_client.py` | Stdlib client for another node's HTTP API: `fetch_stats`/`fetch_holdings` (cursor-following, raises `Resync`)/`fetch_transfers`/`fetch_holding`/`fetch_meta`, plus `fetch_swarm()` — every node's `/stats`, gathered through one node's peer table. No libtorrent. |
 | `beacon.py` | The discovery datagram: join the group, send, drain. No libtorrent. |
 | `config.py` | Ports, beacon group, timing, paths. |
 | `swarm_stats.py` | The catalog and the copy-count arithmetic: `catalog_from()` unions the holdings streams, `overview_row()` scores a dataset from holdings alone, `holder_rows()`/`per_file()` work from piece bitfields. Shared by `control.py` and `collector.py`. |

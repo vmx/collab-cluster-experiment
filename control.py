@@ -27,8 +27,8 @@ import sys
 import urllib.error
 import urllib.request
 
-import catalog
 import config
+import node_client
 import swarm_stats
 
 # A dataset reference that looks like hex is treated as an info-hash, in full or
@@ -45,7 +45,7 @@ PUBLISH_TIMEOUT = 3600.0
 
 
 def _post(endpoint: str, path: str, payload: dict, timeout: float = 5.0):
-    base = catalog.base_url(endpoint)
+    base = node_client.base_url(endpoint)
     req = urllib.request.Request(f"{base}{path}", data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json"})
     try:
@@ -94,7 +94,7 @@ def cmd_list(args) -> None:
     Printed as the merge turns each dataset up, in info-hash order. Sorting by
     name would mean holding the whole swarm's catalog before the first line —
     which is the one thing a full listing at this scale cannot do."""
-    base = catalog.base_url(args.endpoint)
+    base = node_client.base_url(args.endpoint)
     try:
         nodes = swarm_labels(base)
     except Exception:
@@ -124,7 +124,7 @@ def cmd_list(args) -> None:
 
 def cmd_peers(args) -> None:
     try:
-        view = catalog.fetch_peers(catalog.base_url(args.endpoint))
+        view = node_client.fetch_peers(node_client.base_url(args.endpoint))
     except Exception:
         _unreachable(args.endpoint)
     me = view.get("self") or {}
@@ -158,7 +158,7 @@ def swarm_stream(nodes: list):
     def tagged(label, node):
         # A function, not a generator expression: an expression would close over
         # the loop variable and tag every row with the last node's label.
-        for row in catalog.holdings_stream(node):
+        for row in node_client.holdings_stream(node):
             yield row["info_hash"], label, row
 
     streams = [tagged(label, node) for label, node in nodes]
@@ -175,7 +175,7 @@ def swarm_stream(nodes: list):
 
 def swarm_labels(base: str) -> list:
     """[(label, base)] for every node reachable through the one named."""
-    stats, _ = catalog.fetch_swarm(base)
+    stats, _ = node_client.fetch_swarm(base)
     return [(st["label"], f"http://{st['label']}") for st in stats if st.get("label")]
 
 
@@ -185,7 +185,7 @@ def in_flight(nodes: list) -> dict:
     out = {}
     for label, node in nodes:
         try:
-            out[label] = {t["info_hash"]: t for t in catalog.fetch_transfers(node)}
+            out[label] = {t["info_hash"]: t for t in node_client.fetch_transfers(node)}
         except Exception:
             out[label] = {}
     return out
@@ -211,7 +211,7 @@ def swarm_bases(base: str) -> list:
     """Every node reachable through the one named, as addresses and nothing
     else. What a caller wants when it has a question for each node rather than
     a use for everything they hold."""
-    stats, _ = catalog.fetch_swarm(base)
+    stats, _ = node_client.fetch_swarm(base)
     return [f"http://{st.get('label')}" for st in stats if st.get("label")]
 
 
@@ -226,18 +226,18 @@ MAP_TOP = 50
 
 
 def cmd_status(args) -> None:
-    base = catalog.base_url(args.endpoint)
+    base = node_client.base_url(args.endpoint)
     try:
-        stats = catalog.fetch_stats(base)
+        stats = node_client.fetch_stats(base)
     except Exception:
         _unreachable(args.endpoint)
     held = int(stats.get("held") or 0)
     if not held:
         print(f"{args.endpoint}: holding nothing yet")
         return
-    moving = {t["info_hash"]: t for t in catalog.fetch_transfers(base)}
+    moving = {t["info_hash"]: t for t in node_client.fetch_transfers(base)}
     parts, shown = [], 0
-    for row in catalog.holdings_stream(base):
+    for row in node_client.holdings_stream(base):
         if not args.all and shown == STATUS_SHOWN:
             parts.append(f"... and {held - shown} more (--all)")
             break
@@ -276,7 +276,7 @@ def cmd_add(args) -> None:
     in, so it takes an info-hash and fetches the .torrent from whoever holds the
     dataset. Resolving it asks each node about that one reference; an info-hash
     given in full is not a question at all."""
-    base = catalog.base_url(args.endpoint)
+    base = node_client.base_url(args.endpoint)
     try:
         info_hash = resolve_across(base, args.dataset)
     except Exception:
@@ -453,7 +453,7 @@ def resolve_across(base: str, ref: str) -> str:
     names = {}
     for node in swarm_bases(base):
         try:
-            for row in catalog.fetch_matching(node, ref):
+            for row in node_client.fetch_matching(node, ref):
                 names[row["info_hash"]] = row.get("name") or ""
         except Exception:
             continue          # a node that doesn't answer simply has no match
@@ -480,7 +480,7 @@ def resolve_ref(names: dict, ref: str) -> str:
 
 
 def cmd_map(args) -> None:
-    base = catalog.base_url(args.endpoint)
+    base = node_client.base_url(args.endpoint)
     try:
         nodes = swarm_labels(base)
     except Exception:
@@ -517,7 +517,7 @@ def cmd_map(args) -> None:
     info_hash = resolve_across(base, args.dataset)
     holders, holder_bases = [], []
     for label, node in nodes:
-        detail = catalog.fetch_holding(node, info_hash)
+        detail = node_client.fetch_holding(node, info_hash)
         if detail:
             holders.append((label, label, detail))
             holder_bases.append(node)
@@ -528,7 +528,7 @@ def cmd_map(args) -> None:
         return
     # The file -> piece map is the one thing not in a holdings row, so it comes
     # from a holder: the only kind of node that has the .torrent to answer from.
-    meta = catalog.fetch_meta(holder_bases[0], info_hash)
+    meta = node_client.fetch_meta(holder_bases[0], info_hash)
     render_torrent(meta, swarm_stats.holder_rows(meta, holders))
 
 

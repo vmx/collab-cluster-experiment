@@ -72,9 +72,9 @@ from urllib.parse import parse_qs, urlsplit
 import libtorrent as lt
 
 import beacon
-import catalog
 import config
 import make_torrent
+import node_client
 
 # Persist torrents natively via libtorrent fast-resume. save_info_dict embeds the
 # torrent's metadata in the resume file, so a restarted node can re-add a torrent
@@ -733,7 +733,7 @@ def fetch_torrent(ns: NodeState, info_hash: str) -> bytes:
                  if p.get("ip") and p.get("http")]
     for base in bases:
         try:
-            blob = catalog.fetch_torrent_bytes(base, info_hash)
+            blob = node_client.fetch_torrent_bytes(base, info_hash)
         except Exception:
             continue
         got = str(lt.torrent_info(lt.bdecode(blob)).info_hashes().v2)

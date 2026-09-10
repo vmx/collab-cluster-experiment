@@ -1,7 +1,7 @@
 """Optional dashboard for the swarm.
 
 Purely observability, and entirely a client: it reads the whole swarm through
-any one node's peer table (catalog.fetch_swarm), and finds that node the way
+any one node's peer table (node_client.fetch_swarm), and finds that node the way
 nodes find each other — by listening to the multicast beacon. So it is told no
 addresses and configured with nothing, exactly like the nodes it watches. Nor
 are they configured for it: they do not report to it and cannot tell whether
@@ -79,8 +79,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import beacon
-import catalog
 import config
+import node_client
 import swarm_stats
 
 # The web UI is plain static files (no build step); the collector is already the
@@ -384,12 +384,12 @@ def follow(rec: dict, base: str) -> tuple:
         listed, rows = cursor is None, []
         try:
             while True:
-                page = catalog.fetch_holdings(base, since=cursor)
+                page = node_client.fetch_holdings(base, since=cursor)
                 rows += page.get("holdings") or []
                 cursor = page["cursor"]
                 if not page.get("more"):
                     break
-        except catalog.Resync:
+        except node_client.Resync:
             continue
         return cursor, rows, listed
     return rec["cursor"], [], False
@@ -413,7 +413,7 @@ def refresh(st: dict, now: float) -> tuple:
         # while a node with nothing in flight has nothing in flight, and the
         # rows from the transfer that just finished are not to be kept.
         followed = follow(rec, base) if st.get("cursor") != rec["cursor"] else None
-        moving = catalog.fetch_transfers(base) if st.get("moving") else []
+        moving = node_client.fetch_transfers(base) if st.get("moving") else []
         return key, followed, moving
     except Exception:
         return key, None, None
@@ -432,7 +432,7 @@ def poll(now: float = None) -> list:
             _POLL["at"] = now
             for base in ways_in():
                 try:
-                    stats, bases = catalog.fetch_swarm(base)
+                    stats, bases = node_client.fetch_swarm(base)
                 except Exception:
                     continue
                 _POLL["bases"] = bases
@@ -475,7 +475,7 @@ def meta_for(info_hash: str, bases: list) -> dict:
         return got
     for base in bases:
         try:
-            got = catalog.fetch_meta(base, info_hash)
+            got = node_client.fetch_meta(base, info_hash)
         except Exception:
             continue
         with _META_LOCK:
@@ -643,7 +643,7 @@ def build_torrent_detail(info_hash: str) -> dict:
 
 def _holding_or_none(base: str, info_hash: str):
     try:
-        return catalog.fetch_holding(base, info_hash)
+        return node_client.fetch_holding(base, info_hash)
     except Exception:
         return None
 
@@ -862,7 +862,7 @@ def main() -> None:
                          "doesn't reach. Any node will do: it is a way into the "
                          "swarm, not a source of truth.")
     args = ap.parse_args()
-    SEED = catalog.base_url(args.node) if args.node else ""
+    SEED = node_client.base_url(args.node) if args.node else ""
 
     threading.Thread(target=listen_for_nodes, daemon=True).start()
     srv = ThreadingHTTPServer((config.COLLECTOR_HOST, config.COLLECTOR_PORT),
