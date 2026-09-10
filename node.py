@@ -174,6 +174,16 @@ def slug(name: str, info_hash: str) -> str:
     return f"{safe}_{info_hash[:8]}"
 
 
+def held_path(directory: str, name: str, info_hash: str, suffix: str = "") -> str:
+    """Where one dataset's file or directory lives: "<dir>/<ab>/<slug><suffix>".
+
+    The shard is the first byte of the info-hash, so a node holding a million
+    datasets spreads them over 256 directories instead of filling one. It is
+    part of the slug already, and every caller has the info-hash to hand, so
+    nothing has to be looked up to know where something belongs."""
+    return os.path.join(directory, info_hash[:2], slug(name, info_hash) + suffix)
+
+
 def node_dir(node_id: int) -> str:
     return os.path.join(config.NODES_DIR, str(node_id))
 
@@ -240,7 +250,8 @@ def store_torrent(ns: NodeState, name: str, info_hash: str, blob: bytes) -> str:
     Written via a temp file + rename so a reader never sees a partial torrent."""
     directory = catalog_dir(ns.node_id)
     os.makedirs(directory, exist_ok=True)
-    path = os.path.join(directory, f"{slug(name, info_hash)}.torrent")
+    path = held_path(directory, name, info_hash, ".torrent")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.tmp{os.getpid()}"
     with open(tmp, "wb") as f:
         f.write(blob)
@@ -252,8 +263,7 @@ def drop_torrent(ns: NodeState, name: str, info_hash: str) -> None:
     """Forget a dataset's .torrent when the data goes. The directory holds what
     this node holds, so a dropped dataset leaves nothing behind to serve."""
     try:
-        os.remove(os.path.join(catalog_dir(ns.node_id),
-                               f"{slug(name, info_hash)}.torrent"))
+        os.remove(held_path(catalog_dir(ns.node_id), name, info_hash, ".torrent"))
     except FileNotFoundError:
         pass
 
@@ -656,7 +666,7 @@ def add_torrent(ns: NodeState, blob: bytes, serve_path: str = None) -> dict:
     else:
         # Each dataset gets its own directory, keyed by slug rather than name, so
         # two datasets sharing a name don't download over each other.
-        save_path = os.path.join(data_dir(ns.node_id), slug(tname, info_hash))
+        save_path = held_path(data_dir(ns.node_id), tname, info_hash)
         os.makedirs(save_path, exist_ok=True)
 
     # On disk before it is in the stream: a peer that reacts to our transition
@@ -741,8 +751,8 @@ def remove_torrent(ns: NodeState, info_hash: str) -> dict:
     # Drop its resume file so a restart doesn't bring the torrent back, and its
     # .torrent so this node stops answering for a dataset it no longer has.
     try:
-        os.remove(os.path.join(resume_dir(ns.node_id),
-                               f"{slug(entry['name'], info_hash)}.resume"))
+        os.remove(held_path(resume_dir(ns.node_id), entry["name"], info_hash,
+                            ".resume"))
     except FileNotFoundError:
         pass
     drop_torrent(ns, entry["name"], info_hash)
@@ -782,9 +792,9 @@ def _write_resume(ns: NodeState, alert) -> None:
         held = info_hash in ns.torrents
     if not held:
         return
-    os.makedirs(resume_dir(ns.node_id), exist_ok=True)
-    path = os.path.join(resume_dir(ns.node_id),
-                        f"{slug(alert.torrent_name, info_hash)}.resume")
+    path = held_path(resume_dir(ns.node_id), alert.torrent_name, info_hash,
+                     ".resume")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as f:
         f.write(lt.write_resume_data_buf(alert.params))
 
@@ -793,7 +803,7 @@ def load_resumes(ns: NodeState) -> int:
     """Re-add every torrent saved as a .resume file (native fast-resume). The
     resume file is self-contained (save_info_dict), so no catalog lookup needed."""
     count = 0
-    for path in sorted(glob.glob(os.path.join(resume_dir(ns.node_id), "*.resume"))):
+    for path in glob.iglob(os.path.join(resume_dir(ns.node_id), "*", "*.resume")):
         try:
             with open(path, "rb") as f:
                 atp = lt.read_resume_data(f.read())
@@ -1143,9 +1153,8 @@ def make_handler(ns: NodeState):
             if not raw:
                 return self._send_json(dataset_meta(info_hash, entry))
             try:
-                with open(os.path.join(catalog_dir(ns.node_id),
-                                       f"{slug(entry['name'], info_hash)}.torrent"),
-                          "rb") as f:
+                with open(held_path(catalog_dir(ns.node_id), entry["name"],
+                                    info_hash, ".torrent"), "rb") as f:
                     body = f.read()
             except OSError:
                 return self._send_json({"error": "not readable"}, 404)

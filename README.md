@@ -149,10 +149,13 @@ directories published as `media` coexist as separate datasets. On disk each gets
 a readable slug, `<name>_<first 8 hex of hash>`:
 
 ```
-nodes/0/catalog/media_3005dbcc.torrent    # the torrent, for a dataset it holds
-nodes/0/data/media_3005dbcc/media/…       # the copy it downloaded
-nodes/0/.resume/media_3005dbcc.resume     # libtorrent fast-resume
+nodes/0/catalog/30/media_3005dbcc.torrent    # the torrent, for a dataset it holds
+nodes/0/data/30/media_3005dbcc/media/…       # the copy it downloaded
+nodes/0/.resume/30/media_3005dbcc.resume     # libtorrent fast-resume
 ```
+
+The `30/` is the first byte of the info-hash: a node holding a million datasets
+spreads them over 256 directories rather than filling one.
 
 All three exist for exactly the datasets this node holds, and are deleted
 together when it drops one. The other `media` sits beside it as
