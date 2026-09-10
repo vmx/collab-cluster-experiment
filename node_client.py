@@ -1,10 +1,10 @@
 """Stdlib client for another node's HTTP API.
 
-There is no catalog anywhere — not centrally, and not on a node. Publishing
+No node knows every dataset, and there is no central list either. Publishing
 seeds the data in place, so every dataset has a holder from the moment it
 exists, and the set of datasets in the swarm is the union of what its nodes
-hold. "The catalog" is therefore something a reader assembles from these calls,
-not something it asks anyone for.
+hold. A reader assembles that list from these calls; there is no one to ask for
+it.
 
 The node's API is split so that nothing a reader polls grows with how much that
 node holds, and these are the four halves of that split: fetch_stats for what a
@@ -67,7 +67,7 @@ def fetch_holdings(base: str, since: str = None, timeout: float = 30.0) -> dict:
 
     Rows are {info_hash, state, name, total_size, piece_length} — enough to list
     a dataset without asking anyone anything else, which is what lets the union
-    of these streams stand in for a catalog.
+    of these streams be the list of datasets in the swarm.
 
     With no cursor this is the first page of everything it holds; with one,
     either the next page or only what has changed since — which is what makes
@@ -97,8 +97,8 @@ def holdings_stream(base: str, timeout: float = 30.0):
     In the order the node hands them out, which is info-hash order — the point
     of which is that several of these can be merged without holding any of them:
     a reader wanting the whole swarm takes one page per node rather than every
-    node's catalog. Readers that follow the stream instead (collector.py) page
-    the same way but keep the cursor they end with, so their next call is a
+    node's full listing. Readers that follow the stream instead (collector.py)
+    page the same way but keep the cursor they end with, so their next call is a
     delta."""
     cursor = None
     while True:
@@ -122,8 +122,8 @@ def fetch_holding(base: str, info_hash: str, timeout: float = 5.0) -> dict:
     """One dataset on one node, with its piece bitfield — or None if not held.
 
     The only call that costs anything per dataset, which is why it is per
-    dataset: the swarm-wide piece map is one of these per node, whatever the
-    catalog holds."""
+    dataset: the swarm-wide piece map is one of these per node, however many
+    datasets there are."""
     try:
         return json.loads(_get(base, f"/holdings/{info_hash}", timeout).decode())
     except urllib.error.HTTPError as e:
@@ -180,8 +180,8 @@ def fetch_swarm(base: str, timeout: float = 2.0) -> tuple:
 
     Only the constant-size part: what each node *holds* is followed separately
     through its cursor, because that is the part that would otherwise grow with
-    the catalog. A caller that wants holdings reads the cursor here and calls
-    fetch_holdings when it has moved.
+    the number of datasets. A caller that wants holdings reads the cursor here
+    and calls fetch_holdings when it has moved.
 
     A node that doesn't answer is simply absent: liveness is "responded", not a
     staleness timer. `addresses` is every endpoint we tried, so a caller can

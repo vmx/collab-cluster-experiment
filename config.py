@@ -26,12 +26,11 @@ STATS_PORT_BASE = 8001   # node i serves its HTTP API on STATS_PORT_BASE + i
 
 # --- Peer discovery (the beacon) ---------------------------------------------
 # This replaces the tracker entirely. Every node periodically multicasts a tiny
-# datagram — who it is, its ports, and a digest of its catalog — to the local
-# network, and listens for everyone else's. That single mechanism answers both
-# "which nodes exist" and "has anyone published something new", and the peer's
-# address comes free as the datagram's source. Nodes then wire peers straight
-# into libtorrent with torrent_handle.connect_peer(), so no announce, DHT, PEX
-# or LSD is involved anywhere.
+# datagram — who it is and its ports — to the local network, and listens for
+# everyone else's. That single mechanism answers "which nodes exist", and the
+# peer's address comes free as the datagram's source. Nodes then wire peers
+# straight into libtorrent with torrent_handle.connect_peer(), so no announce,
+# DHT, PEX or LSD is involved anywhere.
 #
 # The group is a local-scope (administratively scoped) multicast address and the
 # beacon goes out with TTL 1, so it never leaves the local segment. See
@@ -49,9 +48,9 @@ PIECE_SIZE = 256 * 1024          # 256 KiB; power of two (v2 requires >= 16 KiB)
 UPLOAD_RATE_LIMIT = 1 * 1024 * 1024
 
 # --- Timing (seconds) --------------------------------------------------------
-# How often a node runs its sync tick: beacon out, drain beacons in, pull any
-# changed peer catalog, take what it wants, and re-mesh its torrents. This is the
-# system's heartbeat — everything converges within a small multiple of it.
+# How often a node runs its sync tick: beacon out, drain beacons in, and re-mesh
+# its torrents. This is the system's heartbeat — everything converges within a
+# small multiple of it.
 BEACON_INTERVAL = 2.0
 # Forget a peer we haven't heard a beacon from in this long. Must comfortably
 # exceed BEACON_INTERVAL so a single dropped datagram doesn't evict a live node.

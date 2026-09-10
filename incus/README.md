@@ -116,7 +116,7 @@ The dataset now exists because `node0` holds it. Putting it on another node is
 a separate decision, made per node:
 
 ```sh
-# the swarm's catalog, read through node1...
+# every dataset in the swarm, read through node1...
 python control.py list   10.x.x.6
 # ...and now node1 keeps a copy
 python control.py add    10.x.x.6 media

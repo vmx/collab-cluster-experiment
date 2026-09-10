@@ -13,11 +13,11 @@ Nodes are addressed by their HTTP endpoint, "host[:port]" (port defaults to the
 standard control port, so on its own IP a node is just its address). Several
 nodes on one host in a dev run are told apart by port, e.g. 127.0.0.1:8002.
 
-There is nothing central to talk to, and no node has a catalog: a dataset exists
-because some node holds it, so `list` and `map` read every node through the one
-you name and union what they hold. Datasets are named by the basename of whatever
-was published; where a name is ambiguous (two nodes published different content
-under the same one), use the info-hash instead.
+There is nothing central to talk to, and no node knows every dataset: a dataset
+exists because some node holds it, so `list` and `map` read every node through
+the one you name and union what they hold. Datasets are named by the basename of
+whatever was published; where a name is ambiguous (two nodes published different
+content under the same one), use the info-hash instead.
 """
 import argparse
 import heapq
@@ -63,8 +63,9 @@ def _dataset_ref(ref: str) -> dict:
     """Address a dataset the way the user typed it, for /remove — which acts on
     something the node already holds, so the node can resolve either form
     itself, falling back to a name if a hex-looking ref matches no hash. /add is
-    different: nothing is held yet and a node has no catalog, so control.py
-    resolves the name across the swarm and sends a hash."""
+    different: nothing is held yet and a node knows nothing about datasets it
+    does not hold, so control.py resolves the name across the swarm and sends a
+    hash."""
     return {"info_hash": ref.lower()} if HEXREF.match(ref) else {"name": ref}
 
 
@@ -92,7 +93,7 @@ def cmd_list(args) -> None:
     one thing that is genuinely about the node you asked.
 
     Printed as the merge turns each dataset up, in info-hash order. Sorting by
-    name would mean holding the whole swarm's catalog before the first line —
+    name would mean holding every dataset in the swarm before the first line —
     which is the one thing a full listing at this scale cannot do."""
     base = node_client.base_url(args.endpoint)
     try:
@@ -147,11 +148,11 @@ def cmd_peers(args) -> None:
 def swarm_stream(nodes: list):
     """Every dataset in the swarm, in info-hash order, as (info_hash, holders).
 
-    The union of the nodes' holdings streams — which is the catalog — assembled
-    without being held. Each node hands its listing out in info-hash order, so
-    merging them brings every holder of a dataset past at the same moment: its
-    copy count falls out of the merge, and what is in memory is one page per
-    node however much the swarm holds.
+    The union of the nodes' holdings streams, assembled without being held. Each
+    node hands its listing out in info-hash order, so merging them brings every
+    holder of a dataset past at the same moment: its copy count falls out of the
+    merge, and what is in memory is one page per node however much the swarm
+    holds.
 
     `nodes` is [(label, base)]. Holders are [(label, row)], the rows as the node
     reported them."""
@@ -272,10 +273,10 @@ def cmd_publish(args) -> None:
 def cmd_add(args) -> None:
     """Tell a node to take a dataset.
 
-    The name is resolved here, not there: a node has no catalog to look one up
-    in, so it takes an info-hash and fetches the .torrent from whoever holds the
-    dataset. Resolving it asks each node about that one reference; an info-hash
-    given in full is not a question at all."""
+    The name is resolved here, not there: a node knows only what it holds, so it
+    takes an info-hash and fetches the .torrent from whoever holds the dataset.
+    Resolving it asks each node about that one reference; an info-hash given in
+    full is not a question at all."""
     base = node_client.base_url(args.endpoint)
     try:
         info_hash = resolve_across(base, args.dataset)
@@ -301,7 +302,7 @@ def cmd_remove(args) -> None:
     print(f"{args.endpoint}: dropped {res['name']!r} [{res['info_hash'][:16]}] "
           "- the files stay on disk")
     print("if that was the last copy, the dataset has left the swarm: nothing "
-          "keeps a\ncatalog of datasets nobody holds. Re-publishing the same "
+          "keeps a\nrecord of datasets nobody holds. Re-publishing the same "
           "path brings it back\nunchanged - the dataset is its content.")
 
 

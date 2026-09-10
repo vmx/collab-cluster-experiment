@@ -28,11 +28,11 @@ Every node runs the same tick, roughly every two seconds:
 None of it is configurable, and nothing in it decides what to store. A node's
 peer table is its own, built only from beacons it heard.
 
-There is no catalog, centrally or on a node. A node keeps a `.torrent` for each
-dataset it holds and nothing at all about the ones it doesn't, so the set of
-datasets in the swarm is the union of what its nodes hold. "Which datasets
-exist" is a question for something reading every node — `control.py list`, or
-the dashboard.
+No node has a list of every dataset, and there is no central one either. A node
+keeps a `.torrent` for each dataset it holds and nothing at all about the ones
+it doesn't, so the set of datasets in the swarm is the union of what its nodes
+hold. "Which datasets exist" is a question for something reading every node —
+`control.py list`, or the dashboard.
 
 ## Getting data in
 
@@ -78,7 +78,7 @@ the swarm-wide one — the least-replicated datasets with their copy counts,
 of copies of each *file*.
 
 `list` prints as the nodes' streams merge, in info-hash order: sorting by name
-would mean holding the whole swarm's catalog before printing the first line.
+would mean holding every dataset in the swarm before printing the first line.
 
 ## Dropping a dataset
 
@@ -246,7 +246,7 @@ POST /remove   {"name"|"info_hash"}  drop one
 ```
 
 There is no endpoint for "what datasets exist", because no node knows. The union
-of every node's `/holdings` **is** the catalog.
+of every node's `/holdings` **is** the answer.
 
 `/stats` is constant size — nothing in it is per dataset — and carries a
 **cursor**: the node's position in its own stream of holding changes. Hand that
@@ -257,8 +257,7 @@ restart, says so with HTTP 409 rather than an empty delta.
 
 A reader with no cursor gets the held set in pages: `more` says whether to ask
 again with the cursor just handed back, and the last page hands back an ordinary
-cursor to follow from. Nothing a reader asks for is ever the whole catalog in one
-response.
+cursor to follow from, so no single response carries everything a node holds.
 
 A holdings row is `{info_hash, state, name, total_size, piece_length}`, where
 `state` is `downloading`, `complete`, or — only ever in a delta — `gone`, the
@@ -286,7 +285,7 @@ reader fetches it once from any holder and keeps it.
 | `node_client.py` | Stdlib client for another node's HTTP API: `fetch_stats`/`fetch_holdings` (cursor-following, raises `Resync`)/`fetch_transfers`/`fetch_holding`/`fetch_meta`, plus `fetch_swarm()` — every node's `/stats`, gathered through one node's peer table. No libtorrent. |
 | `beacon.py` | The discovery datagram: join the group, send, drain. No libtorrent. |
 | `config.py` | Ports, beacon group, timing, paths. |
-| `swarm_stats.py` | The catalog and the copy-count arithmetic: `catalog_from()` unions the holdings streams, `overview_row()` scores a dataset from holdings alone, `holder_rows()`/`per_file()` work from piece bitfields. Shared by `control.py` and `collector.py`. |
+| `swarm_stats.py` | The copy-count arithmetic: `overview_row()` scores a dataset from holdings alone, `holder_rows()`/`per_file()` work from piece bitfields. Shared by `control.py` and `collector.py`. |
 | `collector.py` | *Optional.* Finds a node on the beacon and reads the swarm through it, keeping one cursor per node. Serves the `/api/*` dashboard endpoints and the web UI. |
 | `webui/` | *Optional.* Zero-build [Tutuca](https://github.com/marianoguerra/tutuca) SPA, framework vendored as one file. Served by `collector.py`. |
 

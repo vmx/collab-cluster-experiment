@@ -12,10 +12,11 @@ There are two levels here, and they are separate because the node's API is:
     by definition, so counting copies needs no piece-level detail at all. This is
     what overview_row does, and it costs nothing per dataset.
 
-    The catalog is that union: a dataset exists because someone holds it. Both
-    readers assemble it themselves — control.py merges the nodes' streams as it
-    prints, the dashboard folds them together as the nodes report changes — and
-    both hand each dataset here, which is what keeps them agreeing.
+    The list of datasets in the swarm is that union: a dataset exists because
+    someone holds it. Both readers assemble it themselves — control.py merges
+    the nodes' streams as it prints, the dashboard folds them together as the
+    nodes report changes — and both hand each dataset here, which is what keeps
+    them agreeing.
 
   * From piece bitfields comes everything finer: which pieces are rare, how many
     copies of each *file* exist, what a partial holder actually has. Bitfields

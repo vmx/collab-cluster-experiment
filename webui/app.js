@@ -527,9 +527,10 @@ const NodeDetail = component({
 let lastDatasets = [];
 // What the list view asks the collector for. The rarest are what an operator
 // acts on, so a page of them is the default and "show more" raises it; the
-// search box and chips ride along so the narrowing happens where the catalog
-// is, not after it has been sent. Read by fetchOverview when it builds the URL,
-// the way fetchDetail reads the open route.
+// search box and chips ride along so the narrowing happens in the collector,
+// which has every dataset, not here after they have been sent. Read by
+// fetchOverview when it builds the URL, the way fetchDetail reads the open
+// route.
 const listView = { limit: 50, q: "", status: "all" };
 // Datasets we've already told the operator about, so the toast fires once per
 // dataset. `toastBaselined` keeps the first poll silent: opening the dashboard on
@@ -740,13 +741,13 @@ const Dashboard = component({
     fetchOverview(res, err) {
       if (err) return this.setStatus("error").setError(String((err && err.message) || err));
       // A page, rarest first, and the totals that used to be added up here from
-      // the whole catalog. Both come from the collector now: it keeps them as
+      // every dataset. Both come from the collector now: it keeps them as
       // the nodes report changes, and it is the only thing that can, since this
       // screen only ever sees a page.
       lastDatasets = res.datasets;
       // Anything that wasn't in the previous poll is new to this swarm — which
-      // is all "a dataset was published somewhere" means now that every node
-      // converges on the same catalog.
+      // is all "a dataset was published somewhere" means, since a dataset
+      // exists from the moment its first holder has it.
       const fresh = [];
       for (const d of lastDatasets) {
         if (seenDatasets.has(d.info_hash)) continue;

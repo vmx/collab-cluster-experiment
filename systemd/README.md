@@ -54,7 +54,7 @@ Then put some data in, from wherever you can reach a node:
 # confirm they found each other
 python control.py peers   <node-address>
 python control.py publish <node-address> /path/to/data
-# the swarm's catalog, read through any node
+# every dataset in the swarm, read through any node
 python control.py list    <other-node>
 # ...and this one keeps a copy
 python control.py add     <other-node> <name>

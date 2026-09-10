@@ -20,16 +20,15 @@ things, and only the first grows with nothing at all:
               then only the transitions since the last one we saw.
   /transfers  what is moving right now, bounded by what is in flight.
 
-The catalog is not among them, because there isn't one to ask for: a dataset
-exists because some node holds it, so unioning the holdings streams both lists
-the datasets and counts their copies. That also makes this the place where the
-swarm's catalog exists at all — no node has one — and the place where the
-difference between "nobody holds this any more" and "the node that holds it is
-down" would be settled, since only something watching over time can tell them
-apart.
+A list of every dataset is not among them, because no node has one to give: a
+dataset exists because some node holds it, so unioning the holdings streams both
+lists the datasets and counts their copies. That also makes this the only place
+where such a list exists at all, and the place where the difference between
+"nobody holds this any more" and "the node that holds it is down" would be
+settled, since only something watching over time can tell them apart.
 
 So a settled swarm costs one small request per node, and a busy one costs the
-changes and nothing else. Those changes are folded into the catalog below as
+changes and nothing else. Those changes are folded into the aggregate below as
 they arrive rather than kept per node and reassembled per request — that state
 is the price of the cursor, and it is what makes this affordable on a swarm
 holding far more than it moves. Piece bitfields are never part of a refresh:
@@ -52,7 +51,7 @@ Endpoints:
                    live throughput, a per-node held-fraction strip) with NO
                    per-piece bitfields, and the swarm-wide totals above it. Both
                    the page and the totals come off the index below, so neither
-                   grows with the catalog.
+                   grows with the number of datasets.
   GET  /api/dataset/<info_hash>
                  - full render-ready detail for ONE dataset (per-node piece maps,
                    availability histogram, per-file replication, copies summary).
@@ -113,7 +112,7 @@ _POLL: dict = {"at": 0.0, "bases": []}
 # node_key -> {"base", "label", "stats", "cursor", "transfers", "live", "seen"}
 # — what we know about each node, carried between polls. `cursor` is where we
 # are in that node's stream, opaque and handed straight back. What it *holds*
-# is not kept here but folded into the catalog below.
+# is not kept here but folded into the aggregate below.
 _NODES: dict = {}
 
 # How long a node has to stay silent before its copies stop counting. A poll it
@@ -121,7 +120,7 @@ _NODES: dict = {}
 # which means listing in full when it returns.
 GONE_AFTER = 15.0
 
-# --- the catalog, maintained rather than rebuilt ------------------------------
+# --- the aggregate, maintained rather than rebuilt ----------------------------
 # The union of what the nodes hold. It is folded together as they report changes
 # instead of being reassembled on every request, because the nodes send changes
 # and rebuilding from them throws that away.
@@ -132,7 +131,7 @@ GONE_AFTER = 15.0
 # questions the views actually ask.
 # How many rows a list view hands back unless asked for more. The rarest are
 # what an operator acts on, and past that there is the search box: no screen
-# shows a catalog, so no response carries one.
+# shows every dataset, so no response carries them all.
 LIST_PAGE = 50
 LIST_MAX = 2000
 
@@ -147,11 +146,11 @@ _DATASETS: dict = {}
 _BY_COPIES: dict = {}
 # node id -> the datasets it holds: the transpose of the holder lists above. It
 # is what makes a node going away, or re-listing itself, cost what that node
-# holds rather than a pass over the whole catalog.
+# holds rather than a pass over the whole aggregate.
 _HELD_BY: dict = {}
 # Bytes held complete across the swarm, moved as copies come and go. A total
 # nobody has to add up is the difference between a summary that costs nothing
-# and one that costs the catalog.
+# and one that costs a pass over every dataset.
 _STORED = 0
 
 _META_LOCK = threading.Lock()
@@ -210,7 +209,7 @@ def ways_in() -> list:
     return out
 
 
-# --- keeping the catalog ------------------------------------------------------
+# --- keeping the aggregate ----------------------------------------------------
 # Every change to the three structures above goes through here, under _AGG_LOCK,
 # so the one invariant — that they agree with the rows that produced them — has
 # a single home.
@@ -330,7 +329,7 @@ def rarest_first(limit: int, query: str, status: str) -> tuple:
     """(copies, info_hash) rarest first, and how many matched. Holds _AGG_LOCK.
 
     Unfiltered this touches only the rarest classes — the first page of a
-    healthy swarm is a handful of sets, whatever the catalog holds. With a
+    healthy swarm is a handful of sets, however many datasets there are. With a
     filter it is a scan, which is what a search costs while names are unindexed,
     and it is exact: the count returned is every match, not a guess."""
     picked, plain = [], not query and status == "all"
@@ -349,7 +348,7 @@ def rarest_first(limit: int, query: str, status: str) -> tuple:
 
 
 def summary(moving: dict) -> dict:
-    """The numbers above the list, none of which walk the catalog."""
+    """The numbers above the list, none of which walk the aggregate."""
     return {"total": len(_DATASETS),
             "at_risk": len(_BY_COPIES.get(0, ())) + len(_BY_COPIES.get(1, ())),
             "rarest": min((k for k, v in _BY_COPIES.items() if v), default=0),
@@ -400,7 +399,7 @@ def refresh(st: dict, now: float) -> tuple:
 
     Called per node in parallel, so it touches only that node's own record and
     hands the rows back to be folded in one place rather than writing the
-    catalog from sixteen threads."""
+    aggregate from sixteen threads."""
     key, label = st["node_key"], st.get("label", st["node_key"])
     base = f"http://{label}"
     rec = _NODES.setdefault(key, {"cursor": None, "transfers": []})
@@ -592,7 +591,7 @@ def build_overview(limit: int = LIST_PAGE, query: str = "",
                    status: str = "all") -> dict:
     """The list view: a page of datasets, rarest first, and the totals above it.
 
-    Never the whole catalog — no screen can show one, and the browser used to
+    Never every dataset — no screen can show them all, and the browser used to
     sort and filter what it had been sent. Both happen here now, over an index
     kept as the nodes report changes, so the common poll touches the rarest
     classes and nothing else.
@@ -616,7 +615,7 @@ def build_torrent_detail(info_hash: str) -> dict:
 
     The only place piece bitfields are fetched, and it costs one request to each
     node that holds this dataset — not to every node, and not for anything else
-    in the catalog. That is the whole reason the bitfield lives on its own
+    in the swarm. That is the whole reason the bitfield lives on its own
     endpoint."""
     nodes = poll()
     with _AGG_LOCK:
@@ -680,7 +679,7 @@ def build_transfers() -> dict:
 # so neither it nor we have to add up everything it holds.
 
 def node_summary(rec: dict) -> dict:
-    """One line for a node, however large its catalog grows."""
+    """One line for a node, however much it holds."""
     st = rec.get("stats") or {}
     disk = st.get("disk") or {}
     return {"label": rec["label"],

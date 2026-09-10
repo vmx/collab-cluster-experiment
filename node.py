@@ -1,8 +1,8 @@
 """A collab-cluster node: the whole system, in one program.
 
 Run one per host. Nodes find each other with a UDP multicast beacon and move the
-bytes with BitTorrent v2. There is no tracker, no central catalog and no
-coordinator.
+bytes with BitTorrent v2. There is no tracker, no central index of datasets and
+no coordinator.
 
   GET  /stats                    what this node is, as a whole: disk, counts,
                                  throughput, and the cursor below. Constant
@@ -13,7 +13,8 @@ coordinator.
                                  piece length. With a cursor, only what has
                                  changed since; the response carries the next
                                  one. This is what copy counting reads, and,
-                                 unioned across nodes, it is the catalog.
+                                 unioned across nodes, it is every dataset in
+                                 the swarm.
   GET  /holdings/<info_hash>     one dataset here, with its piece bitfield — the
                                  drill-down, one dataset at a time.
   GET  /transfers                what is moving right now: progress, rates, and
@@ -44,14 +45,14 @@ per-second numbers are confined to the transfers in flight and the piece
 bitfields to a single dataset at a time. Nothing a reader polls scales with how
 much this node holds.
 
-There is no catalog here, and that is the second half of the same idea.
-Publishing seeds the data in place, so a dataset has a holder from the instant it
-exists and the union of every node's holdings is exactly the set of datasets in
-the swarm. A node knows only what it holds — it keeps a .torrent for that and
-nothing about any other dataset — so nothing it stores scales with the catalog
-either. Two things follow: "which datasets exist" is a question for whoever is
-watching the whole swarm and not for any one node, and a dataset lives exactly as
-long as someone holds it.
+No node knows every dataset, and that is the second half of the same idea.
+Publishing seeds the data in place, so a dataset has a holder from the instant
+it exists and the union of every node's holdings is exactly the set of datasets
+in the swarm. A node knows only what it holds — it keeps a .torrent for that and
+nothing about any other dataset — so nothing it stores grows with the number of
+datasets in the swarm either. Two things follow: "which datasets exist" is a
+question for whoever is watching the whole swarm and not for any one node, and a
+dataset lives exactly as long as someone holds it.
 
 What a node holds is only ever what it was given: /publish puts local data in,
 /add takes a copy of somebody else's. Nothing arrives unasked.
@@ -237,10 +238,10 @@ def node_disk(node_id: int) -> dict:
 
 # --- the torrent files this node has -----------------------------------------
 # One .torrent per dataset held, and no others. A node used to keep a copy of
-# every torrent in the swarm so that "the catalog" was a thing it could serve;
-# it isn't any more (see the holdings section below), so this directory now
-# tracks ns.torrents exactly: written when a dataset is taken, deleted when it
-# is dropped.
+# every torrent in the swarm so that it could list every dataset; it doesn't any
+# more (see the holdings section below), so this directory now tracks
+# ns.torrents exactly: written when a dataset is taken, deleted when it is
+# dropped.
 
 def store_torrent(ns: NodeState, name: str, info_hash: str, blob: bytes) -> str:
     """Write a dataset's .torrent alongside the data this node holds.
@@ -282,8 +283,8 @@ def _ambiguous(ref: str, kind: str, matches: list) -> ValueError:
 def resolve(ns: NodeState, info_hash: str = None, name: str = None) -> str:
     """Find one dataset *this node holds*, by info-hash or by name.
 
-    Scoped to what it holds because that is all it knows: there is no local
-    catalog of the swarm any more. Resolving a name across the swarm is the
+    Scoped to what it holds because that is all it knows: there is no local list
+    of the swarm's datasets any more. Resolving a name across the swarm is the
     caller's job (control.py fans out over the holdings streams), and /add
     therefore takes an info-hash; this is what /remove uses, which can only ever
     act on something already held.
@@ -317,13 +318,11 @@ def resolve(ns: NodeState, info_hash: str = None, name: str = None) -> str:
 # Which datasets this node holds, published as something a reader can follow
 # incrementally rather than refetch.
 #
-# This is also the catalog. There is no separate list of "datasets that exist":
-# publishing seeds the data in place, so every dataset has a holder from the
-# moment it exists, and the union of every node's holdings is therefore exactly
-# the set of datasets in the swarm. A node learns what exists by following its
-# peers' streams and forgetting the rows it doesn't act on — it keeps no copy of
-# the whole. The corollary is that a dataset lives as long as someone holds it:
-# when the last holder drops it, it leaves the swarm's view.
+# Unioned across nodes, this is also the list of datasets in the swarm, and
+# there is no other. Publishing seeds the data in place, so every dataset has a
+# holder from the moment it exists. A node reads no one else's stream and keeps
+# no copy of the whole. The corollary is that a dataset lives as long as someone
+# holds it: when the last holder drops it, it leaves the swarm's view.
 #
 # The distinction that matters: holding a dataset is durable state that changes
 # only when one is taken, finishes, or is dropped, while progress and rates
@@ -335,8 +334,8 @@ def resolve(ns: NodeState, info_hash: str = None, name: str = None) -> str:
 #
 # A row carries the dataset's immutable identity as well as the state: name,
 # size and piece length. Not a contradiction of the rule above — that rule is
-# about things which *churn*, and these never change — but what makes the union
-# of these streams usable as a catalog without a per-dataset lookup for every
+# about things which *churn*, and these never change — but what lets a reader
+# list the swarm's datasets from these streams alone, without a lookup for every
 # dataset in it. Everything else about a dataset (the file -> piece map, which is
 # the large part) stays behind /dataset/<info_hash>, for the views that need it.
 
@@ -416,13 +415,13 @@ def holdings(ns: NodeState, since: str = None) -> dict:
     transfer into the stream continuously and defeat the cursor entirely. They
     are on /transfers instead. The identity fields are exempt from that reasoning
     because they never change, and they are what lets a reader union these
-    streams into a catalog without a lookup per dataset.
+    streams into a list of datasets without a lookup per dataset.
 
     `state` is "downloading" or "complete", and in a delta also "gone": the
     tombstone that tells a reader a dataset was dropped rather than merely
     absent from this response. A dataset whose last holder reports "gone" has
-    left the swarm — this stream is the catalog, so there is nothing else for it
-    to still be in.
+    left the swarm — these streams are the only list of datasets, so there is
+    nothing else for it to still be in.
 
     A full listing comes in pages, `more` saying whether to ask again with the
     cursor just handed back. That the cursor is one opaque string is what makes
@@ -574,7 +573,7 @@ def holding_detail(ns: NodeState, info_hash: str) -> dict:
     The bitfield is the one genuinely large per-dataset thing a node knows, so it
     is served one dataset at a time and never as part of a listing. That split is
     what keeps the swarm-wide piece map affordable: it costs one request per node
-    for the dataset being looked at, whatever the catalog holds.
+    for the dataset being looked at, however many datasets there are.
 
     Left as a plain JSON bool array rather than packed. The endpoint is already
     bounded by a single dataset, so packing would trade away legibility — the
@@ -754,11 +753,11 @@ def take(ns: NodeState, info_hash: str) -> dict:
 def remove_torrent(ns: NodeState, info_hash: str) -> dict:
     """Stop holding a dataset, and stop being one of the places it exists.
 
-    There is no catalog to stay in: the holdings streams *are* the catalog, so
-    dropping a dataset removes this node from the set of places it exists, and
-    dropping the last copy retracts it from the swarm. The downloaded files stay
-    on disk — re-publishing that path reproduces the same dataset, since the
-    identity is the content."""
+    There is no list to stay in: the holdings streams are the only record of a
+    dataset, so dropping it removes this node from the set of places it exists,
+    and dropping the last copy retracts it from the swarm. The downloaded files
+    stay on disk — re-publishing that path reproduces the same dataset, since
+    the identity is the content."""
     with ns.lock:
         entry = ns.torrents.pop(info_hash, None)
         if entry:
@@ -784,11 +783,11 @@ def publish(ns: NodeState, path: str) -> dict:
     """Put local data into the swarm. The only way in.
 
     Hash the path into a v2 torrent and seed it in place — nothing is copied.
-    Publishing *is* starting to hold it, which is what makes the holdings streams
-    the catalog: a dataset exists from the moment someone has it, and there is no
-    separate list for it to be added to. The transition goes into this node's
-    stream, where anyone watching the swarm sees it; putting a copy on another
-    node is a separate instruction to that node.
+    Publishing *is* starting to hold it, which is what lets the holdings streams
+    be the list of datasets: a dataset exists from the moment someone has it,
+    and there is no separate list for it to be added to. The transition goes
+    into this node's stream, where anyone watching the swarm sees it; putting a
+    copy on another node is a separate instruction to that node.
     """
     name, info_hash, blob = make_torrent.build(path)   # raises ValueError
     with ns.lock:
@@ -849,7 +848,7 @@ def _note_file_error(ns: NodeState, alert) -> None:
 
 def load_resumes(ns: NodeState) -> int:
     """Re-add every torrent saved as a .resume file (native fast-resume). The
-    resume file is self-contained (save_info_dict), so no catalog lookup needed."""
+    resume file is self-contained (save_info_dict), so torrents/ is not read."""
     count = 0
     for path in glob.iglob(os.path.join(resume_dir(ns.node_id), "*", "*.resume")):
         try:
@@ -1223,9 +1222,9 @@ def make_handler(ns: NodeState):
                 if self.path == "/publish":
                     self._send_json(publish(ns, body["path"]))
                 elif self.path == "/add":
-                    # By info-hash only: a node has no catalog to look a name up
-                    # in. control.py resolves names across the swarm's holdings
-                    # streams and sends the hash it found.
+                    # By info-hash only: a node knows the names of only what it
+                    # holds. control.py resolves names across the swarm's
+                    # holdings streams and sends the hash it found.
                     self._send_json(take(ns, body["info_hash"].lower()))
                 elif self.path == "/remove":
                     info_hash = resolve(ns, body.get("info_hash"), body.get("name"))

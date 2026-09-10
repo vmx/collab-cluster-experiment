@@ -114,7 +114,7 @@ def build_sample(root: str) -> list:
 def main() -> None:
     argparse.ArgumentParser(
         description="Generate the built-in sample content to publish.",
-        epilog="Nothing is catalogued here: hand a path to a node with "
+        epilog="Nothing is published here: hand a path to a node with "
                "`control.py publish` and the swarm takes it from there.",
     ).parse_args()
     roots = build_sample(config.SAMPLE_DIR)
