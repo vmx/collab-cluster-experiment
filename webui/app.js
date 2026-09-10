@@ -23,6 +23,7 @@ const TRANSFERS_URL = "/api/transfers";
 const NODES_URL = "/api/nodes";
 const NODE_DETAIL_URL = "/api/node/"; // + label
 const POLL_MS = 1000; // refresh once a second
+const LIST_MAX = 2000; // the collector caps it here too
 
 // Which collector endpoint each screen polls. routeTo + tick look the request up
 // here so adding a screen is one map entry plus its response handler.
@@ -517,6 +518,12 @@ const NodeDetail = component({
 // the search box and status filter can narrow the list client-side, instantly,
 // without re-fetching. Refreshed on every overview poll.
 let lastDatasets = [];
+// What the list view asks the collector for. The rarest are what an operator
+// acts on, so a page of them is the default and "show more" raises it; the
+// search box and chips ride along so the narrowing happens where the catalog
+// is, not after it has been sent. Read by fetchOverview when it builds the URL,
+// the way fetchDetail reads the open route.
+const listView = { limit: 50, q: "", status: "all" };
 // Datasets we've already told the operator about, so the toast fires once per
 // dataset. `toastBaselined` keeps the first poll silent: opening the dashboard on
 // an established swarm shouldn't announce everything that already existed.
@@ -564,6 +571,7 @@ const Dashboard = component({
     statusFilter: "all", // "all" | "replicating" | "incomplete"
     shownCount: 0,
     totalCount: 0,
+    atRisk: 0,
     // detail state: 0 or 1 Torrent vm so render-each shows nothing when empty
     detail: [],
     // transfers screen
@@ -618,7 +626,14 @@ const Dashboard = component({
       );
     },
     countText() {
-      return `showing ${this.shownCount} of ${this.totalCount}`;
+      const of = this.totalCount === this.totDatasets ? "" : ` (of ${this.totDatasets})`;
+      return `showing ${this.shownCount} of ${this.totalCount}${of}`;
+    },
+    canShowMore() {
+      return this.route === "list" && this.shownCount < this.totalCount;
+    },
+    atRiskText() {
+      return `${this.atRisk} at one copy or none`;
     },
     detailMissing() {
       return this.route === "detail" && this.status === "live" && this.detail.size === 0;
@@ -658,6 +673,11 @@ const Dashboard = component({
     // Re-derive the visible dataset list from the latest poll for a new query or
     // status filter (instant, no re-fetch). Shared by the input + chip handlers.
     refilter(query, status) {
+      // The next poll asks the collector for the narrowed page — it is the only
+      // one that can see past what we were sent. Until it lands (POLL_MS at
+      // most) the page on screen is narrowed here, so typing still feels live.
+      listView.q = query;
+      listView.status = status;
       const vis = visibleDatasets(query, status);
       return this.setQuery(query).setStatusFilter(status).setDatasets(vis).setShownCount(vis.length);
     },
@@ -687,6 +707,12 @@ const Dashboard = component({
     clearQuery() {
       return this.refilter("", this.statusFilter);
     },
+    showMore() {
+      // Takes effect on the next poll, like the filters: these handlers are
+      // handed the event value and nothing to fetch with.
+      listView.limit = Math.min(listView.limit + 200, LIST_MAX);
+      return this;
+    },
     dismissToast() {
       return this.setToastShow(false);
     },
@@ -706,24 +732,11 @@ const Dashboard = component({
   response: {
     fetchOverview(res, err) {
       if (err) return this.setStatus("error").setError(String((err && err.message) || err));
-      // Cache the sorted list for client-side search/filter, then derive the
-      // visible rows under the current query + status filter.
-      lastDatasets = res.datasets
-        .slice()
-        // rarest (weakest-link) copies first, so the least-replicated float up.
-        .sort((a, b) => a.durable_copies - b.durable_copies || a.name.localeCompare(b.name));
-      const nodes = new Set();
-      let stored = 0;
-      let dl = 0;
-      let replicating = 0;
-      let rarest = lastDatasets.length ? Infinity : 0;
-      for (const d of lastDatasets) {
-        stored += d.total_stored;
-        dl += d.download_rate;
-        if (d.downloading > 0 || d.download_rate > 0) replicating++;
-        rarest = Math.min(rarest, d.durable_copies);
-        for (const s of d.spread) nodes.add(s.label);
-      }
+      // A page, rarest first, and the totals that used to be added up here from
+      // the whole catalog. Both come from the collector now: it keeps them as
+      // the nodes report changes, and it is the only thing that can, since this
+      // screen only ever sees a page.
+      lastDatasets = res.datasets;
       // Anything that wasn't in the previous poll is new to this swarm — which
       // is all "a dataset was published somewhere" means now that every node
       // converges on the same catalog.
@@ -738,15 +751,17 @@ const Dashboard = component({
       const vm = this.setError("")
         .setStatus("live")
         .setTs(res.ts)
-        .refilter(this.query, this.statusFilter)
-        .setTotalCount(lastDatasets.length)
-        .setTotDatasets(lastDatasets.length)
-        .setTotStoredText(human(stored))
-        .setTotNodes(nodes.size)
-        .setTotDlText(`${human(dl)}/s`)
-        .setReplicatingText(String(replicating))
-        .setRarest(rarest)
-        .setRarestClass(lastDatasets.length ? copiesClass(rarest, rarest) : "num");
+        .setDatasets(lastDatasets.map((d) => DatasetRow.Class.fromData(d)))
+        .setShownCount(lastDatasets.length)
+        .setTotalCount(res.matched)
+        .setTotDatasets(res.total)
+        .setTotStoredText(human(res.stored))
+        .setTotNodes(res.nodes)
+        .setTotDlText(`${human(res.download_rate)}/s`)
+        .setReplicatingText(String(res.replicating))
+        .setRarest(res.rarest)
+        .setRarestClass(res.total ? copiesClass(res.rarest, res.rarest) : "num")
+        .setAtRisk(res.at_risk);
       if (!fresh.length) return vm;
       const text =
         fresh.length === 1 ? `New dataset: ${fresh[0]}` : `${fresh.length} new datasets: ${fresh.join(", ")}`;
@@ -853,6 +868,10 @@ const Dashboard = component({
         <span>spread (per node)</span><span class="tnum">activity</span>
       </div>
       <x render-each=".datasets"></x>
+      <div class="filterbar" @show="$canShowMore">
+        <button type="button" class="chip" @on.click="showMore">Show more</button>
+        <span class="muted small" @text="$atRiskText"></span>
+      </div>
       <div class="empty" @show="$noDatasets">
         No datasets reported yet. Start some nodes and publish something
         (see the README); this view updates on its own.
@@ -958,7 +977,10 @@ function main() {
   ]);
   scope.registerRequestHandlers({
     async fetchOverview() {
-      const r = await fetch(OVERVIEW_URL, { cache: "no-store" });
+      const url =
+        `${OVERVIEW_URL}?limit=${listView.limit}` +
+        `&q=${encodeURIComponent(listView.q)}&status=${listView.status}`;
+      const r = await fetch(url, { cache: "no-store" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       return r.json();
     },
@@ -984,7 +1006,9 @@ function main() {
     async fetchNodeDetail() {
       const label = matchRoute().param;
       if (!label) throw new Error("no node selected");
-      const r = await fetch(NODE_DETAIL_URL + encodeURIComponent(label), { cache: "no-store" });
+      const r = await fetch(`${NODE_DETAIL_URL}${encodeURIComponent(label)}?limit=${listView.limit}`, {
+        cache: "no-store",
+      });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       return r.json();
     },

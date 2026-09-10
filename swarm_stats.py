@@ -14,7 +14,10 @@ There are two levels here, and they are separate because the node's API is:
 
     It is also where the catalog comes from: a dataset exists because someone
     holds it, so unioning the streams (catalog_from) both lists the datasets and
-    counts their copies in one pass.
+    counts their copies in one pass. That union is how control.py reads a swarm,
+    a fan-out per run; the dashboard keeps the same union folded together as the
+    nodes report changes, and both hand the result to overview_row, which is
+    what keeps them agreeing.
 
   * From piece bitfields comes everything finer: which pieces are rare, how many
     copies of each *file* exist, what a partial holder actually has. Bitfields

@@ -29,11 +29,12 @@ down" would be settled, since only something watching over time can tell them
 apart.
 
 So a settled swarm costs one small request per node, and a busy one costs the
-changes and nothing else. Which datasets a node holds is *accumulated* here
-(_NODES below) rather than refetched — that state is the price of the cursor,
-and it is what makes this affordable on a swarm holding far more than it moves.
-Piece bitfields are never part of a refresh: they are fetched for the one dataset
-being looked at, from the nodes that hold it.
+changes and nothing else. Those changes are folded into the catalog below as
+they arrive rather than kept per node and reassembled per request — that state
+is the price of the cursor, and it is what makes this affordable on a swarm
+holding far more than it moves. Piece bitfields are never part of a refresh:
+they are fetched for the one dataset being looked at, from the nodes that hold
+it.
 
 The nodes are read at most once per POLL_TTL however many browsers are open —
 and not at all while none is. A node that doesn't answer is simply absent, but
@@ -46,10 +47,12 @@ Endpoints:
   not a static asset or an /api/ endpoint is served the app shell (index.html),
   so those page routes deep-link and reload correctly.
 
-  GET  /api/overview - {"ts", "datasets": [...]} the list view: one light row per
-                   dataset (size, copy counts, live throughput, a per-node
-                   held-fraction strip) with NO per-piece bitfields, so it stays
-                   small and cheap to poll no matter how many datasets/nodes.
+  GET  /api/overview[?limit=&q=&status=] - a page of the list view, rarest
+                   copies first: one light row per dataset (size, copy counts,
+                   live throughput, a per-node held-fraction strip) with NO
+                   per-piece bitfields, and the swarm-wide totals above it. Both
+                   the page and the totals come off the index below, so neither
+                   grows with the catalog.
   GET  /api/dataset/<info_hash>
                  - full render-ready detail for ONE dataset (per-node piece maps,
                    availability histogram, per-file replication, copies summary).
@@ -66,13 +69,14 @@ Endpoints:
 """
 import argparse
 import concurrent.futures
+import heapq
 import json
 import os
 import select
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import beacon
 import catalog
@@ -126,6 +130,12 @@ GONE_AFTER = 15.0
 # info-hash hashes — so it is stored once, and who holds it is a list of node
 # ids rather than a row per node per dataset. The two indexes answer the two
 # questions the views actually ask.
+# How many rows a list view hands back unless asked for more. The rarest are
+# what an operator acts on, and past that there is the search box: no screen
+# shows a catalog, so no response carries one.
+LIST_PAGE = 50
+LIST_MAX = 2000
+
 _AGG_LOCK = threading.Lock()
 _NODE_ID: dict = {}      # node_key -> small int, stable for this process
 _NODE_KEY: dict = {}     # and back again
@@ -139,6 +149,10 @@ _BY_COPIES: dict = {}
 # is what makes a node going away, or re-listing itself, cost what that node
 # holds rather than a pass over the whole catalog.
 _HELD_BY: dict = {}
+# Bytes held complete across the swarm, moved as copies come and go. A total
+# nobody has to add up is the difference between a summary that costs nothing
+# and one that costs the catalog.
+_STORED = 0
 
 _META_LOCK = threading.Lock()
 # info_hash -> a dataset's file -> piece map. Fixed for the life of the dataset —
@@ -210,9 +224,13 @@ def node_id(key: str) -> int:
 
 
 def _recount(info_hash: str, before: int, after: int) -> None:
+    global _STORED
     if before != after:
         _BY_COPIES.get(before, set()).discard(info_hash)
         _BY_COPIES.setdefault(after, set()).add(info_hash)
+        ds = _DATASETS.get(info_hash)
+        if ds:
+            _STORED += (after - before) * ds[1]
 
 
 def _without(info_hash: str, ds: list, nid: int) -> None:
@@ -296,6 +314,51 @@ def holders_of(info_hash: str, ds: list, moving: dict) -> list:
                      "progress": float(live["progress"]) if live else 0.0,
                      "download_rate": int(live["download_rate"]) if live else 0})
     return rows
+
+
+def _matches(info_hash: str, copies: int, ds: list, query: str, status: str) -> bool:
+    if query and query not in (ds[0] or "").lower():
+        return False
+    if status == "incomplete":
+        return copies < 1
+    if status == "replicating":
+        return bool(ds[4])
+    return True
+
+
+def rarest_first(limit: int, query: str, status: str) -> tuple:
+    """(copies, info_hash) rarest first, and how many matched. Holds _AGG_LOCK.
+
+    Unfiltered this touches only the rarest classes — the first page of a
+    healthy swarm is a handful of sets, whatever the catalog holds. With a
+    filter it is a scan, which is what a search costs while names are unindexed,
+    and it is exact: the count returned is every match, not a guess."""
+    picked, plain = [], not query and status == "all"
+    for copies in sorted(k for k in _BY_COPIES if _BY_COPIES[k]):
+        members = _BY_COPIES[copies]
+        if plain:
+            picked += [(copies, h) for h in heapq.nsmallest(limit - len(picked), members)]
+            if len(picked) >= limit:
+                return picked, len(_DATASETS)
+        else:
+            picked += [(copies, h) for h in members
+                       if _matches(h, copies, _DATASETS[h], query, status)]
+    if not plain:
+        picked.sort()
+    return picked[:limit], len(picked) if not plain else len(_DATASETS)
+
+
+def summary(moving: dict) -> dict:
+    """The numbers above the list, none of which walk the catalog."""
+    return {"total": len(_DATASETS),
+            "at_risk": len(_BY_COPIES.get(0, ())) + len(_BY_COPIES.get(1, ())),
+            "rarest": min((k for k, v in _BY_COPIES.items() if v), default=0),
+            "nodes": sum(1 for rec in _NODES.values() if rec.get("live")),
+            "replicating": len({h for _, h in moving}),
+            "stored": _STORED + sum(int(t.get("bytes_done") or 0)
+                                    for t in moving.values()),
+            "download_rate": sum(int(t.get("download_rate") or 0)
+                                 for t in moving.values())}
 
 
 # --- following the nodes ------------------------------------------------------
@@ -520,22 +583,27 @@ def torrent_detail(meta: dict, rows: list) -> dict:
 # built from holdings alone — no piece bitfields anywhere near them — and the one
 # view that needs bitfields fetches them for its single dataset.
 
-def build_overview() -> dict:
-    """The list view: one light row per dataset in the swarm.
+def build_overview(limit: int = LIST_PAGE, query: str = "",
+                   status: str = "all") -> dict:
+    """The list view: a page of datasets, rarest first, and the totals above it.
 
-    The dataset list and the copy counts are the same pass over the same data —
-    the union of what the nodes hold — because that union is the catalog. No
-    per-dataset lookup happens here at all: everything on a row comes out of the
-    holdings stream itself.
+    Never the whole catalog — no screen can show one, and the browser used to
+    sort and filter what it had been sent. Both happen here now, over an index
+    kept as the nodes report changes, so the common poll touches the rarest
+    classes and nothing else.
     """
     now = time.time()
     poll(now)
+    limit = max(1, min(int(limit or LIST_PAGE), LIST_MAX))
+    query = (query or "").strip().lower()
     with _AGG_LOCK:
         moving = _moving()
-        rows = [swarm_stats.overview_row(dataset_meta(info_hash, ds),
-                                         holders_of(info_hash, ds, moving))
-                for info_hash, ds in _DATASETS.items()]
-    return {"ts": now, "datasets": rows}
+        picked, matched = rarest_first(limit, query, status)
+        rows = [swarm_stats.overview_row(dataset_meta(h, _DATASETS[h]),
+                                         holders_of(h, _DATASETS[h], moving))
+                for _, h in picked if h in _DATASETS]
+        totals = summary(moving)
+    return {"ts": now, **totals, "matched": matched, "datasets": rows}
 
 
 def build_torrent_detail(info_hash: str) -> dict:
@@ -633,21 +701,30 @@ def build_nodes() -> dict:
     return {"ts": now, "nodes": nodes}
 
 
-def build_node_detail(label: str) -> dict:
-    """One node's held datasets, or None if it isn't reporting.
+def build_node_detail(label: str, limit: int = LIST_PAGE,
+                      query: str = "") -> dict:
+    """A page of one node's datasets, or None if it isn't reporting.
 
-    The drill-down from the Nodes screen. Names and sizes ride along in the
-    holdings rows, so this needs nothing but what the poll already brought
-    back."""
+    In info-hash order rather than by name: a node at any size holds more than a
+    screen, and ordering by something a human reads would mean sorting all of it
+    per request. Finding one is what the search is for."""
     for rec in poll():
         if rec["label"] != label:
             continue
         moving = {t["info_hash"]: t for t in rec["transfers"]}
         rows = []
+        limit = max(1, min(int(limit or LIST_PAGE), LIST_MAX))
+        q = (query or "").strip().lower()
         with _AGG_LOCK:
             nid = _NODE_ID.get((rec.get("stats") or {}).get("node_key"))
-            held = [(ih, _DATASETS[ih]) for ih in _HELD_BY.get(nid, ())
-                    if ih in _DATASETS]
+            members = _HELD_BY.get(nid, set())
+            names = {} if not q else {h: _DATASETS[h][0] for h in members
+                                      if h in _DATASETS}
+            wanted = members if not q else {h for h, n in names.items()
+                                            if q in (n or "").lower()}
+            held = [(h, _DATASETS[h]) for h in heapq.nsmallest(limit, wanted)
+                    if h in _DATASETS]
+            matched = len(wanted)
         for info_hash, ds in held:
             live = moving.get(info_hash)
             complete = nid in ds[3]
@@ -666,7 +743,8 @@ def build_node_detail(label: str) -> dict:
                 "num_peers": int(live["num_peers"]) if live else 0,
             })
         rows.sort(key=lambda r: r["name"])
-        return {"ts": time.time(), **node_summary(rec), "torrents": rows}
+        return {"ts": time.time(), **node_summary(rec), "matched": matched,
+                "torrents": rows}
     return None
 
 
@@ -728,8 +806,12 @@ def make_handler():
             if path in STATIC_FILES:
                 filename, ctype = STATIC_FILES[path]
                 self._send_static(filename, ctype)
-            elif path == "/api/overview":
-                self._send_json(build_overview())
+            elif path.split("?")[0] == "/api/overview":
+                q = parse_qs(urlsplit(path).query)
+                self._send_json(build_overview(
+                    limit=(q.get("limit") or [LIST_PAGE])[0],
+                    query=(q.get("q") or [""])[0],
+                    status=(q.get("status") or ["all"])[0]))
             elif path.startswith("/api/dataset/"):
                 # On-demand detail for one dataset (the drill-down).
                 self._send_or_404(build_torrent_detail(path[len("/api/dataset/"):]))
@@ -741,8 +823,12 @@ def make_handler():
                 # Drill-down for one node. The label is a URL-encoded "ip:port"
                 # (the ':' is percent-escaped by the client), so decode it back
                 # before matching.
-                self._send_or_404(
-                    build_node_detail(unquote(path[len("/api/node/"):])))
+                split = urlsplit(path)
+                q = parse_qs(split.query)
+                self._send_or_404(build_node_detail(
+                    unquote(split.path[len("/api/node/"):]),
+                    limit=(q.get("limit") or [LIST_PAGE])[0],
+                    query=(q.get("q") or [""])[0]))
             elif path.startswith("/api/"):
                 # The /api/ namespace is machine-only, so an unknown endpoint
                 # under it is an error — never the app shell. Falling through
