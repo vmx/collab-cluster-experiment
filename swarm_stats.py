@@ -12,12 +12,10 @@ There are two levels here, and they are separate because the node's API is:
     by definition, so counting copies needs no piece-level detail at all. This is
     what overview_row does, and it costs nothing per dataset.
 
-    It is also where the catalog comes from: a dataset exists because someone
-    holds it, so unioning the streams (catalog_from) both lists the datasets and
-    counts their copies in one pass. That union is how control.py reads a swarm,
-    a fan-out per run; the dashboard keeps the same union folded together as the
-    nodes report changes, and both hand the result to overview_row, which is
-    what keeps them agreeing.
+    The catalog is that union: a dataset exists because someone holds it. Both
+    readers assemble it themselves — control.py merges the nodes' streams as it
+    prints, the dashboard folds them together as the nodes report changes — and
+    both hand each dataset here, which is what keeps them agreeing.
 
   * From piece bitfields comes everything finer: which pieces are rare, how many
     copies of each *file* exist, what a partial holder actually has. Bitfields
@@ -45,41 +43,6 @@ def num_pieces(meta: dict) -> int:
 
 
 # --- the list level: copies, from holdings alone ------------------------------
-
-def catalog_from(nodes: list) -> dict:
-    """The swarm's catalog, assembled from what its nodes hold.
-
-    `nodes` is [(label, holdings, transfers)] — one entry per node that answered,
-    where `holdings` is {info_hash: row} as accumulated from its stream and
-    `transfers` is its live in-flight rows.
-
-    Returns {info_hash: (meta, holders)} ready for overview_row. There is nothing
-    else to consult: publishing seeds the data in place, so a dataset has a
-    holder from the moment it exists, and a dataset with no holder left has left
-    the swarm. The row carries the dataset's name, size and piece length, so this
-    needs no per-dataset lookup — that is what those fields are in the row for.
-
-    A node that isn't answering contributes nothing, so a dataset only it holds
-    is missing here rather than shown at zero copies. Telling "nobody has this"
-    from "the node that has it is down" is a question about time, which a caller
-    holding history can answer and a single fan-out cannot.
-    """
-    out: dict = {}
-    for label, holdings, transfers in nodes:
-        moving = {t["info_hash"]: t for t in transfers}
-        for info_hash, row in holdings.items():
-            meta, holders = out.setdefault(info_hash, ({
-                "info_hash": info_hash, "name": row.get("name", ""),
-                "total_size": int(row.get("total_size") or 0),
-                "piece_length": int(row.get("piece_length") or 0)}, []))
-            live = moving.get(info_hash)
-            holders.append({
-                "label": label, "state": row.get("state"),
-                "progress": 1.0 if row.get("state") == "complete"
-                            else float(live["progress"]) if live else 0.0,
-                "download_rate": int(live["download_rate"]) if live else 0})
-    return out
-
 
 def overview_row(meta: dict, holders: list) -> dict:
     """One dataset's durability and spread, without a single piece bitfield.

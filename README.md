@@ -64,8 +64,8 @@ what this one has of each:
 ```
 $ python control.py list 127.0.0.1:8002
 name                     v2 info-hash       copies  on this node
-documents                78c6f7e55ebbe684        1  -
 media                    66b676791b1a9e20        1  -
+documents                78c6f7e55ebbe684        1  -
 
 $ python control.py status 127.0.0.1:8002
 127.0.0.1:8002: holding nothing yet
@@ -73,8 +73,12 @@ $ python control.py status 127.0.0.1:8002
 
 Which nodes hold what is up to you, and nothing keeps track of it for you.
 `control.py status <node>` is the per-node answer and `control.py map <node>`
-the swarm-wide one — every dataset with its copy count, rarest first. Name a
-dataset as well for its piece map and the number of copies of each *file*.
+the swarm-wide one — the least-replicated datasets with their copy counts,
+`--all` for every one. Name a dataset as well for its piece map and the number
+of copies of each *file*.
+
+`list` prints as the nodes' streams merge, in info-hash order: sorting by name
+would mean holding the whole swarm's catalog before printing the first line.
 
 ## Dropping a dataset
 
@@ -127,12 +131,12 @@ different directories under the same name, and they coexist.
 
 ```bash
 python control.py publish <node> <path>      # put local data into the swarm
-python control.py list    <node>             # datasets a node knows of
+python control.py list    <node>             # every dataset, in info-hash order
 python control.py peers   <node>             # nodes a node can see  <- start here when debugging
-python control.py status  <node>             # datasets a node actually holds
+python control.py status  <node>             # datasets a node actually holds (--all)
 python control.py add     <node> <dataset>   # tell it to store this one
 python control.py remove  <node> <dataset>   # tell it to stop holding it
-python control.py map     <node>             # copies of every dataset, rarest first
+python control.py map     <node>             # the least-replicated (--all, --top N)
 python control.py map     <node> <dataset>   # ...and that one's pieces, per node
 ```
 

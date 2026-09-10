@@ -72,8 +72,8 @@ def fetch_holdings(base: str, since: str = None, timeout: float = 30.0) -> dict:
     With no cursor this is the first page of everything it holds; with one,
     either the next page or only what has changed since — which is what makes
     following 25 nodes cost nothing while they are idle. `more` says whether to
-    call again with the cursor just handed back; fetch_all_holdings does that
-    for callers that just want the lot. The cursor is opaque: store it, hand it
+    call again with the cursor just handed back; holdings_stream does that
+    for callers that want the lot without holding it. The cursor is opaque: store it, hand it
     back, never take it apart.
 
     Raises Resync when the node says it cannot answer from that cursor. That is
@@ -91,19 +91,22 @@ def fetch_holdings(base: str, since: str = None, timeout: float = 30.0) -> dict:
         raise
 
 
-def fetch_all_holdings(base: str, timeout: float = 30.0) -> list:
-    """Everything a node holds, paging to the end.
+def holdings_stream(base: str, timeout: float = 30.0):
+    """Everything a node holds, a row at a time, paging to the end.
 
-    For readers that keep no cursor between runs — control.py lists in full
-    every time. Anything following the stream (collector.py) pages the same way
-    but keeps the cursor it ends with, so its next call is a delta."""
-    rows, cursor = [], None
+    In the order the node hands them out, which is info-hash order — the point
+    of which is that several of these can be merged without holding any of them:
+    a reader wanting the whole swarm takes one page per node rather than every
+    node's catalog. Readers that follow the stream instead (collector.py) page
+    the same way but keep the cursor they end with, so their next call is a
+    delta."""
+    cursor = None
     while True:
         page = fetch_holdings(base, since=cursor, timeout=timeout)
-        rows += page.get("holdings") or []
+        yield from page.get("holdings") or []
         cursor = page["cursor"]
         if not page.get("more"):
-            return rows
+            return
 
 
 def fetch_matching(base: str, ref: str, timeout: float = 10.0) -> list:

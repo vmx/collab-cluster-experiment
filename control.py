@@ -20,6 +20,7 @@ was published; where a name is ambiguous (two nodes published different content
 under the same one), use the info-hash instead.
 """
 import argparse
+import heapq
 import json
 import re
 import sys
@@ -88,33 +89,37 @@ def cmd_list(args) -> None:
 
     Read through that node rather than from it: it knows only what it holds, so
     the list is the union of every node's holdings, and the last column is the
-    one thing that is genuinely about the node you asked."""
+    one thing that is genuinely about the node you asked.
+
+    Printed as the merge turns each dataset up, in info-hash order. Sorting by
+    name would mean holding the whole swarm's catalog before the first line —
+    which is the one thing a full listing at this scale cannot do."""
     base = catalog.base_url(args.endpoint)
     try:
-        nodes = swarm_nodes(base)
+        nodes = swarm_labels(base)
     except Exception:
         _unreachable(args.endpoint)
-    entries = swarm_catalog(nodes)
-    if not entries:
-        print("no datasets yet - publish one with: "
-              "python control.py publish <node> <path>")
-        return
-    here = next((n for n in nodes if n["base"] == base), None)
-    held = here["held"] if here else {}
-    moving = here["moving"] if here else {}
-    print(f"{'name':<24} {'v2 info-hash':<18} {'copies':>6}  on this node")
-    for meta, holders in sorted(entries.values(), key=lambda e: e[0]["name"]):
-        row = held.get(meta["info_hash"])
-        if not row:
+    here = next((label for label, node in nodes if node == base), None)
+    moving = in_flight([(label, node) for label, node in nodes if node == base])
+    header, seen = f"{'name':<24} {'v2 info-hash':<18} {'copies':>6}  on this node", 0
+    for info_hash, holders in swarm_stream(nodes):
+        if not seen:
+            print(header)
+        seen += 1
+        mine = next((row for label, row in holders if label == here), None)
+        if not mine:
             column = "-"
-        elif row["state"] == "complete":
+        elif mine.get("state") == "complete":
             column = "complete"
         else:
-            live = moving.get(meta["info_hash"])
+            live = (moving.get(here) or {}).get(info_hash)
             column = f"{(live['progress'] if live else 0.0) * 100:.0f}%"
-        copies = sum(1 for h in holders if h["state"] == "complete")
-        print(f"{meta['name']:<24} {meta['info_hash'][:16]:<18} "
-              f"{copies:>6}  {column}")
+        copies = sum(1 for _, row in holders if row.get("state") == "complete")
+        name = holders[0][1].get("name") or ""
+        print(f"{name:<24} {info_hash[:16]:<18} {copies:>6}  {column}")
+    if not seen:
+        print("no datasets yet - publish one with: "
+              "python control.py publish <node> <path>")
 
 
 def cmd_peers(args) -> None:
@@ -139,19 +144,67 @@ def cmd_peers(args) -> None:
               f"{p.get('age', '?')}s ago")
 
 
-def _held(base: str) -> tuple:
-    """What one node holds, and what of it is moving: (row by info-hash, live
-    transfer by info-hash). Neither call scales with the swarm — the first is one
-    row per dataset held, the second only what is in flight.
+def swarm_stream(nodes: list):
+    """Every dataset in the swarm, in info-hash order, as (info_hash, holders).
 
-    control.py keeps no cursor between runs, so it always lists in full; a
-    long-running reader follows the cursor instead (see collector.py)."""
-    try:
-        held = {r["info_hash"]: r for r in catalog.fetch_all_holdings(base)}
-        moving = {t["info_hash"]: t for t in catalog.fetch_transfers(base)}
-    except Exception:
-        return {}, {}
-    return held, moving
+    The union of the nodes' holdings streams — which is the catalog — assembled
+    without being held. Each node hands its listing out in info-hash order, so
+    merging them brings every holder of a dataset past at the same moment: its
+    copy count falls out of the merge, and what is in memory is one page per
+    node however much the swarm holds.
+
+    `nodes` is [(label, base)]. Holders are [(label, row)], the rows as the node
+    reported them."""
+    def tagged(label, node):
+        # A function, not a generator expression: an expression would close over
+        # the loop variable and tag every row with the last node's label.
+        for row in catalog.holdings_stream(node):
+            yield row["info_hash"], label, row
+
+    streams = [tagged(label, node) for label, node in nodes]
+    current, holders = None, []
+    for info_hash, label, row in heapq.merge(*streams, key=lambda t: t[0]):
+        if info_hash != current:
+            if holders:
+                yield current, holders
+            current, holders = info_hash, []
+        holders.append((label, row))
+    if holders:
+        yield current, holders
+
+
+def swarm_labels(base: str) -> list:
+    """[(label, base)] for every node reachable through the one named."""
+    stats, _ = catalog.fetch_swarm(base)
+    return [(st["label"], f"http://{st['label']}") for st in stats if st.get("label")]
+
+
+def in_flight(nodes: list) -> dict:
+    """label -> {info_hash: transfer row}. Bounded by what is moving, so it is
+    read up front and used to colour whatever the streams turn up."""
+    out = {}
+    for label, node in nodes:
+        try:
+            out[label] = {t["info_hash"]: t for t in catalog.fetch_transfers(node)}
+        except Exception:
+            out[label] = {}
+    return out
+
+
+def holder_view(holders: list, moving: dict) -> tuple:
+    """(meta, holders) in the shape swarm_stats.overview_row wants."""
+    name, row0 = holders[0][1].get("name", ""), holders[0][1]
+    meta = {"info_hash": row0["info_hash"], "name": name,
+            "total_size": int(row0.get("total_size") or 0),
+            "piece_length": int(row0.get("piece_length") or 0)}
+    out = []
+    for label, row in holders:
+        live = (moving.get(label) or {}).get(row["info_hash"])
+        out.append({"label": label, "state": row.get("state"),
+                    "progress": 1.0 if row.get("state") == "complete"
+                                else float(live["progress"]) if live else 0.0,
+                    "download_rate": int(live["download_rate"]) if live else 0})
+    return meta, out
 
 
 def swarm_bases(base: str) -> list:
@@ -162,25 +215,14 @@ def swarm_bases(base: str) -> list:
     return [f"http://{st.get('label')}" for st in stats if st.get("label")]
 
 
-def swarm_nodes(base: str) -> list:
-    """Every node reachable through the one named, with what each holds."""
-    stats, _ = catalog.fetch_swarm(base)
-    out = []
-    for st in stats:
-        node_base = f"http://{st.get('label')}"
-        held, moving = _held(node_base)
-        out.append({"key": st["node_key"], "label": st.get("label", ""),
-                    "base": node_base, "held": held, "moving": moving})
-    return out
+# How many held datasets `status` names before it stops. Enough that a node in
+# the walkthrough lists everything it has, few enough that a node holding a
+# million costs one page of its stream rather than all of it.
+STATUS_SHOWN = 12
 
-
-def swarm_catalog(nodes: list) -> dict:
-    """The swarm's catalog: {info_hash: (meta, holders)}.
-
-    Nobody keeps one, so it is assembled here from what the nodes hold. That is
-    not a workaround — a dataset exists precisely because someone has it."""
-    return swarm_stats.catalog_from(
-        [(n["label"], n["held"], list(n["moving"].values())) for n in nodes])
+# How many of the rarest `map` shows. The walk is over the whole swarm either
+# way; this is what it keeps while walking, and what an operator can act on.
+MAP_TOP = 50
 
 
 def cmd_status(args) -> None:
@@ -189,23 +231,27 @@ def cmd_status(args) -> None:
         stats = catalog.fetch_stats(base)
     except Exception:
         _unreachable(args.endpoint)
-    held, moving = _held(base)
+    held = int(stats.get("held") or 0)
     if not held:
         print(f"{args.endpoint}: holding nothing yet")
         return
-    parts = []
-    for info_hash, row in sorted(held.items(),
-                                 key=lambda kv: kv[1].get("name", "")):
-        name = row.get("name") or info_hash[:12]
-        if row["state"] == "complete":
+    moving = {t["info_hash"]: t for t in catalog.fetch_transfers(base)}
+    parts, shown = [], 0
+    for row in catalog.holdings_stream(base):
+        if not args.all and shown == STATUS_SHOWN:
+            parts.append(f"... and {held - shown} more (--all)")
+            break
+        shown += 1
+        name = row.get("name") or row["info_hash"][:12]
+        if row.get("state") == "complete":
             parts.append(f"{name}[seed]")
         else:
-            live = moving.get(info_hash)
+            live = moving.get(row["info_hash"])
             parts.append(f"{name}[leech "
                          f"{(live['progress'] if live else 0.0) * 100:.0f}% "
                          f"p{live['num_peers'] if live else 0}]")
     print(f"{args.endpoint}: " + "  ".join(parts))
-    print(f"  {stats.get('complete', 0)}/{stats.get('held', 0)} complete, "
+    print(f"  {stats.get('complete', 0)}/{held} complete, "
           f"{human(stats.get('stored', 0))} stored")
 
 
@@ -436,35 +482,45 @@ def resolve_ref(names: dict, ref: str) -> str:
 def cmd_map(args) -> None:
     base = catalog.base_url(args.endpoint)
     try:
-        nodes = swarm_nodes(base)
+        nodes = swarm_labels(base)
     except Exception:
         _unreachable(args.endpoint)
     if not nodes:
         print("no nodes answered (check: python control.py peers).")
         return
-    entries = swarm_catalog(nodes)
-    if not entries:
-        print("no datasets yet - publish one with: "
-              "python control.py publish <node> <path>")
-        return
 
     if not args.dataset:
-        render_overview([swarm_stats.overview_row(meta, holders)
-                         for meta, holders in entries.values()])
+        moving = in_flight(nodes)
+        # Rarest first, and only the rarest kept: the merge walks the whole
+        # swarm but nothing but the answer is held. --all keeps everything,
+        # which is the same walk without the bound.
+        rarest, total = [], 0
+        for info_hash, holders in swarm_stream(nodes):
+            total += 1
+            row = swarm_stats.overview_row(*holder_view(holders, moving))
+            key = (-row["durable_copies"], row["name"])
+            if args.all or len(rarest) < args.top:
+                heapq.heappush(rarest, (key, total, row))
+            elif key < rarest[0][0]:
+                heapq.heapreplace(rarest, (key, total, row))
+        if not total:
+            print("no datasets yet - publish one with: "
+                  "python control.py publish <node> <path>")
+            return
+        render_overview([row for _, _, row in sorted(rarest, reverse=True)])
+        if not args.all and total > len(rarest):
+            print(f"\n{len(rarest)} rarest of {total} datasets (--all for every one)")
         print("\nfor one dataset's pieces and per-file copies: "
               f"python control.py map {args.endpoint} <dataset>")
         return
 
-    info_hash = resolve_ref({h: m["name"] for h, (m, _) in entries.items()},
-                            args.dataset)
+    info_hash = resolve_across(base, args.dataset)
     holders, holder_bases = [], []
-    for node in nodes:
-        if info_hash not in node["held"]:
-            continue
-        detail = catalog.fetch_holding(node["base"], info_hash)
+    for label, node in nodes:
+        detail = catalog.fetch_holding(node, info_hash)
         if detail:
-            holders.append((node["key"], node["label"], detail))
-            holder_bases.append(node["base"])
+            holders.append((label, label, detail))
+            holder_bases.append(node)
     # A dataset is here at all only because someone holds it, so this list is
     # never empty — but the node we asked may have gone away mid-command.
     if not holders:
@@ -494,12 +550,20 @@ def main() -> None:
     with_endpoint("list", "every dataset in the swarm, and what this node has",
                   cmd_list)
     with_endpoint("peers", "nodes a node can see", cmd_peers)
-    with_endpoint("status", "datasets a node actually holds", cmd_status)
+    p_status = with_endpoint("status", "datasets a node actually holds",
+                             cmd_status)
+    p_status.add_argument("--all", action="store_true",
+                          help=f"name every dataset it holds, not the first "
+                               f"{STATUS_SHOWN}")
     p_map = with_endpoint("map", "copies of every dataset, or one dataset's "
                           "pieces", cmd_map)
     p_map.add_argument("dataset", nargs="?",
-                       help="a dataset name or info-hash; without one, every "
-                            "dataset with its copy count")
+                       help="a dataset name or info-hash; without one, the "
+                            "least-replicated datasets with their copy counts")
+    p_map.add_argument("--top", type=int, default=MAP_TOP,
+                       help=f"how many of the rarest to show (default {MAP_TOP})")
+    p_map.add_argument("--all", action="store_true",
+                       help="every dataset, rarest first, however many there are")
 
     p_pub = with_endpoint("publish", "put a local file/dir into the swarm",
                           cmd_publish)
