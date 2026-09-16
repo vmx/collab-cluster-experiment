@@ -1,20 +1,20 @@
 # Scaling
 
-This design targets **25,000 datasets a day, of 100 MiB each, at three copies
-apiece**. That is 2.38 TiB of new data a day, or 7.15 TiB stored. After a year
-the swarm holds 9.1M datasets and 2.6 PiB.
+This design targets **25,000 datasets a day, of 1 GiB each, at three copies
+apiece**. That is 24.4 TiB of new data a day, or 73.2 TiB stored. After a year
+the swarm holds 9.1M datasets and 26.1 PiB.
 
 Each node carries datasets × copies ÷ nodes of that. The per-node figures below
 assume **25 nodes**, as a ballpark rather than a constraint. At 25 nodes, each
-node takes 3,000 datasets and 293 GiB a day, which is 2.3 MiB/s of transfer.
-After a year it holds 1.1M datasets and ~105 TiB. At fifty nodes, all of that
+node takes 3,000 datasets and 2.93 TiB a day, which is 23.7 MiB/s of transfer.
+After a year it holds 1.1M datasets and ~1.04 PiB. At fifty nodes, all of that
 halves.
 
 Everything outside "Where it stops" is implemented and measured, on libtorrent
 2.0.14 and Python 3.14. "Where it stops" lists the limits that remain, each with
 a proposed fix. Projections to the full load are linear extrapolations of a
-measured per-unit cost. The figures are sizes and counts. Timings depend on the
-hardware, so they are left out.
+measured per-unit cost. The figures are sizes and counts.
+Timings depend on the hardware, so they are left out.
 
 ## Why it holds
 
@@ -26,7 +26,7 @@ holds, and nothing about the others. There is no central index either.
 Publishing seeds the data in place, so a dataset has a holder from the moment it
 exists. The list of datasets in the swarm is the union of every node's
 holdings. The alternative, every node mirroring every torrent, would cost 9.1M ×
-13 KB = ~120 GB of metadata per node per year. Most of it would be for datasets
+131 KB = ~1.2 TB of metadata per node per year. Most of it would be for datasets
 the node never touches: at 25 nodes, a node holds an eighth of them.
 
 **Holdings are a stream of transitions, not a list.** What a node holds changes
@@ -130,20 +130,21 @@ counting copies needs no piece detail. That is what keeps the list view free of
 per-dataset lookups. A holder at 90% is not a copy. That is why downloads are
 queued (see below) instead of all running at once.
 
-**Metadata is 0.03% of the data.** 100 MiB at 256 KiB pieces is 400 pieces.
-That makes a 12.8 KB piece layer and a 13,072-byte `.torrent`. The resume file
-is about the same size. At 1.1M held, that is ~30 GB of metadata against ~105
-TiB of data.
+**Metadata is 0.03% of the data.** 1 GiB at 256 KiB pieces is 4,096 pieces.
+That makes a 131.1 KB piece layer and a 131,344-byte `.torrent`. The resume file
+is about the same size. At 1.1M held, that is ~289 GB of metadata against ~1.04
+PiB of data.
 
 **A restart is not a re-download or a re-hash.** Fast-resume data is
 self-contained (`save_info_dict`), and libtorrent trusts the checkpoint. So a
-restart at 1.1M held reads ~15 GB of resume files instead of hashing ~105 TiB
+restart at 1.1M held reads ~144 GB of resume files instead of hashing ~1.04 PiB
 of data.
 
-**RAM is the one linear cost: 34.4 KiB per held torrent.** It was measured at
-the real shape (100 MiB, 256 KiB pieces, v2-only, private) and cross-checked on
-a live node. It is ~19 KiB fixed, plus 32 B per piece. That comes to ~0.35 GB
-per TiB held, or ~38 GB at 1.1M, and it does not change with the node count.
+**RAM is the one linear cost: 135.4 KiB per held torrent.** Measured using the
+recipe below (256 KiB pieces, v2-only, private); not yet cross-checked on a
+live node. It is ~7.4 KiB fixed, plus 32 B per piece — 4,096 pieces at 1 GiB, so
+the piece term (~128 KiB) is ~95% of the cost. That comes to ~0.14 GB per TiB
+held, or ~153 GB at 1.1M. It does not change with the node count.
 
 ## libtorrent's defaults are desktop defaults
 
@@ -178,11 +179,11 @@ time. At 2 s, they start almost at once.
 
 What is left, in the order it bites, each with a proposed fix.
 
-- **`UPLOAD_RATE_LIMIT` caps the swarm at 2.06 TiB/day.** Three copies need 4.77
+- **`UPLOAD_RATE_LIMIT` caps the swarm at 2.06 TiB/day.** Three copies need 48.8
   TiB/day. The limit is a demo knob: 1 MiB/s, so a transfer is slow enough to
   watch.
   **Fix:** default it to 0, and let the single-host walkthrough set it from the
-  environment. The real need, 2.3 MiB/s per node, needs no cap.
+  environment. The real need, 23.7 MiB/s per node, needs no cap.
 - **A node restart makes every reader re-list it.** A restart mints a new cursor
   epoch. So readers that were up to date re-read everything the node holds:
   ~200 MB at 1.1M.
@@ -203,15 +204,15 @@ What is left, in the order it bites, each with a proposed fix.
   node → datasets, become indexes the store keeps consistent. Writes are one
   transaction per poll. The aggregate can be rebuilt from the nodes, so
   durability can be relaxed: a crash costs a re-list.
-- **Node RAM grows with holdings**: 34.4 KiB a dataset, ~38 GB at 1.1M. It never
-  comes back down.
-  **Fix, cheap:** raise `PIECE_SIZE`. The per-piece term is a third of the cost.
-  1 MiB pieces cut the piece layer from 12.8 KB to 3.2 KB. 4 MiB pieces bring a
-  torrent to ~20 KiB. The price is coarser progress and availability. It only
-  helps datasets published after the change, because the piece size is part of
-  what the info-hash hashes.
+- **Node RAM grows with holdings**: 135.4 KiB a dataset, ~153 GB at 1.1M. It
+  never comes back down.
+  **Fix, cheap:** raise `PIECE_SIZE`. The per-piece term is ~95% of the cost. 1
+  MiB pieces cut the piece layer from 131.1 KB to 32.8 KB, bringing a torrent to
+  ~40 KiB. 4 MiB pieces bring one to ~15 KiB. The price is coarser progress and
+  availability. It only helps datasets published after the change, because the
+  piece size is part of what the info-hash hashes.
   **Fix, structural:** load a held torrent into libtorrent only while it serves.
-  The 34.4 KiB is only needed to move bytes. Answering `/holdings` takes just
+  The 135.4 KiB is only needed to move bytes. Answering `/holdings` takes just
   the node's own ~900 B record. A node would add a torrent when a download is
   coming, and drop it once idle. For that, every holder has to hear that a
   download is coming, because a holder without the torrent loaded turns the
@@ -254,7 +255,7 @@ python node.py --id 0 &
 python control.py publish 127.0.0.1:8001 <path>
 ```
 
-Per-torrent RAM: clone one 100 MiB v2 torrent into N distinct ones. Patching the
+Per-torrent RAM: clone one 1 GiB v2 torrent into N distinct ones. Patching the
 name in the bencoded info dict is enough, and the piece layers stay valid. Add
 them to a `node.make_session()` in seed mode, and read `statm`.
 
