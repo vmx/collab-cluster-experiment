@@ -22,6 +22,12 @@
 #   - The container can reach the git URL below. Point it at your fork/mirror if
 #     needed.
 #
+# security.nesting=true: recent systemd-networkd.service (and similar units) set
+# PrivateUsers=yes, which creates a nested user namespace to sandbox itself in —
+# blocked by Incus's default AppArmor profile for an unprivileged container, so
+# the unit crash-loops forever and the container never gets a DHCP lease.
+# Nesting relaxes that profile enough to let it start.
+#
 # `runcmd` runs in cloud-init's final stage, after the `debian` user exists, so
 # the clone/copy see the user's home already in place.
 #
@@ -30,6 +36,7 @@
 # Apply:  incus launch <image> <name> --profile default --profile collab-cluster
 description: collab-cluster swarm (repo + libtorrent + systemd units, no config)
 config:
+  security.nesting: "true"
   cloud-init.user-data: |
     #cloud-config
     package_update: true
