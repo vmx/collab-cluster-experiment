@@ -7,7 +7,11 @@
 # server that node should live on. Idempotent: re-running it with the same
 # name changes nothing once the node is up and enabled.
 #
-# Usage:   ./incus/new-node.sh <name>
+# Usage:   ./incus/new-node.sh <name> [data-root]
+#   data-root   host dir whose <name> subdir becomes this node's storage
+#               (data, torrents, fast-resume), e.g. a directory on a separate
+#               ZFS partition. Omit it and the node stores inside the
+#               container as usual.
 # Tunables (environment):
 #   IMAGE=images:debian/14/cloud   image to launch (needs cloud-init)
 #   PROFILE=collab-cluster         profile name to create/update
@@ -18,11 +22,12 @@ PROFILE=${PROFILE:-collab-cluster}
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-if [ $# -ne 1 ]; then
-	echo "usage: $0 <name>" >&2
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+	echo "usage: $0 <name> [data-root]" >&2
 	exit 1
 fi
 NAME=$1
+DATA_ROOT=${2:-}
 
 say() {
 	printf '\n==> %s\n' "$*"
@@ -64,6 +69,17 @@ if exists "$NAME"; then
 else
 	echo "$NAME: launching"
 	incus launch "$IMAGE" "$NAME" --profile default --profile "$PROFILE"
+fi
+
+if [ -n "$DATA_ROOT" ]; then
+	data_dir="$DATA_ROOT/$NAME"
+	say "Mounting $data_dir at /mnt/collab-data"
+	mkdir -p "$data_dir"
+	if incus config device get "$NAME" data source >/dev/null 2>&1; then
+		echo 'disk device already present'
+	else
+		incus config device add "$NAME" data disk source="$data_dir" path=/mnt/collab-data shift=true
+	fi
 fi
 
 say 'Waiting for cloud-init to finish provisioning'

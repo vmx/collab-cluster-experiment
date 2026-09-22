@@ -12,6 +12,10 @@
 #   WEB_PORT=8100                  host port for the collector's web UI
 #   EXPOSE_WEB=1                   0 = don't add the public proxy device
 #   COLLECTOR=1                    0 = nodes only, no dashboard container
+#   DATA_ROOT=                     host dir whose <name> subdir becomes each
+#                                   node's storage, e.g. a directory on a
+#                                   separate ZFS partition. Unset: nodes store
+#                                   inside their containers as usual.
 #
 # Nothing here is swarm configuration, and there is none to write: every
 # container finds what it needs on the bridge. Nodes are told no addresses and
@@ -26,6 +30,7 @@ PROFILE=${PROFILE:-collab-cluster}
 WEB_PORT=${WEB_PORT:-8100}
 EXPOSE_WEB=${EXPOSE_WEB:-1}
 COLLECTOR_ENABLED=${COLLECTOR:-1}
+DATA_ROOT=${DATA_ROOT:-}
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 COLLECTOR=collector
@@ -90,6 +95,20 @@ for name in $(all_names); do
 	fi
 done
 
+if [ -n "$DATA_ROOT" ]; then
+	say "Mounting node storage from $DATA_ROOT"
+	for name in $(node_names); do
+		data_dir="$DATA_ROOT/$name"
+		mkdir -p "$data_dir"
+		if incus config device get "$name" data source >/dev/null 2>&1; then
+			echo "$name: disk device already present"
+		else
+			echo "$name: mounting $data_dir at /mnt/collab-data"
+			incus config device add "$name" data disk source="$data_dir" path=/mnt/collab-data shift=true
+		fi
+	done
+fi
+
 say 'Waiting for cloud-init to finish provisioning'
 for name in $(all_names); do
 	printf '%s: ' "$name"
@@ -124,8 +143,7 @@ if [ "$COLLECTOR_ENABLED" = 1 ] && [ "$EXPOSE_WEB" = 1 ]; then
 	if incus config device get "$COLLECTOR" web listen >/dev/null 2>&1; then
 		echo 'proxy device already present'
 	else
-		incus config device add "$COLLECTOR" web proxy \
-			"listen=tcp:0.0.0.0:$WEB_PORT" connect=tcp:127.0.0.1:8100
+		incus config device add "$COLLECTOR" web proxy "listen=tcp:0.0.0.0:$WEB_PORT" connect=tcp:127.0.0.1:8100
 	fi
 fi
 

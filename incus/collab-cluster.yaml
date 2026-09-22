@@ -4,8 +4,9 @@
 # swarm component:
 #   - installs git and the libtorrent python binding,
 #   - clones this repo into /home/debian/collab-cluster-experiment; the
-#     systemd --user units set WorkingDirectory to it, so their scripts and data
-#     all resolve inside that checkout,
+#     systemd --user units set WorkingDirectory to it, so their scripts resolve
+#     inside that checkout — except a node's own storage, redirected below to a
+#     fixed path outside it,
 #   - installs the units into ~/.config/systemd/user/ (you enable the right one
 #     per container — see the incus README, step 3).
 #
@@ -43,5 +44,15 @@ config:
       # Install the systemd --user units (copies both; enable one later).
       - mkdir --parents /home/debian/.config/systemd/user
       - cp /home/debian/collab-cluster-experiment/systemd/collab-cluster-*.service /home/debian/.config/systemd/user/
+      # A node stores under NODES_DIR (default: the checkout's nodes/), which a
+      # host-path disk device can't target directly — Incus creates the mount
+      # point before this runcmd's git clone runs, which would then fail on a
+      # non-empty target. This drop-in points storage at a fixed path outside
+      # the checkout instead; mount a disk device there per container (see
+      # incus/new-node.sh's data-dir argument) to put it on a host partition,
+      # or leave it unmounted and it's just an ordinary directory in the
+      # container.
+      - mkdir --parents /home/debian/.config/systemd/user/collab-cluster-node.service.d
+      - cp /home/debian/collab-cluster-experiment/incus/collab-cluster-node.service.d/override.conf /home/debian/.config/systemd/user/collab-cluster-node.service.d/
       # The clone/copy ran as root, so hand the whole home back to `debian`.
       - chown --recursive debian:debian /home/debian

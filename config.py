@@ -9,7 +9,9 @@ import os
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
-NODES_DIR = os.path.join(BASE_DIR, "nodes")
+# Override to move a node's storage (nodes/<id>/data, torrents, .resume) off the
+# checkout entirely, e.g. onto a disk mounted elsewhere.
+NODES_DIR = os.environ.get("SWARM_NODES_DIR") or os.path.join(BASE_DIR, "nodes")
 
 # Where the built-in sample datasets are generated (make_torrent.py). Nothing
 # else lives under data/ any more — each node keeps the .torrent files of what it

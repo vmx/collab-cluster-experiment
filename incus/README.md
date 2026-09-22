@@ -10,7 +10,9 @@ bridge, reachable by SSHing to the host. The node containers know nothing about
 it — the dashboard reads them, not the other way round.
 
 [`provision.sh`](provision.sh) does everything below in one idempotent command,
-if you'd rather not run the steps by hand.
+if you'd rather not run the steps by hand. [`new-node.sh`](new-node.sh) is the
+one-node building block it's made of — run it per node to grow a swarm
+incrementally, or to spread it across several hosts.
 
 ## Prerequisites
 
@@ -22,7 +24,8 @@ The profile provisions the rest per container: it clones this repo into
 `/home/debian/collab-cluster-experiment` (owned by the image's default `debian`
 user, which runs the services), installs `python3-libtorrent`, and copies the
 units into `~/.config/systemd/user/`. The units set `WorkingDirectory` to that
-checkout, so their scripts and data (`data/`, `nodes/`) all resolve inside it.
+checkout, so scripts and the sample `data/` resolve inside it — a node's own
+storage is redirected outside it instead (step 6, below).
 
 ## 1. Load the profile
 
@@ -151,10 +154,32 @@ incus config device add collector web proxy listen=tcp:0.0.0.0:8100 connect=tcp:
 
 See the [proxy device docs](https://linuxcontainers.org/incus/docs/main/reference/devices_proxy/).
 
+## 6. Optional: storage on a separate partition
+
+The profile points every node's storage (`<id>/`: data, torrents, fast-resume)
+at `/mnt/collab-data` (via `SWARM_NODES_DIR`, set for you by the systemd
+drop-in). Left unmounted, that's just an ordinary directory inside the
+container, on whatever backs your Incus storage pool. To put it on a host
+partition instead — e.g. a dedicated ZFS dataset — mount a directory onto it:
+
+```sh
+for name in node0 node1 node2; do
+  mkdir -p "/srv/collab-cluster/$name"
+  incus config device add "$name" data disk source="/srv/collab-cluster/$name" path=/mnt/collab-data shift=true
+done
+```
+
+`shift=true` maps the container's unprivileged UIDs onto the host path so the
+`debian` user can actually write there. Do it before the node has written
+anything (or `remove`/`add` the datasets again after), since mounting over a
+directory that already has data in it hides what's there rather than merging
+it.
+
 ## Clean up
 
-Nothing lives outside the containers, so deleting them is the whole teardown —
-the proxy device and the datasets go with them.
+Deleting a container is its whole teardown *unless* it has a data disk device
+attached (step 6, above) — that storage lives on the host and outlives the
+container, so it needs cleaning up separately if you want it gone.
 
 ```sh
 # --force stops them first
