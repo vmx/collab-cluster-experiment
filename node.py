@@ -30,7 +30,11 @@ no coordinator.
   POST /publish  {"path": ...}   hash a local file/dir into a dataset and seed it
                                  in place. This is the only way data enters the
                                  swarm.
-  POST /add      {"info_hash": ...}            take a dataset from whoever has it
+  POST /add      {"info_hash": ..., "peer": {"ip", "bt", "http"}?}
+                                 take a dataset from whoever has it; "peer" is
+                                 optional and names an address to fetch from
+                                 directly, for a sender outside our beacon-
+                                 built peer table (see take())
   POST /remove   {"info_hash"|"name": ...}     drop one
 
 Two background threads — the libtorrent session loop (tracks what is moving)
@@ -745,8 +749,26 @@ def fetch_torrent(ns: NodeState, info_hash: str) -> bytes:
     raise FileNotFoundError(info_hash)
 
 
-def take(ns: NodeState, info_hash: str) -> dict:
-    """Take a dataset: find its .torrent among the peers, then hold it."""
+def take(ns: NodeState, info_hash: str, peer: dict = None) -> dict:
+    """Take a dataset: from a peer the beacon found, or from an address the
+    caller already knows — e.g. an external producer that doesn't
+    participate in the beacon and has to be pointed at explicitly. Checked
+    locally first so a repeated call costs nothing once the dataset is held:
+    the caller doesn't have to track what it already told us."""
+    with ns.lock:
+        entry = ns.torrents.get(info_hash)
+    if entry:
+        return {"info_hash": info_hash, "name": entry["name"],
+                "added": False, "note": "already present"}
+    if peer:
+        blob = node_client.fetch_torrent_bytes(
+            f"http://{peer['ip']}:{peer['http']}", info_hash)
+        res = add_torrent(ns, blob)
+        with ns.lock:
+            entry = ns.torrents.get(info_hash)
+        if entry:
+            entry["handle"].connect_peer((peer["ip"], peer["bt"]))
+        return res
     return add_torrent(ns, fetch_torrent(ns, info_hash))
 
 
@@ -1224,8 +1246,12 @@ def make_handler(ns: NodeState):
                 elif self.path == "/add":
                     # By info-hash only: a node knows the names of only what it
                     # holds. control.py resolves names across the swarm's
-                    # holdings streams and sends the hash it found.
-                    self._send_json(take(ns, body["info_hash"].lower()))
+                    # holdings streams and sends the hash it found. An
+                    # optional "peer" ({ip, bt, http}) points at an address
+                    # to fetch from directly, for a caller that isn't in our
+                    # beacon-built peer table — see take().
+                    self._send_json(take(ns, body["info_hash"].lower(),
+                                          body.get("peer")))
                 elif self.path == "/remove":
                     info_hash = resolve(ns, body.get("info_hash"), body.get("name"))
                     self._send_json(remove_torrent(ns, info_hash))
