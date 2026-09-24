@@ -763,6 +763,9 @@ def take(ns: NodeState, info_hash: str, peer: dict = None) -> dict:
     if peer:
         blob = node_client.fetch_torrent_bytes(
             f"http://{peer['ip']}:{peer['http']}", info_hash)
+        got = str(lt.torrent_info(lt.bdecode(blob)).info_hashes().v2)
+        if got != info_hash:
+            raise ValueError(f"{peer['ip']} sent {got[:8]} when asked for {info_hash[:8]}")
         res = add_torrent(ns, blob)
         with ns.lock:
             entry = ns.torrents.get(info_hash)
