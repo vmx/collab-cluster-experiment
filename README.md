@@ -245,6 +245,11 @@ POST /add      {"info_hash": …}      take a dataset from whoever has it
 POST /remove   {"name"|"info_hash"}  drop one
 ```
 
+A producer outside the swarm, which no beacon announces, adds two fields to
+`/add`: `torrent_url`, where to fetch the `.torrent`, and `web_seed`, a plain
+HTTP server to download the data from (BEP 19). A web seed serving a v2
+torrent with more than one file needs libtorrent 2.1.2 or later on the node.
+
 There is no endpoint for "what datasets exist", because no node knows. The union
 of every node's `/holdings` **is** the answer.
 

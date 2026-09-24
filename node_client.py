@@ -38,6 +38,13 @@ def _get(base: str, path: str, timeout: float) -> bytes:
         return r.read()
 
 
+def fetch_url(url: str, timeout: float = 10.0) -> bytes:
+    """Any URL's body -- for a .torrent handed over by a producer that isn't
+    a node and so has no /dataset route."""
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        return r.read()
+
+
 class Resync(Exception):
     """The node cannot answer from the cursor we sent — it has restarted, or the
     transitions we asked about have been trimmed away. Drop the cursor and list
