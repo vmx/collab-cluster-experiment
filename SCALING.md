@@ -181,8 +181,8 @@ What is left, in the order it bites, each with a proposed fix.
 
 - **`UPLOAD_RATE_LIMIT` caps the swarm at 2.06 TiB/day.** Three copies need 48.8
   TiB/day. The limit is a demo knob: 1 MiB/s, so a transfer is slow enough to
-  watch.
-  **Fix:** default it to 0, and let the single-host walkthrough set it from the
+  watch. `DOWNLOAD_RATE_LIMIT` is the same knob on the receiving side.
+  **Fix:** default both to 0, and let the single-host walkthrough set it from the
   environment. The real need, 23.7 MiB/s per node, needs no cap.
 - **A node restart makes every reader re-list it.** A restart mints a new cursor
   epoch. So readers that were up to date re-read everything the node holds:

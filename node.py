@@ -652,6 +652,7 @@ def make_session(node_id: int) -> "lt.session":
         # By default libtorrent exempts loopback/LAN peers from rate limits, so
         # we must turn that off for the cap to apply within a single-host swarm.
         "upload_rate_limit": config.UPLOAD_RATE_LIMIT,
+        "download_rate_limit": config.DOWNLOAD_RATE_LIMIT,
         "ignore_limits_on_local_network": False,
     }
     return lt.session(settings)

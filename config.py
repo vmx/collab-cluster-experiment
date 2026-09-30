@@ -48,6 +48,10 @@ PIECE_SIZE = 256 * 1024          # 256 KiB; power of two (v2 requires >= 16 KiB)
 # otherwise instantaneous; capping it spreads the transfer over time so the live
 # rate/progress is actually observable as it happens. 1 MiB/s => ~30s+.
 UPLOAD_RATE_LIMIT = 1 * 1024 * 1024
+# Per-node download rate cap (bytes/s, 0 = unlimited). The upload cap only paces
+# what nodes send; data from a web seed comes from an HTTP server no node's cap
+# covers, and a node pulling from several holders gets all their caps summed.
+DOWNLOAD_RATE_LIMIT = 1 * 1024 * 1024
 
 # --- Timing (seconds) --------------------------------------------------------
 # How often a node runs its sync tick: beacon out, drain beacons in, and re-mesh
