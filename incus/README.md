@@ -10,8 +10,9 @@ bridge, reachable by SSHing to the host. The node containers know nothing about
 it — the dashboard reads them, not the other way round.
 
 [`provision.sh`](provision.sh) does everything below in one idempotent command,
-if you'd rather not run the steps by hand. [`new-node.sh`](new-node.sh) is the
-one-node building block it's made of — run it per node to grow a swarm
+if you'd rather not run the steps by hand. [`new-container.sh`](new-container.sh)
+is the one-container building block — `new-container.sh node <name>` or
+`new-container.sh collector <name>` — run it per container to grow a swarm
 incrementally, or to spread it across several hosts.
 
 ## Prerequisites
@@ -153,6 +154,8 @@ incus config device add collector web proxy listen=tcp:0.0.0.0:8100 connect=tcp:
 ```
 
 See the [proxy device docs](https://linuxcontainers.org/incus/docs/main/reference/devices_proxy/).
+
+`./incus/new-container.sh collector collector` does all of this step in one go.
 
 ## 6. Optional: storage on a separate partition
 

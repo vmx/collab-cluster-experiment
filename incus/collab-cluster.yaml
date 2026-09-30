@@ -56,9 +56,9 @@ config:
       # point before this runcmd's git clone runs, which would then fail on a
       # non-empty target. This drop-in points storage at a fixed path outside
       # the checkout instead; mount a disk device there per container (see
-      # incus/new-node.sh's data-dir argument) to put it on a host partition,
-      # or leave it unmounted and it's just an ordinary directory in the
-      # container.
+      # incus/new-container.sh's data-root argument) to put it on a host
+      # partition, or leave it unmounted and it's just an ordinary directory
+      # in the container.
       - mkdir --parents /home/debian/.config/systemd/user/collab-cluster-node.service.d
       - cp /home/debian/collab-cluster-experiment/incus/collab-cluster-node.service.d/override.conf /home/debian/.config/systemd/user/collab-cluster-node.service.d/
       # The clone/copy ran as root, so hand the whole home back to `debian`.
