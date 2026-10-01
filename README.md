@@ -89,10 +89,10 @@ python control.py remove 127.0.0.1:8002 media
 1. The node stops serving the dataset immediately.
 2. Its fast-resume file and its `.torrent` are deleted, so a restart won't bring
    it back and the node stops answering for it.
-3. **The downloaded files stay on disk.** `remove` frees no space — delete
-   `nodes/<id>/data/<slug>/` yourself. Re-adding the dataset later costs no
-   network traffic: libtorrent rechecks the files sitting there and comes back
-   complete.
+3. **The downloaded copy is deleted** — `nodes/<id>/data/<slug>/` goes with
+   it, so the space is free again and re-adding the dataset later downloads it
+   anew. A dataset this node *published* is the exception: its files are yours,
+   seeded in place, and stay where they are.
 4. **If that was the last copy, the dataset has left the swarm**, along with any
    record that it existed. There is no confirmation. Re-publishing the same path
    brings it back byte for byte and hash for hash.
@@ -241,7 +241,7 @@ GET  /dataset/<info_hash>.torrent    the same, as the raw .torrent (holders only
 GET  /peers                          {"self": …, "peers": […]} — its view of the swarm
 POST /publish  {"path": …}           hash a local path in and seed it
 POST /add      {"info_hash": …}      take a dataset from whoever has it
-POST /remove   {"name"|"info_hash"}  drop one
+POST /remove   {"name"|"info_hash"}  drop one, deleting its downloaded copy
 ```
 
 A producer outside the swarm, which no beacon announces, adds two fields to
@@ -328,8 +328,6 @@ to 0. A node's real identity is a persisted UUID in `nodes/<id>/node_key`.
   log, in `/transfers`, and as a count in `/stats` — but libtorrent will not pick
   that torrent back up, and neither a restart nor fixing the disk restarts it.
   `remove` then `add` does, in seconds.
-- **`remove` doesn't delete the files.** It stops serving a dataset and forgets
-  it across restarts, but the downloaded copy stays in `nodes/<id>/data/`.
 - **Nothing weighs a dataset against free space.** `add` never refuses, however
   little room is left. Placing datasets is manual, and nothing warns you that a
   copy count has dropped to one.

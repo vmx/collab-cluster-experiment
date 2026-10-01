@@ -34,7 +34,8 @@ no coordinator.
                                  take a dataset from whoever has it; the
                                  optional URLs are for a producer outside the
                                  swarm (see take())
-  POST /remove   {"info_hash"|"name": ...}     drop one
+  POST /remove   {"info_hash"|"name": ...}     drop one, and delete the copy
+                                 this node downloaded of it
 
 Two background threads — the libtorrent session loop (tracks what is moving)
 and the sync loop (the engine, below) — while the main thread serves the HTTP
@@ -786,9 +787,12 @@ def remove_torrent(ns: NodeState, info_hash: str) -> dict:
 
     There is no list to stay in: the holdings streams are the only record of a
     dataset, so dropping it removes this node from the set of places it exists,
-    and dropping the last copy retracts it from the swarm. The downloaded files
-    stay on disk — re-publishing that path reproduces the same dataset, since
-    the identity is the content."""
+    and dropping the last copy retracts it from the swarm.
+
+    A copy this node downloaded is deleted with it: its own directory under
+    nodes/<id>/data/. A published dataset is seeded in place from somebody's
+    own files, and those are never this node's to delete — re-publishing that
+    path reproduces the same dataset, since the identity is the content."""
     with ns.lock:
         entry = ns.torrents.pop(info_hash, None)
         if entry:
@@ -806,8 +810,16 @@ def remove_torrent(ns: NodeState, info_hash: str) -> dict:
     except FileNotFoundError:
         pass
     drop_torrent(ns, entry["name"], info_hash)
-    print(f"node {ns.node_id}: -{entry['name']} [{info_hash[:8]}]", flush=True)
-    return {"removed": True, "info_hash": info_hash, "name": entry["name"]}
+    # Exactly the directory add_torrent() made for a download, so a published
+    # dataset's save_path can never match it.
+    own_copy = held_path(data_dir(ns.node_id), entry["name"], info_hash)
+    deleted = os.path.abspath(entry["save_path"]) == os.path.abspath(own_copy)
+    if deleted:
+        shutil.rmtree(own_copy, ignore_errors=True)
+    print(f"node {ns.node_id}: -{entry['name']} [{info_hash[:8]}]"
+          f"{' (files deleted)' if deleted else ''}", flush=True)
+    return {"removed": True, "info_hash": info_hash, "name": entry["name"],
+            "files_deleted": deleted}
 
 
 def publish(ns: NodeState, path: str) -> dict:

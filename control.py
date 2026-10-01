@@ -300,7 +300,8 @@ def cmd_remove(args) -> None:
         print(f"{args.endpoint}: not holding {args.dataset!r} - nothing to do")
         return
     print(f"{args.endpoint}: dropped {res['name']!r} [{res['info_hash'][:16]}] "
-          "- the files stay on disk")
+          + ("- its downloaded copy is deleted" if res.get("files_deleted")
+             else "- the published files stay where they are"))
     print("if that was the last copy, the dataset has left the swarm: nothing "
           "keeps a\nrecord of datasets nobody holds. Re-publishing the same "
           "path brings it back\nunchanged - the dataset is its content.")
