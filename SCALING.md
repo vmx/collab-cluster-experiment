@@ -36,9 +36,9 @@ held, `/stats` is 310 B, the same as at one dataset. A five-row delta is 708 B.
 A settled swarm does no holdings traffic at all, and a busy one pays only for
 the changes.
 
-The log of transitions is bounded by `CHANGE_LOG_LIMIT` (10,000). At ~6,000
-transitions per node per day, that is a day and a half. A reader that has been
-away longer is told to re-list, rather than handed a delta with holes in it.
+The log of transitions is bounded by `CHANGE_LOG_LIMIT`. A reader whose cursor
+is older than the log reaches is told to re-list, rather than handed a delta
+with holes in it.
 
 **A re-list is paged.** While a listing runs, its cursor remembers the position.
 Datasets taken or dropped in the meantime arrive afterwards, as transitions and

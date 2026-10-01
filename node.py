@@ -107,7 +107,7 @@ LISTING_PAGE = 10_000
 # rather than re-sent everything. A reader whose cursor is older than the oldest
 # retained transition is told to re-list instead; the bound is what stops the log
 # growing without limit on a long-lived node.
-CHANGE_LOG_LIMIT = 10000
+CHANGE_LOG_LIMIT = 100000
 
 
 class NodeState:
