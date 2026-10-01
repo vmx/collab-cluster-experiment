@@ -63,6 +63,9 @@ config:
       # in the container.
       - mkdir --parents /home/debian/.config/systemd/user/collab-cluster-node.service.d
       - cp /home/debian/collab-cluster-experiment/incus/collab-cluster-node.service.d/override.conf /home/debian/.config/systemd/user/collab-cluster-node.service.d/
+      # /mnt is root's, so create the storage dir for `debian` up front —
+      # unless a data-root is already mounted there, which is left untouched.
+      - '[ -d /mnt/collab-data ] || install --directory --owner debian --group debian /mnt/collab-data'
       # The optional data manager, which decides what the node in this
       # container holds. Installed everywhere, enabled only where it's given a
       # policy (incus/new-container.sh --policy). Standard library only, so it
