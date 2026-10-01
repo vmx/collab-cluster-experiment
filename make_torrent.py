@@ -27,14 +27,14 @@ import config
 # multi-dataset machinery is exercised out of the box. (relative path, size).
 SAMPLE_GROUPS = {
     "media": [
-        ("photo_a.bin", 5 * 1024 * 1024),
-        ("photo_b.bin", 3 * 1024 * 1024),
+        ("photo_a.bin", 40 * 1024 * 1024),
+        ("photo_b.bin", 24 * 1024 * 1024),
         ("clips/intro.bin", 4 * 1024 * 1024),
     ],
     "documents": [
-        ("notes.txt", 12 * 1024),
-        ("report.bin", 6 * 1024 * 1024),
-        ("appendix/data.bin", 8 * 1024 * 1024),
+        ("notes.txt", 96 * 1024),
+        ("report.bin", 48 * 1024 * 1024),
+        ("appendix/data.bin", 64 * 1024 * 1024),
     ],
 }
 
