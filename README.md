@@ -117,10 +117,8 @@ python control.py status 127.0.0.1:8002         # arriving
 python control.py status 127.0.0.1:8003         # node 2: holding nothing yet
 ```
 
-Transfers are capped at `UPLOAD_RATE_LIMIT` and `DOWNLOAD_RATE_LIMIT` (1 MiB/s
-each) per node so replication is slow enough to watch: the 12 MiB sample lands in
-about 20 seconds, however many nodes hold it and whether it comes from peers or a
-web seed.
+Transfers are capped at `UPLOAD_RATE_LIMIT` and `DOWNLOAD_RATE_LIMIT` per node
+so replication is slow enough to watch.
 
 From there: drop it again and look at `status`, `list` and `nodes/1/data/`;
 start a fourth node and read `list` through it, which shows everything published
