@@ -69,6 +69,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import threading
 import time
 import traceback
@@ -111,13 +112,16 @@ CHANGE_LOG_LIMIT = 100000
 
 
 class NodeState:
-    def __init__(self, node_id: int, node_key: str, ses: "lt.session"):
+    def __init__(self, node_id: int, node_key: str, name: str, ses: "lt.session"):
         self.node_id = node_id
         # Stable swarm-wide identity (a persisted UUID). The integer node_id is a
         # local convenience (ports, data dirs); node_key is how peers tell each
         # other apart, and what the collector keys every metric by, so a restart
         # keeps the same series.
         self.node_key = node_key
+        # What a person calls this node, for display only: it need not be
+        # unique, and nothing finds or tells nodes apart by it.
+        self.name = name
         self.ses = ses
         self.lock = threading.Lock()
         # info_hash(v2 str) -> {name, save_path, ti, files, handle, state,
@@ -491,7 +495,7 @@ def node_stats(ns: NodeState) -> dict:
         held, complete = len(ns.torrents), ns.n_complete
         cursor, rates = cursor_of(ns), dict(ns.rates)
         moving = list(ns.transfers)
-    return {"node_key": ns.node_key, "ts": time.time(),
+    return {"node_key": ns.node_key, "name": ns.name, "ts": time.time(),
             "bt_port": config.bt_port(ns.node_id),
             "http_port": config.stats_port(ns.node_id),
             "disk": node_disk(ns.node_id),
@@ -1305,7 +1309,12 @@ def main() -> None:
     # how the node is identified in the swarm (that's the node_key UUID). One
     # node per host is the common case, so it defaults to 0.
     ap.add_argument("--id", type=int, default=0)
+    # What the dashboard shows this node as. The hostname is already a name
+    # somebody chose, so it is the default; the id is appended when it is not 0,
+    # so that several nodes on one host still tell apart.
+    ap.add_argument("--name", default=config.NODE_NAME)
     args = ap.parse_args()
+    name = args.name or socket.gethostname() + (f"/{args.id}" if args.id else "")
 
     # Treat SIGTERM like Ctrl-C (raise KeyboardInterrupt) so the node shuts down
     # gracefully — checkpointing fast-resume — when stopped by a process manager
@@ -1313,7 +1322,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, signal.default_int_handler)
 
     node_key = load_or_create_node_key(args.id)
-    ns = NodeState(args.id, node_key, make_session(args.id))
+    ns = NodeState(args.id, node_key, name, make_session(args.id))
     os.makedirs(torrents_dir(args.id), exist_ok=True)
     resumed = load_resumes(ns)       # what it was holding before a restart
 
@@ -1333,7 +1342,7 @@ def main() -> None:
     # threads they'd keep the process alive after Ctrl-C, hanging shutdown.
     srv.daemon_threads = True
     state = f"{resumed} held"
-    print(f"node {args.id} up [{node_key[:8]}] - bt:{config.bt_port(args.id)} "
+    print(f"node {args.id} up '{name}' [{node_key[:8]}] - bt:{config.bt_port(args.id)} "
           f"http:{config.stats_port(args.id)}  "
           f"beacon:{config.BEACON_GROUP}:{config.BEACON_PORT}  "
           f"({state})", flush=True)

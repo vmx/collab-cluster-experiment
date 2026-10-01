@@ -49,7 +49,7 @@ def overview_row(meta: dict, holders: list) -> dict:
     """One dataset's durability and spread, without a single piece bitfield.
 
     `holders` is one entry per node that holds the dataset, as
-    {"label", "state", "progress"} — exactly what a node's holdings stream says,
+    {"name", "state", "progress"} — exactly what a node's holdings stream says,
     plus the progress of an in-flight copy from its transfers.
 
     Two of the numbers here are deliberately *lower bounds* rather than the exact
@@ -76,10 +76,10 @@ def overview_row(meta: dict, holders: list) -> dict:
     rate = sum(h.get("download_rate") or 0 for h in holders)
     # Average copies per piece: whole copies, plus how far the partial ones got.
     redundancy = len(complete) + sum(float(h.get("progress") or 0.0) for h in partial)
-    spread = [{"label": h["label"],
+    spread = [{"name": h["name"],
                "frac": round(1.0 if h.get("state") == "complete"
                              else float(h.get("progress") or 0.0), 3)}
-              for h in sorted(holders, key=lambda h: h["label"])]
+              for h in sorted(holders, key=lambda h: h["name"])]
     return {
         "info_hash": meta["info_hash"], "name": meta.get("name", ""),
         "total_size": meta["total_size"], "piece_length": meta["piece_length"],
@@ -101,17 +101,17 @@ def overview_row(meta: dict, holders: list) -> dict:
 def holder_rows(meta: dict, holders: list) -> list:
     """Rows for the piece-level views, from each node's /holdings/<info_hash>.
 
-    `holders` is [(node_key, label, detail)] for the nodes that hold the dataset.
-    Returns [{"id", "label", "bits", "complete", "progress", "num_peers"}] —
-    id = node_key (stable swarm-wide identity, used for holders); label = short
-    human name for display. Sorted by label so the two views agree on order.
+    `holders` is [(node_key, name, detail)] for the nodes that hold the dataset.
+    Returns [{"id", "name", "bits", "complete", "progress", "num_peers"}] —
+    id = node_key (stable swarm-wide identity, used for holders); name = short
+    human name for display. Sorted by name so the two views agree on order.
     """
     total = num_pieces(meta)
     rows = []
-    for key, label, detail in sorted(holders, key=lambda h: h[1]):
+    for key, name, detail in sorted(holders, key=lambda h: h[1]):
         bits = [bool(b) for b in (detail.get("pieces") or [])]
         bits = (bits + [False] * total)[:total]
-        rows.append({"id": key, "label": label, "bits": bits,
+        rows.append({"id": key, "name": name, "bits": bits,
                      "complete": detail.get("state") == "complete",
                      "progress": float(detail.get("progress") or 0.0),
                      "num_peers": int(detail.get("num_peers") or 0)})
@@ -127,7 +127,7 @@ def per_file(rows: list, files: list, avail: list) -> list:
     """Per-file replication. For each file returns:
       path, size, num_pieces,
       full_copies / full_holders : nodes holding the entire file (row "id"s, i.e.
-                                   node_keys; viewers map them to labels),
+                                   node_keys; viewers map them to names),
       recon_copies               : reconstructable copies (rarest piece in range),
       partial                    : [(id, percent_have)] for incomplete holders.
     """

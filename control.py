@@ -97,17 +97,17 @@ def cmd_list(args) -> None:
     which is the one thing a full listing at this scale cannot do."""
     base = node_client.base_url(args.endpoint)
     try:
-        nodes = swarm_labels(base)
+        nodes = swarm_addrs(base)
     except Exception:
         _unreachable(args.endpoint)
-    here = next((label for label, node in nodes if node == base), None)
-    moving = in_flight([(label, node) for label, node in nodes if node == base])
+    here = next((addr for addr, node in nodes if node == base), None)
+    moving = in_flight([(addr, node) for addr, node in nodes if node == base])
     header, seen = f"{'name':<24} {'v2 info-hash':<18} {'copies':>6}  on this node", 0
     for info_hash, holders in swarm_stream(nodes):
         if not seen:
             print(header)
         seen += 1
-        mine = next((row for label, row in holders if label == here), None)
+        mine = next((row for addr, row in holders if addr == here), None)
         if not mine:
             column = "-"
         elif mine.get("state") == "complete":
@@ -154,41 +154,41 @@ def swarm_stream(nodes: list):
     merge, and what is in memory is one page per node however much the swarm
     holds.
 
-    `nodes` is [(label, base)]. Holders are [(label, row)], the rows as the node
+    `nodes` is [(addr, base)]. Holders are [(addr, row)], the rows as the node
     reported them."""
-    def tagged(label, node):
+    def tagged(addr, node):
         # A function, not a generator expression: an expression would close over
-        # the loop variable and tag every row with the last node's label.
+        # the loop variable and tag every row with the last node's address.
         for row in node_client.holdings_stream(node):
-            yield row["info_hash"], label, row
+            yield row["info_hash"], addr, row
 
-    streams = [tagged(label, node) for label, node in nodes]
+    streams = [tagged(addr, node) for addr, node in nodes]
     current, holders = None, []
-    for info_hash, label, row in heapq.merge(*streams, key=lambda t: t[0]):
+    for info_hash, addr, row in heapq.merge(*streams, key=lambda t: t[0]):
         if info_hash != current:
             if holders:
                 yield current, holders
             current, holders = info_hash, []
-        holders.append((label, row))
+        holders.append((addr, row))
     if holders:
         yield current, holders
 
 
-def swarm_labels(base: str) -> list:
-    """[(label, base)] for every node reachable through the one named."""
+def swarm_addrs(base: str) -> list:
+    """[(addr, base)] for every node reachable through the one named."""
     stats, _ = node_client.fetch_swarm(base)
-    return [(st["label"], f"http://{st['label']}") for st in stats if st.get("label")]
+    return [(st["addr"], f"http://{st['addr']}") for st in stats if st.get("addr")]
 
 
 def in_flight(nodes: list) -> dict:
-    """label -> {info_hash: transfer row}. Bounded by what is moving, so it is
+    """addr -> {info_hash: transfer row}. Bounded by what is moving, so it is
     read up front and used to colour whatever the streams turn up."""
     out = {}
-    for label, node in nodes:
+    for addr, node in nodes:
         try:
-            out[label] = {t["info_hash"]: t for t in node_client.fetch_transfers(node)}
+            out[addr] = {t["info_hash"]: t for t in node_client.fetch_transfers(node)}
         except Exception:
-            out[label] = {}
+            out[addr] = {}
     return out
 
 
@@ -199,9 +199,9 @@ def holder_view(holders: list, moving: dict) -> tuple:
             "total_size": int(row0.get("total_size") or 0),
             "piece_length": int(row0.get("piece_length") or 0)}
     out = []
-    for label, row in holders:
-        live = (moving.get(label) or {}).get(row["info_hash"])
-        out.append({"label": label, "state": row.get("state"),
+    for addr, row in holders:
+        live = (moving.get(addr) or {}).get(row["info_hash"])
+        out.append({"name": addr, "state": row.get("state"),
                     "progress": 1.0 if row.get("state") == "complete"
                                 else float(live["progress"]) if live else 0.0,
                     "download_rate": int(live["download_rate"]) if live else 0})
@@ -213,7 +213,7 @@ def swarm_bases(base: str) -> list:
     else. What a caller wants when it has a question for each node rather than
     a use for everything they hold."""
     stats, _ = node_client.fetch_swarm(base)
-    return [f"http://{st.get('label')}" for st in stats if st.get("label")]
+    return [f"http://{st['addr']}" for st in stats if st.get("addr")]
 
 
 # How many held datasets `status` names before it stops. Enough that a node in
@@ -368,8 +368,8 @@ def render_torrent(meta: dict, rows: list) -> None:
     avail = swarm_stats.availability(rows, num_pieces)
     min_avail = min(avail)
     total_have = sum(avail)
-    labels = {r["id"]: r["label"] for r in rows}  # node_key -> short display name
-    full_copies = [r["label"] for r in rows if all(r["bits"])]
+    names = {r["id"]: r["name"] for r in rows}  # node_key -> short display name
+    full_copies = [r["name"] for r in rows if all(r["bits"])]
     cols = min(num_pieces, MAX_COLS)
 
     print(f"Swarm piece map  -  '{name}'  {human(total_size)} in {len(files)} file(s), "
@@ -395,7 +395,7 @@ def render_torrent(meta: dict, rows: list) -> None:
         stored = sum(swarm_stats.piece_size(i, piece_length, total_size, num_pieces)
                      for i, b in enumerate(r["bits"]) if b)
         role = "seed" if have == num_pieces else "leech"
-        label = f"  {r['label']} {role:<5} {pct:5.1f}% {have:>4}/{num_pieces:<4}"
+        label = f"  {r['name']} {role:<5} {pct:5.1f}% {have:>4}/{num_pieces:<4}"
         print(f"{label:<{label_w}} {render_bits(r['bits'], num_pieces, cols)}  {human(stored)}")
     print(f"{'  availability  (#holders)':<{label_w}} {render_avail(avail, num_pieces, cols)}")
 
@@ -415,8 +415,8 @@ def render_torrent(meta: dict, rows: list) -> None:
             disp = f["path"]
             if name and disp.startswith(name + "/"):
                 disp = disp[len(name) + 1:]
-            holders = ",".join(f"{labels.get(i, i)}" for i in f["full_holders"]) or "-"
-            partial = " ".join(f"{labels.get(i, i)}={pct:.0f}%" for i, pct in f["partial"])
+            holders = ",".join(f"{names.get(i, i)}" for i in f["full_holders"]) or "-"
+            partial = " ".join(f"{names.get(i, i)}={pct:.0f}%" for i, pct in f["partial"])
             extra = ("  partial: " + partial) if partial else ""
             print(f"  {disp:<34} {human(f['size']):>9} {f['full_copies']:>5} "
                   f"{f['recon_copies']:>6}  {holders}{extra}")
@@ -484,7 +484,7 @@ def resolve_ref(names: dict, ref: str) -> str:
 def cmd_map(args) -> None:
     base = node_client.base_url(args.endpoint)
     try:
-        nodes = swarm_labels(base)
+        nodes = swarm_addrs(base)
     except Exception:
         _unreachable(args.endpoint)
     if not nodes:
@@ -518,10 +518,10 @@ def cmd_map(args) -> None:
 
     info_hash = resolve_across(base, args.dataset)
     holders, holder_bases = [], []
-    for label, node in nodes:
+    for addr, node in nodes:
         detail = node_client.fetch_holding(node, info_hash)
         if detail:
-            holders.append((label, label, detail))
+            holders.append((addr, addr, detail))
             holder_bases.append(node)
     # A dataset is here at all only because someone holds it, so this list is
     # never empty — but the node we asked may have gone away mid-command.

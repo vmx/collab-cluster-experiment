@@ -61,7 +61,7 @@ Endpoints:
                    per incomplete (node, dataset)) with progress, rate and ETA.
   GET  /api/nodes - {"ts", "nodes": [...]} per-node storage + activity: bytes
                    stored, datasets held/complete, throughput, peer count.
-  GET  /api/node/<label>
+  GET  /api/node/<addr>
                  - one node's held datasets (drill-down from /nodes): per torrent
                    completion, stored, rate + info_hash. 404 if not reporting.
   GET  /          - the web UI; any other GET path also serves the app shell.
@@ -109,7 +109,7 @@ _POLL_LOCK = threading.Lock()
 # When we last fanned out, and every node address it reached — which is what lets
 # us carry on when our way in goes away.
 _POLL: dict = {"at": 0.0, "bases": []}
-# node_key -> {"base", "label", "stats", "cursor", "transfers", "live", "seen"}
+# node_key -> {"base", "addr", "name", "stats", "cursor", "transfers", "live", "seen"}
 # — what we know about each node, carried between polls. `cursor` is where we
 # are in that node's stream, opaque and handed straight back. What it *holds*
 # is not kept here but folded into the aggregate below.
@@ -281,8 +281,8 @@ def drop_node(nid: int) -> None:
             _without(info_hash, ds, nid)
 
 
-def _label(nid: int) -> str:
-    return (_NODES.get(_NODE_KEY.get(nid, "")) or {}).get("label") or str(nid)
+def _name(nid: int) -> str:
+    return (_NODES.get(_NODE_KEY.get(nid, "")) or {}).get("name") or str(nid)
 
 
 def _moving() -> dict:
@@ -305,11 +305,11 @@ def dataset_meta(info_hash: str, ds: list) -> dict:
 def holders_of(info_hash: str, ds: list, moving: dict) -> list:
     """The holder rows swarm_stats.overview_row expects, rebuilt from the ids —
     O(copies), and only for the datasets on the page."""
-    rows = [{"label": _label(nid), "state": "complete", "progress": 1.0,
+    rows = [{"name": _name(nid), "state": "complete", "progress": 1.0,
              "download_rate": 0} for nid in ds[3]]
     for nid in ds[4]:
         live = moving.get((nid, info_hash))
-        rows.append({"label": _label(nid), "state": "downloading",
+        rows.append({"name": _name(nid), "state": "downloading",
                      "progress": float(live["progress"]) if live else 0.0,
                      "download_rate": int(live["download_rate"]) if live else 0})
     return rows
@@ -400,10 +400,11 @@ def refresh(st: dict, now: float) -> tuple:
     Called per node in parallel, so it touches only that node's own record and
     hands the rows back to be folded in one place rather than writing the
     aggregate from sixteen threads."""
-    key, label = st["node_key"], st.get("label", st["node_key"])
-    base = f"http://{label}"
+    key, addr = st["node_key"], st.get("addr", st["node_key"])
+    base = f"http://{addr}"
     rec = _NODES.setdefault(key, {"cursor": None, "transfers": []})
-    rec.update({"base": base, "label": label, "stats": st, "at": now})
+    rec.update({"base": base, "addr": addr, "name": st.get("name") or addr,
+                "stats": st, "at": now})
     try:
         # The whole economy of this file: holdings are refetched only when the
         # node's cursor says something actually changed, and what is moving is
@@ -520,17 +521,17 @@ def torrent_detail(meta: dict, rows: list) -> dict:
     so the web UI and the terminal map never drift; only presentation differs.
     Piece bitfields are bucketed into display columns here rather than shipped raw,
     so the payload stays small even for torrents with thousands of pieces; holder
-    ids are resolved to display labels. Colouring of the columns is left to the UI.
+    ids are resolved to display names. Colouring of the columns is left to the UI.
     """
     num_pieces = meta["num_pieces"]
     piece_length = meta["piece_length"]
     total_size = meta["total_size"]
     cols = min(num_pieces, config.WEBUI_MAX_COLS)
     avail = swarm_stats.availability(rows, num_pieces)
-    labels = {r["id"]: r["label"] for r in rows}  # node_key -> display label
+    names = {r["id"]: r["name"] for r in rows}  # node_key -> display name
     min_avail = min(avail) if avail else 0
     total_have = sum(avail)
-    full_holders = [r["label"] for r in rows if all(r["bits"])]
+    full_holders = [r["name"] for r in rows if all(r["bits"])]
 
     out_rows = []
     for r in rows:
@@ -540,7 +541,7 @@ def torrent_detail(meta: dict, rows: list) -> dict:
         complete = have == num_pieces
         num_peers = int(r.get("num_peers") or 0)
         out_rows.append({
-            "label": r["label"], "role": "seed" if complete else "leech",
+            "name": r["name"], "addr": r["addr"], "role": "seed" if complete else "leech",
             "have": have, "stored": stored,
             "num_peers": num_peers,
             # A node still needing data with 0 peers is stuck; a complete one
@@ -559,9 +560,9 @@ def torrent_detail(meta: dict, rows: list) -> dict:
         files.append({
             "path": f["path"], "size": f["size"],
             "full_copies": f["full_copies"],
-            "full_holders": [labels.get(i, i) for i in f["full_holders"]],
+            "full_holders": [names.get(i, i) for i in f["full_holders"]],
             "recon_copies": f["recon_copies"],
-            "partial": [{"label": labels.get(i, i), "pct": pct}
+            "partial": [{"name": names.get(i, i), "pct": pct}
                         for i, pct in f["partial"]],
         })
 
@@ -629,14 +630,18 @@ def build_torrent_detail(info_hash: str) -> dict:
     meta = meta_for(info_hash, [rec["base"] for rec in have])
     if not meta:
         return None
-    holders = []
+    holders, addrs = [], {}
     if have:
         with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
             for rec, detail in zip(have, pool.map(
                     lambda r: _holding_or_none(r["base"], info_hash), have)):
                 if detail:
-                    holders.append((rec["stats"]["node_key"], rec["label"], detail))
+                    key = rec["stats"]["node_key"]
+                    holders.append((key, rec["name"], detail))
+                    addrs[key] = rec["addr"]
     rows = swarm_stats.holder_rows(meta, holders)
+    for r in rows:
+        r["addr"] = addrs[r["id"]]   # what each row links to
     return {"ts": time.time(), **torrent_detail(meta, rows)}
 
 
@@ -663,7 +668,8 @@ def build_transfers() -> dict:
         for t in rec["transfers"]:
             rate = int(t.get("download_rate") or 0)
             remaining = t["total_size"] * (1.0 - t["progress"])
-            transfers.append({**t, "node": rec["label"], "complete": False,
+            transfers.append({**t, "node": rec["name"], "addr": rec["addr"],
+                              "complete": False,
                               "stored": int(t.get("bytes_done") or 0),
                               "eta": (remaining / rate) if rate > 0 else None})
     transfers.sort(key=lambda x: (x["eta"] is None,
@@ -682,7 +688,7 @@ def node_summary(rec: dict) -> dict:
     """One line for a node, however much it holds."""
     st = rec.get("stats") or {}
     disk = st.get("disk") or {}
-    return {"label": rec["label"],
+    return {"addr": rec["addr"], "name": rec["name"],
             "datasets": int(st.get("held") or 0),
             "complete": int(st.get("complete") or 0),
             "stored": int(st.get("stored") or 0),
@@ -701,11 +707,11 @@ def build_nodes() -> dict:
     complement to the overview's per-dataset placement."""
     now = time.time()
     nodes = [node_summary(rec) for rec in poll(now)]
-    nodes.sort(key=lambda n: n["label"])
+    nodes.sort(key=lambda n: (n["name"], n["addr"]))
     return {"ts": now, "nodes": nodes}
 
 
-def build_node_detail(label: str, limit: int = LIST_PAGE,
+def build_node_detail(addr: str, limit: int = LIST_PAGE,
                       query: str = "") -> dict:
     """A page of one node's datasets, or None if it isn't reporting.
 
@@ -713,7 +719,7 @@ def build_node_detail(label: str, limit: int = LIST_PAGE,
     screen, and ordering by something a human reads would mean sorting all of it
     per request. Finding one is what the search is for."""
     for rec in poll():
-        if rec["label"] != label:
+        if rec["addr"] != addr:
             continue
         moving = {t["info_hash"]: t for t in rec["transfers"]}
         rows = []
@@ -824,7 +830,7 @@ def make_handler():
             elif path == "/api/nodes":
                 self._send_json(build_nodes())
             elif path.startswith("/api/node/"):
-                # Drill-down for one node. The label is a URL-encoded "ip:port"
+                # Drill-down for one node. The addr is a URL-encoded "ip:port"
                 # (the ':' is percent-escaped by the client), so decode it back
                 # before matching.
                 split = urlsplit(path)

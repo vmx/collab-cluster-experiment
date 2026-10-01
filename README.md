@@ -217,8 +217,11 @@ instead; the dashboard is a plain HTTP client:
 python collector.py 127.0.0.1:8001
 ```
 
-Nodes appear under the address the dashboard reached them at, so what you read
-there is what you can paste into `control.py`.
+Nodes appear under their name: the host's name, with the id appended when it is
+not 0, or whatever `python node.py --name <name>` (or `SWARM_NODE_NAME`) gave
+it. Names are only for reading and need not be unique. Hovering one shows the
+address the dashboard reached the node at, which is what you can paste into
+`control.py`.
 
 The same data in the terminal:
 
