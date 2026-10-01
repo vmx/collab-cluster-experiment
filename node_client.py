@@ -204,10 +204,10 @@ def fetch_swarm(base: str, timeout: float = 2.0) -> tuple:
         for base_i, snap in zip(bases, pool.map(lambda b: _stats_or_none(b, timeout),
                                                 bases)):
             if snap and snap.get("node_key"):
-                # Label a node by the address we reached it at — the address you
-                # would type into control.py. A node cannot do this itself: it
-                # never learns its own address (that is the point of the beacon).
-                snap["label"] = base_i.split("//", 1)[-1]
+                # Address a node by where we reached it — what you would type
+                # into control.py. A node cannot do this itself: it never learns
+                # its own address (that is the point of the beacon).
+                snap["addr"] = base_i.split("//", 1)[-1]
                 snaps.setdefault(snap["node_key"], snap)
     return list(snaps.values()), bases
 

@@ -21,7 +21,7 @@ const OVERVIEW_URL = "/api/overview";
 const DETAIL_URL = "/api/dataset/"; // + info_hash
 const TRANSFERS_URL = "/api/transfers";
 const NODES_URL = "/api/nodes";
-const NODE_DETAIL_URL = "/api/node/"; // + label
+const NODE_DETAIL_URL = "/api/node/"; // + addr
 const POLL_MS = 1000; // refresh once a second
 const LIST_MAX = 2000; // the collector caps it here too
 
@@ -80,9 +80,9 @@ function cellForAvail(count, maxNodes) {
 }
 
 // One node's tile in a dataset's spread strip: how much of the dataset it holds.
-function cellForNode(label, frac) {
+function cellForNode(name, frac) {
   const base = cellForFrac(frac);
-  return { style: base.style, title: `${label}: ${Math.round(frac * 100)}% of dataset` };
+  return { style: base.style, title: `${name}: ${Math.round(frac * 100)}% of dataset` };
 }
 
 // Copy count colouring. No replication policy is configured, so this is relative,
@@ -129,17 +129,17 @@ function connStatus(r) {
   return { text, cls };
 }
 
-// One node's ownership line: label/role/percent, the piece map, its live
-// connection status, and bytes stored. The label
+// One node's ownership line: name/role/percent, the piece map, its live
+// connection status, and bytes stored. The name
 // links to that node's drill-down (which other datasets it holds).
 const NodeRow = component({
   name: "NodeRow",
-  fields: { label: "", href: "#", role: "", have: 0, numPieces: 0, stored: 0,
+  fields: { name: "", addr: "", href: "#", role: "", have: 0, numPieces: 0, stored: 0,
             statusText: "", statusClass: "nstatus", cells: [] },
   methods: {
     headText() {
       const pct = this.numPieces ? (100 * this.have) / this.numPieces : 0;
-      return `${this.label} ${this.role.padEnd(5)} ${pct.toFixed(1).padStart(5)}%  ${this.have}/${this.numPieces}`;
+      return `${this.name} ${this.role.padEnd(5)} ${pct.toFixed(1).padStart(5)}%  ${this.have}/${this.numPieces}`;
     },
     storedText() {
       return human(this.stored);
@@ -150,8 +150,9 @@ const NodeRow = component({
       const cells = r.cells.map((f) => Cell.make(cellForFrac(f)));
       const status = connStatus(r);
       return this.make({
-        label: r.label,
-        href: `/node/${encodeURIComponent(r.label)}`,
+        name: r.name,
+        addr: r.addr,
+        href: `/node/${encodeURIComponent(r.addr)}`,
         role: r.role,
         have: r.have,
         numPieces,
@@ -163,7 +164,7 @@ const NodeRow = component({
     },
   },
   view: html`<div class="noderow">
-    <a class="rowlabel nodelink" data-link="1" :href=".href" @text="$headText"></a>
+    <a class="rowlabel nodelink" data-link="1" :href=".href" :title=".addr" @text="$headText"></a>
     <span class="map"><x render-each=".cells"></x></span>
     <span :class=".statusClass" @text=".statusText"></span>
     <span class="stored" @text="$storedText"></span>
@@ -188,7 +189,7 @@ const FileRow = component({
       const prefix = `${torrentName}/`;
       if (torrentName && disp.startsWith(prefix)) disp = disp.slice(prefix.length);
       const holders = f.full_holders.length ? f.full_holders.join(",") : "-";
-      const partial = f.partial.map((p) => `${p.label}=${Math.round(p.pct)}%`).join(" ");
+      const partial = f.partial.map((p) => `${p.name}=${Math.round(p.pct)}%`).join(" ");
       return this.make({
         name: disp,
         size: f.size,
@@ -334,7 +335,7 @@ const DatasetRow = component({
   },
   statics: {
     fromData(d) {
-      const cells = d.spread.map((s) => Cell.make(cellForNode(s.label, s.frac)));
+      const cells = d.spread.map((s) => Cell.make(cellForNode(s.name, s.frac)));
       const replicating = d.downloading > 0 || d.download_rate > 0;
       const stateText = replicating
         ? `replicating · ${d.downloading} node(s) · ▲${human(d.download_rate)}/s`
@@ -376,6 +377,7 @@ const TransferRow = component({
   name: "TransferRow",
   fields: {
     node: "",
+    addr: "",
     name: "",
     href: "#",
     pctText: "",
@@ -395,6 +397,7 @@ const TransferRow = component({
       const stuck = tr.num_peers === 0;
       return this.make({
         node: tr.node,
+        addr: tr.addr,
         name: tr.name,
         // A node that cannot read or write the files says so; without it a
         // transfer that cannot proceed looks like one that is merely slow.
@@ -414,7 +417,7 @@ const TransferRow = component({
   view: html`<div class="transferrow">
     <a class="tlink" data-link="1" :href=".href" @text=".name">
       </a><span class="bad small" @show=".hasError" @text=".errorText"></span>
-    <span @text=".node"></span>
+    <span :title=".addr" @text=".node"></span>
     <span class="pbar"><span :class=".barClass" :style=".barStyle"></span></span>
     <span class="nnum" @text=".pctText"></span>
     <span class="nnum" @text=".rateText"></span>
@@ -427,12 +430,13 @@ const TransferRow = component({
 // Backed by /nodes.
 const NodeStatRow = component({
   name: "NodeStatRow",
-  fields: { label: "", href: "#", datasetsText: "", storedText: "", freeText: "", dlText: "", ulText: "", peersText: "" },
+  fields: { name: "", addr: "", href: "#", datasetsText: "", storedText: "", freeText: "", dlText: "", ulText: "", peersText: "" },
   statics: {
     fromData(n) {
       return this.make({
-        label: n.label,
-        href: `/node/${encodeURIComponent(n.label)}`,
+        name: n.name,
+        addr: n.addr,
+        href: `/node/${encodeURIComponent(n.addr)}`,
         datasetsText: `${n.complete}/${n.datasets}`,
         storedText: human(n.stored),
         freeText: diskFreeText(n.disk_free, n.disk_total),
@@ -442,8 +446,8 @@ const NodeStatRow = component({
       });
     },
   },
-  view: html`<a class="noderow2" data-link="1" :href=".href">
-    <span @text=".label"></span>
+  view: html`<a class="noderow2" data-link="1" :href=".href" :title=".addr">
+    <span @text=".name"></span>
     <span class="nnum" @text=".datasetsText"></span>
     <span class="nnum" @text=".storedText"></span>
     <span class="nnum" @text=".freeText"></span>
@@ -455,7 +459,7 @@ const NodeStatRow = component({
 
 // One dataset held by a node (a row in the node drill-down): links to the
 // dataset, shows status, completion, stored bytes and live rate. Backed by
-// /api/node/<label>.
+// /api/node/<addr>.
 const NodeTorrentRow = component({
   name: "NodeTorrentRow",
   fields: {
@@ -495,14 +499,15 @@ const NodeTorrentRow = component({
 });
 
 // The node drill-down: a node's totals plus the datasets it holds. Backed by
-// /api/node/<label>.
+// /api/node/<addr>.
 const NodeDetail = component({
   name: "NodeDetail",
-  fields: { label: "", metaText: "", storedText: "", rows: [] },
+  fields: { name: "", addr: "", metaText: "", storedText: "", rows: [] },
   statics: {
     fromData(n) {
       return this.make({
-        label: n.label,
+        name: n.name,
+        addr: n.addr,
         metaText: `${n.complete}/${n.datasets} complete  ·  ${diskFreeText(n.disk_free, n.disk_total)} free  ·  ▼${human(n.download_rate)}/s ▲${human(n.upload_rate)}/s  ·  ${n.num_peers} peers`,
         storedText: human(n.stored),
         rows: n.torrents.map((t) => NodeTorrentRow.Class.fromData(t)),
@@ -510,7 +515,7 @@ const NodeDetail = component({
     },
   },
   view: html`<section class="torrent">
-    <h2><span @text=".label"></span> <span class="muted" @text="$storedText"></span></h2>
+    <h2><span @text=".name"></span> <span class="muted" @text=".addr"></span> <span class="muted" @text="$storedText"></span></h2>
     <div class="muted small" @text=".metaText"></div>
     <h3>Datasets held</h3>
     <div class="ntrow nthead">
@@ -950,14 +955,14 @@ const Dashboard = component({
 // the catch-all.
 const ROUTES = [
   { pattern: new URLPattern({ pathname: "/dataset/:hash" }), route: "detail", key: "hash" },
-  { pattern: new URLPattern({ pathname: "/node/:label" }), route: "node", key: "label" },
+  { pattern: new URLPattern({ pathname: "/node/:addr" }), route: "node", key: "addr" },
   { pattern: new URLPattern({ pathname: "/transfers" }), route: "transfers" },
   { pattern: new URLPattern({ pathname: "/nodes" }), route: "nodes" },
   { pattern: new URLPattern({ pathname: "/*" }), route: "list" },
 ];
 
 // -> { route, param } where param is the single path variable (an info_hash for
-// the dataset detail, a node label for the node detail), "" for the rest.
+// the dataset detail, a node address for the node detail), "" for the rest.
 function matchRoute() {
   for (const { pattern, route, key } of ROUTES) {
     const m = pattern.exec({ pathname: location.pathname });
@@ -1012,9 +1017,9 @@ function main() {
       return r.json();
     },
     async fetchNodeDetail() {
-      const label = matchRoute().param;
-      if (!label) throw new Error("no node selected");
-      const r = await fetch(`${NODE_DETAIL_URL}${encodeURIComponent(label)}?limit=${listView.limit}`, {
+      const addr = matchRoute().param;
+      if (!addr) throw new Error("no node selected");
+      const r = await fetch(`${NODE_DETAIL_URL}${encodeURIComponent(addr)}?limit=${listView.limit}`, {
         cache: "no-store",
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -1090,9 +1095,9 @@ export function getExamples() {
     downloading: 1,
     seeding: 2,
     spread: [
-      { label: "0", frac: 1.0 },
-      { label: "1", frac: 0.5 },
-      { label: "2", frac: 0.0 },
+      { name: "0", frac: 1.0 },
+      { name: "1", frac: 0.5 },
+      { name: "2", frac: 0.0 },
     ],
   };
   return {
