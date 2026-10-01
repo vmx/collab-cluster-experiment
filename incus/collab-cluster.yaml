@@ -8,7 +8,9 @@
 #     inside that checkout — except a node's own storage, redirected below to a
 #     fixed path outside it,
 #   - installs the units into ~/.config/systemd/user/ (you enable the right one
-#     per container — see the incus README, step 3).
+#     per container — see the incus README, step 3),
+#   - clones collab-cluster-utils into /home/debian/collab-cluster-utils and
+#     installs its data manager unit, for nodes given a policy (README step 7).
 #
 # None of that is swarm configuration, and there is none to do: nodes discover
 # each other with a multicast beacon on the container bridge, and the optional
@@ -61,5 +63,11 @@ config:
       # in the container.
       - mkdir --parents /home/debian/.config/systemd/user/collab-cluster-node.service.d
       - cp /home/debian/collab-cluster-experiment/incus/collab-cluster-node.service.d/override.conf /home/debian/.config/systemd/user/collab-cluster-node.service.d/
+      # The optional data manager, which decides what the node in this
+      # container holds. Installed everywhere, enabled only where it's given a
+      # policy (incus/new-container.sh --policy). Standard library only, so it
+      # runs from the checkout with the system python3.
+      - git clone --depth 1 https://github.com/vmx/collab-cluster-utils.git /home/debian/collab-cluster-utils
+      - cp /home/debian/collab-cluster-utils/deploy/incus/collab-cluster-data-manager.service /home/debian/.config/systemd/user/
       # The clone/copy ran as root, so hand the whole home back to `debian`.
       - chown --recursive debian:debian /home/debian

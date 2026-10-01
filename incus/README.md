@@ -178,6 +178,39 @@ anything (or `remove`/`add` the datasets again after), since mounting over a
 directory that already has data in it hides what's there rather than merging
 it.
 
+## 7. Optional: a data manager per node
+
+Without one, a node holds only what it's told to. The data manager from
+[collab-cluster-utils](https://github.com/vmx/collab-cluster-utils) runs next
+to a node, in the same container, and decides that instead, by a policy: it
+takes what the policy wants as it arrives at other nodes and removes what it
+doesn't. See its README for the policy format.
+
+The profile already cloned it to `/home/debian/collab-cluster-utils` and
+installed its unit, so all a node needs is a policy. `new-container.sh` does
+that when given one:
+
+```sh
+./incus/new-container.sh node node0 --policy my-policy.toml
+```
+
+Re-run it with a changed policy to apply it. By hand, the same is:
+
+```sh
+incus file push my-policy.toml node0/home/debian/collab-cluster-utils/data-manager-policy.toml
+incus exec node0 -- chown debian:debian /home/debian/collab-cluster-utils/data-manager-policy.toml
+incus exec node0 -- su --login debian --command 'systemctl --user enable --now collab-cluster-data-manager'
+```
+
+Containers created before the profile included it don't have the checkout;
+cloud-init doesn't run again, so add it once:
+
+```sh
+incus exec node0 -- su --login debian --command 'git clone --depth 1 https://github.com/vmx/collab-cluster-utils.git && cp collab-cluster-utils/deploy/incus/collab-cluster-data-manager.service ~/.config/systemd/user/ && systemctl --user daemon-reload'
+```
+
+Update it like the node: `git pull` in the checkout, then restart the unit.
+
 ## Clean up
 
 Deleting a container is its whole teardown *unless* it has a data disk device

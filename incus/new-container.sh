@@ -8,12 +8,16 @@
 # server that container should live on. Idempotent: re-running it with the same
 # arguments changes nothing once the container is up and enabled.
 #
-# Usage:   ./incus/new-container.sh node <name> [data-root]
+# Usage:   ./incus/new-container.sh node <name> [data-root] [--policy <file>]
 #          ./incus/new-container.sh collector <name>
 #   data-root   (node only) host dir whose <name> subdir becomes this node's
 #               storage (data, torrents, fast-resume), e.g. a directory on a
 #               separate ZFS partition. Omit it and the node stores inside the
 #               container as usual.
+#   --policy    (node only) a data manager policy file on this host: pushed
+#               into the container, and the data manager (collab-cluster-utils)
+#               run next to the node, deciding what it holds. Re-run with a
+#               changed file to apply it. Omit it and there's no data manager.
 # Tunables (environment):
 #   IMAGE=images:debian/14/cloud   image to launch (needs cloud-init)
 #   PROFILE=collab-cluster         profile name to create/update
@@ -31,27 +35,59 @@ EXPOSE_WEB=${EXPOSE_WEB:-1}
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 usage() {
-	echo "usage: $0 node <name> [data-root]" >&2
+	echo "usage: $0 node <name> [data-root] [--policy <file>]" >&2
 	echo "       $0 collector <name>" >&2
 	exit 1
 }
 
-[ $# -ge 2 ] || usage
-ROLE=$1
-NAME=$2
-DATA_ROOT=${3:-}
+ROLE=
+NAME=
+DATA_ROOT=
+POLICY=
+npos=0
+while [ $# -gt 0 ]; do
+	case $1 in
+	--policy)
+		[ $# -ge 2 ] || usage
+		POLICY=$2
+		shift 2
+		;;
+	-*)
+		usage
+		;;
+	*)
+		npos=$((npos + 1))
+		case $npos in
+		1) ROLE=$1 ;;
+		2) NAME=$1 ;;
+		3) DATA_ROOT=$1 ;;
+		*) usage ;;
+		esac
+		shift
+		;;
+	esac
+done
+[ "$npos" -ge 2 ] || usage
 case $ROLE in
-node)
-	[ $# -le 3 ] || usage
-	;;
+node) ;;
 collector)
-	[ $# -eq 2 ] || usage
+	[ "$npos" -eq 2 ] || usage
 	;;
 *)
 	usage
 	;;
 esac
 UNIT=collab-cluster-$ROLE
+if [ -n "$POLICY" ]; then
+	[ "$ROLE" = node ] || {
+		echo 'error: --policy only applies to a node' >&2
+		exit 1
+	}
+	[ -f "$POLICY" ] || {
+		echo "error: policy file $POLICY not found" >&2
+		exit 1
+	}
+fi
 
 say() {
 	printf '\n==> %s\n' "$*"
@@ -119,6 +155,16 @@ say "Enabling $UNIT on '$NAME'"
 as_debian "$NAME" "systemctl --user enable --now $UNIT"
 # systemd --user units only come back at boot if the user lingers.
 incus exec "$NAME" -- loginctl enable-linger debian
+
+if [ -n "$POLICY" ]; then
+	say "Running the data manager on '$NAME' with policy $POLICY"
+	policy_dest=/home/debian/collab-cluster-utils/data-manager-policy.toml
+	incus file push "$POLICY" "$NAME$policy_dest"
+	incus exec "$NAME" -- chown debian:debian "$policy_dest"
+	# restart, not just start: the policy is read once at startup, so a re-run
+	# with a changed file takes effect.
+	as_debian "$NAME" 'systemctl --user enable collab-cluster-data-manager && systemctl --user restart collab-cluster-data-manager'
+fi
 
 if [ "$ROLE" = collector ] && [ "$EXPOSE_WEB" = 1 ]; then
 	say "Exposing the web UI on tcp:0.0.0.0:$WEB_PORT"
