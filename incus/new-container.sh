@@ -9,6 +9,7 @@
 # arguments changes nothing once the container is up and enabled.
 #
 # Usage:   ./incus/new-container.sh node <name> [data-root] [--policy <file>]
+#          ./incus/new-container.sh node <name> [data-root] --rescue <bytes> --collector <host[:port]>
 #          ./incus/new-container.sh collector <name>
 #   data-root   (node only) host dir whose <name> subdir becomes this node's
 #               storage (data, torrents, fast-resume), e.g. a directory on a
@@ -18,6 +19,10 @@
 #               into the container, and the data manager (collab-cluster-utils)
 #               run next to the node, deciding what it holds. Re-run with a
 #               changed file to apply it. Omit it and there's no data manager.
+#   --rescue    (node only) make it a rescue node instead: the rescuer
+#               (collab-cluster-utils) fills up to <bytes> with the swarm's
+#               rarest datasets, asking the collector at --collector. Re-run
+#               with other values to change them.
 # Tunables (environment):
 #   IMAGE=images:debian/14/cloud   image to launch (needs cloud-init)
 #   PROFILE=collab-cluster         profile name to create/update
@@ -36,6 +41,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 usage() {
 	echo "usage: $0 node <name> [data-root] [--policy <file>]" >&2
+	echo "       $0 node <name> [data-root] --rescue <bytes> --collector <host[:port]>" >&2
 	echo "       $0 collector <name>" >&2
 	exit 1
 }
@@ -44,12 +50,24 @@ ROLE=
 NAME=
 DATA_ROOT=
 POLICY=
+RESCUE=
+COLLECTOR=
 npos=0
 while [ $# -gt 0 ]; do
 	case $1 in
 	--policy)
 		[ $# -ge 2 ] || usage
 		POLICY=$2
+		shift 2
+		;;
+	--rescue)
+		[ $# -ge 2 ] || usage
+		RESCUE=$2
+		shift 2
+		;;
+	--collector)
+		[ $# -ge 2 ] || usage
+		COLLECTOR=$2
 		shift 2
 		;;
 	-*)
@@ -87,6 +105,26 @@ if [ -n "$POLICY" ]; then
 		echo "error: policy file $POLICY not found" >&2
 		exit 1
 	}
+fi
+if [ -n "$RESCUE$COLLECTOR" ]; then
+	[ "$ROLE" = node ] || {
+		echo 'error: --rescue only applies to a node' >&2
+		exit 1
+	}
+	[ -z "$POLICY" ] || {
+		echo 'error: a node runs either a data manager (--policy) or a rescuer (--rescue)' >&2
+		exit 1
+	}
+	if [ -z "$RESCUE" ] || [ -z "$COLLECTOR" ]; then
+		echo 'error: --rescue and --collector go together' >&2
+		exit 1
+	fi
+	case $RESCUE in
+	'' | *[!0-9]*)
+		echo "error: --rescue takes a number of bytes, not $RESCUE" >&2
+		exit 1
+		;;
+	esac
 fi
 
 say() {
@@ -163,7 +201,17 @@ if [ -n "$POLICY" ]; then
 	incus exec "$NAME" -- chown debian:debian "$policy_dest"
 	# restart, not just start: the policy is read once at startup, so a re-run
 	# with a changed file takes effect.
-	as_debian "$NAME" 'systemctl --user enable collab-cluster-data-manager && systemctl --user restart collab-cluster-data-manager'
+	as_debian "$NAME" 'systemctl --user disable --now collab-cluster-rescuer 2>/dev/null; systemctl --user enable collab-cluster-data-manager && systemctl --user restart collab-cluster-data-manager'
+fi
+
+if [ -n "$RESCUE" ]; then
+	say "Running the rescuer on '$NAME': up to $RESCUE bytes, asking $COLLECTOR"
+	env_dest=/home/debian/collab-cluster-utils/rescuer.env
+	printf 'RESCUE_BYTES=%s\nCOLLECTOR=%s\n' "$RESCUE" "$COLLECTOR" |
+		incus file push - "$NAME$env_dest"
+	incus exec "$NAME" -- chown debian:debian "$env_dest"
+	# restart, not just start: settings are read once at startup.
+	as_debian "$NAME" 'systemctl --user disable --now collab-cluster-data-manager 2>/dev/null; systemctl --user enable collab-cluster-rescuer && systemctl --user restart collab-cluster-rescuer'
 fi
 
 if [ "$ROLE" = collector ] && [ "$EXPOSE_WEB" = 1 ]; then

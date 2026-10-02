@@ -10,7 +10,8 @@
 #   - installs the units into ~/.config/systemd/user/ (you enable the right one
 #     per container — see the incus README, step 3),
 #   - clones collab-cluster-utils into /home/debian/collab-cluster-utils and
-#     installs its data manager unit, for nodes given a policy (README step 7).
+#     installs its data manager and rescuer units, for nodes given a policy or
+#     made rescue nodes (README steps 7 and 8).
 #
 # None of that is swarm configuration, and there is none to do: nodes discover
 # each other with a multicast beacon on the container bridge, and the optional
@@ -67,10 +68,12 @@ config:
       # unless a data-root is already mounted there, which is left untouched.
       - '[ -d /mnt/collab-data ] || install --directory --owner debian --group debian /mnt/collab-data'
       # The optional data manager, which decides what the node in this
-      # container holds. Installed everywhere, enabled only where it's given a
-      # policy (incus/new-container.sh --policy). Standard library only, so it
-      # runs from the checkout with the system python3.
+      # container holds, and the rescuer, which fills a rescue node instead.
+      # Installed everywhere, enabled only where asked for
+      # (incus/new-container.sh --policy or --rescue). Standard library only,
+      # so they run from the checkout with the system python3.
       - git clone --depth 1 https://github.com/vmx/collab-cluster-utils.git /home/debian/collab-cluster-utils
       - cp /home/debian/collab-cluster-utils/deploy/incus/collab-cluster-data-manager.service /home/debian/.config/systemd/user/
+      - cp /home/debian/collab-cluster-utils/deploy/incus/collab-cluster-rescuer.service /home/debian/.config/systemd/user/
       # The clone/copy ran as root, so hand the whole home back to `debian`.
       - chown --recursive debian:debian /home/debian
