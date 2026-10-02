@@ -660,7 +660,7 @@ def build_transfers() -> dict:
     "what is moving right now", the live counterpart to the overview's copy
     counts. A node holding an incomplete copy but not downloading shows as
     stalled (no ETA) rather than being hidden, so a stuck transfer is visible.
-    Active transfers (an ETA) sort ahead of stalled ones, soonest first.
+    Sorted by dataset name, then node, so a row keeps its place between polls.
     """
     now = time.time()
     transfers = []
@@ -672,9 +672,7 @@ def build_transfers() -> dict:
                               "complete": False,
                               "stored": int(t.get("bytes_done") or 0),
                               "eta": (remaining / rate) if rate > 0 else None})
-    transfers.sort(key=lambda x: (x["eta"] is None,
-                                  x["eta"] if x["eta"] is not None else 0.0,
-                                  -x["progress"]))
+    transfers.sort(key=lambda x: (x["name"], x["node"]))
     return {"ts": now, "transfers": transfers}
 
 
