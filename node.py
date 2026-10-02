@@ -902,13 +902,20 @@ def load_resumes(ns: NodeState) -> int:
     """Re-add every torrent saved as a .resume file (native fast-resume). The
     resume file is self-contained (save_info_dict), so torrents/ is not read."""
     count = 0
+    # TEMPORARY: where a restart's time goes, summed per step over all datasets.
+    spent = {"read": 0.0, "parse": 0.0, "add": 0.0, "rest": 0.0}
+    started = time.perf_counter()
     for path in glob.iglob(os.path.join(resume_dir(ns.node_id), "*", "*.resume")):
+        t0 = time.perf_counter()
         try:
             with open(path, "rb") as f:
-                atp = lt.read_resume_data(f.read())
+                buf = f.read()
+            t1 = time.perf_counter()
+            atp = lt.read_resume_data(buf)
         except Exception as exc:
             print(f"node {ns.node_id}: skip {os.path.basename(path)}: {exc}", flush=True)
             continue
+        t2 = time.perf_counter()
         ti = atp.ti
         if ti is None:
             print(f"node {ns.node_id}: skip {os.path.basename(path)}: no metadata",
@@ -916,6 +923,7 @@ def load_resumes(ns: NodeState) -> int:
             continue
         info_hash = str(ti.info_hashes().v2)
         handle = ns.ses.add_torrent(atp)
+        t3 = time.perf_counter()
         entry = {"name": ti.name(), "save_path": atp.save_path, "ti": ti,
                  "files": file_list(ti), "handle": handle, "state": "downloading",
                  "checking": True,   # as in add_torrent, and here it is all of them
@@ -925,6 +933,14 @@ def load_resumes(ns: NodeState) -> int:
             note_holding(ns, holding_row(info_hash, entry))
         count += 1
         print(f"node {ns.node_id}: resumed '{ti.name()}' [{info_hash[:8]}]", flush=True)
+        t4 = time.perf_counter()
+        spent["read"] += t1 - t0
+        spent["parse"] += t2 - t1
+        spent["add"] += t3 - t2
+        spent["rest"] += t4 - t3
+    total = time.perf_counter() - started
+    print(f"node {ns.node_id}: resumed {count} in {total:.1f}s - "
+          + " ".join(f"{k} {v:.1f}s" for k, v in spent.items()), flush=True)
     return count
 
 
