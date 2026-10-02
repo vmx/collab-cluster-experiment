@@ -210,6 +210,11 @@ per-dataset piece map, in-flight transfers and per-node storage, and reads the
 nodes at most once a second however many browsers are open — not at all while
 none is.
 
+Who holds what is kept by `index.py`, which the collector runs in-process. Besides
+the dashboard it answers `GET /api/rescue?node=<node_key>`: a random sample of
+the rarest datasets that node doesn't hold, and its own most-copied holdings —
+what a node with spare space needs to decide what to take and what to let go.
+
 Where multicast doesn't reach the machine you are watching from, name any node
 instead; the dashboard is a plain HTTP client:
 
@@ -293,7 +298,8 @@ reader fetches it once from any holder and keeps it.
 | `beacon.py` | The discovery datagram: join the group, send, drain. No libtorrent. |
 | `config.py` | Ports, beacon group, timing, paths. |
 | `swarm_stats.py` | The copy-count arithmetic: `overview_row()` scores a dataset from holdings alone, `holder_rows()`/`per_file()` work from piece bitfields. Shared by `control.py` and `collector.py`. |
-| `collector.py` | *Optional.* Finds a node on the beacon and reads the swarm through it, keeping one cursor per node. Serves the `/api/*` dashboard endpoints and the web UI. |
+| `index.py` | The swarm-wide index: finds a node on the beacon, follows every node's holdings stream by cursor, and keeps who holds what and how many copies exist. Answers queries; serves nothing itself. |
+| `collector.py` | *Optional.* Serves the index over HTTP: the `/api/*` dashboard endpoints, `/api/rescue` for nodes with spare space, and the web UI. |
 | `webui/` | *Optional.* Zero-build [Tutuca](https://github.com/marianoguerra/tutuca) SPA, framework vendored as one file. Served by `collector.py`. |
 
 Python standard library only, plus the `libtorrent` binding (tested with

@@ -66,10 +66,10 @@ without first listing every path.
 
 Nothing has the full list, so whoever wants a swarm-wide view assembles one.
 
-**The dashboard maintains it.** The collector follows each node's cursor and
-folds the changes into one entry per dataset. The entry stores the dataset's
-identity once, and its holders as node ids. Nothing is rebuilt per request. Two
-indexes are kept alongside:
+**The index maintains it.** `index.py`, run inside the collector, follows each
+node's cursor and folds the changes into one entry per dataset. The entry
+stores the dataset's identity once, and its holders as node ids. Nothing is
+rebuilt per request. Two indexes are kept alongside:
 
 - Datasets by copy count. The rarest-first list is read straight off it, and
   "how many are down to one copy" is just a length.
@@ -193,7 +193,7 @@ What is left, in the order it bites, each with a proposed fix.
   publishing it. Restored torrents that claim to be complete are then verified
   once. Otherwise a node that lost files while it was down would advertise
   copies it no longer has.
-- **The collector keeps its aggregate in memory.** At 9.1M datasets that is 4.9
+- **The index keeps its aggregate in memory.** At 9.1M datasets that is 4.9
   GB. It is lost on restart and rebuilt by re-listing 27.5M rows. A name search
   has no index either, so it is a pass over all 9.1M datasets. That is why
   searching is a deliberate action, not something a poll repeats.
