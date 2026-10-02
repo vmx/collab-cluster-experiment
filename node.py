@@ -572,7 +572,12 @@ def transfer_row(info_hash: str, entry: dict, st) -> dict:
             "total_size": entry["ti"].total_size(),
             "progress": st.progress, "bytes_done": st.total_done,
             "download_rate": st.download_rate, "upload_rate": st.upload_rate,
-            "num_peers": st.num_peers, "error": entry.get("error")}
+            "num_peers": st.num_peers, "error": entry.get("error"),
+            # Bytes received and thrown away: failed the piece hash, or already
+            # had. A transfer with a rate but no progress shows up here.
+            "failed_bytes": st.total_failed_bytes,
+            "redundant_bytes": st.total_redundant_bytes,
+            "num_pieces": st.num_pieces}
 
 
 def holding_detail(ns: NodeState, info_hash: str) -> dict:
