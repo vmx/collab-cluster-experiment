@@ -376,6 +376,9 @@ const DatasetRow = component({
 const TransferRow = component({
   name: "TransferRow",
   fields: {
+    // Identifies the row across polls, so an update moves this transfer's bar
+    // and not the bar of whichever row used to sit in its place.
+    id: "",
     node: "",
     addr: "",
     name: "",
@@ -396,6 +399,7 @@ const TransferRow = component({
       const active = tr.download_rate > 0;
       const stuck = tr.num_peers === 0;
       return this.make({
+        id: `${tr.addr}/${tr.info_hash}`,
         node: tr.node,
         addr: tr.addr,
         name: tr.name,
@@ -414,7 +418,7 @@ const TransferRow = component({
       });
     },
   },
-  view: html`<div class="transferrow">
+  view: html`<div class="transferrow" :key=".id">
     <a class="tlink" data-link="1" :href=".href" @text=".name">
       </a><span class="bad small" @show=".hasError" @text=".errorText"></span>
     <span :title=".addr" @text=".node"></span>
