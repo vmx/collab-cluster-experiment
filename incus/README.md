@@ -211,6 +211,33 @@ incus exec node0 -- su --login debian --command 'git clone --depth 1 https://git
 
 Update it like the node: `git pull` in the checkout, then restart the unit.
 
+## 8. Optional: rescue nodes
+
+A rescue node gives spare space to the swarm instead of following a policy:
+the rescuer from collab-cluster-utils fills it with the rarest datasets, asking
+a collector how many copies of everything exist, and works towards two copies
+of each. It runs instead of a data manager. See collab-cluster-utils' README.
+
+```sh
+./incus/new-container.sh node rescue0 --rescue 2000000000000 --collector 10.0.0.2
+```
+
+`--collector` is the collector container's address (`host[:port]`, port 8100
+by default). Re-run it with other values to change them. By hand, the same is:
+
+```sh
+printf 'RESCUE_BYTES=2000000000000\nCOLLECTOR=10.0.0.2\n' | incus file push - rescue0/home/debian/collab-cluster-utils/rescuer.env
+incus exec rescue0 -- chown debian:debian /home/debian/collab-cluster-utils/rescuer.env
+incus exec rescue0 -- su --login debian --command 'systemctl --user enable --now collab-cluster-rescuer'
+```
+
+Containers created before the profile included the rescuer unit need it
+copied once (after a `git pull` in the checkout):
+
+```sh
+incus exec rescue0 -- su --login debian --command 'cp collab-cluster-utils/deploy/incus/collab-cluster-rescuer.service ~/.config/systemd/user/ && systemctl --user daemon-reload'
+```
+
 ## Clean up
 
 Deleting a container is its whole teardown *unless* it has a data disk device
