@@ -970,6 +970,16 @@ def _note_rates(ns: NodeState, alert, prev, now: float):
     return (now, recv, sent)
 
 
+def _save_resume(entry: dict, only_if_needed: bool = False) -> None:
+    """Ask libtorrent to checkpoint one torrent, unless it has been removed since
+    the caller looked: its handle is invalid then, and the call would raise."""
+    try:
+        if not only_if_needed or entry["handle"].need_save_resume_data():
+            entry["handle"].save_resume_data(SAVE_FLAGS)
+    except RuntimeError:
+        pass
+
+
 def session_loop(ns: NodeState) -> None:
     """Live state: what is moving right now, and what this node is doing overall.
 
@@ -1009,7 +1019,13 @@ def session_loop(ns: NodeState) -> None:
 
         transfers, finished, checked = [], [], []
         for info_hash, entry in moving:
-            st = entry["handle"].status()
+            # A /remove can land between reading `moving` and here, and
+            # libtorrent raises on any call to a removed torrent's handle. It is
+            # not held any more, so there is nothing to report or save for it.
+            try:
+                st = entry["handle"].status()
+            except RuntimeError:
+                continue
             # Free, since we hold the status anyway: recorded for mesh() rather
             # than asked for a second time.
             checked.append((entry, st.state in CHECKING_STATES))
@@ -1035,11 +1051,10 @@ def session_loop(ns: NodeState) -> None:
         # A complete torrent never changes again, so this is the last checkpoint
         # it needs — which is also why the periodic one below can ignore them.
         for _, entry in finished:
-            entry["handle"].save_resume_data(SAVE_FLAGS)
+            _save_resume(entry)
         if loops % RESUME_EVERY == 0:
             for _, entry in moving:
-                if entry["handle"].need_save_resume_data():
-                    entry["handle"].save_resume_data(SAVE_FLAGS)
+                _save_resume(entry, only_if_needed=True)
 
     flush_resume(ns)
 
