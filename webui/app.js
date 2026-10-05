@@ -209,6 +209,49 @@ const FileRow = component({
   </div>`,
 });
 
+// A nested value as (dotted path, text) pairs, one per leaf. A list of plain
+// values is one leaf; a list holding lists or objects (a GeoJSON geometry's
+// coordinates) is shown as JSON rather than spread over rows.
+function flatten(value, path = "", out = []) {
+  if (value === null || value === undefined) return out;
+  if (Array.isArray(value)) {
+    const nested = value.some((v) => v !== null && typeof v === "object");
+    out.push([path, nested ? JSON.stringify(value) : value.join(", ")]);
+  } else if (typeof value === "object") {
+    for (const [k, v] of Object.entries(value)) flatten(v, path ? `${path}.${k}` : k, out);
+  } else {
+    out.push([path, String(value)]);
+  }
+  return out;
+}
+
+// One key/value line of a torrent's extra metadata.
+const ExtraRow = component({
+  name: "ExtraRow",
+  fields: { key: "", value: "" },
+  view: html`<div class="kv">
+    <span class="muted" @text=".key"></span>
+    <span @text=".value"></span>
+  </div>`,
+});
+
+// One non-standard top-level key of the .torrent (what the torrentizer stores
+// its STAC/matadisco record under), flattened into rows.
+const ExtraGroup = component({
+  name: "ExtraGroup",
+  fields: { name: "", rows: [] },
+  statics: {
+    fromData(name, value) {
+      const rows = flatten(value).map(([key, text]) => ExtraRow.make({ key, value: text }));
+      return this.make({ name, rows });
+    },
+  },
+  view: html`<div>
+    <h3 @text=".name"></h3>
+    <div class="tmeta"><x render-each=".rows"></x></div>
+  </div>`,
+});
+
 // One torrent panel: meta, the copies summary, per-node maps + availability row,
 // the histogram, and the per-file table. This is the drill-down detail view.
 const Torrent = component({
@@ -225,6 +268,12 @@ const Torrent = component({
     redundancy: 0,
     fullyAvailable: false,
     totalStored: 0,
+    creator: "",
+    comment: "",
+    created: "",
+    trackers: "",
+    webSeeds: "",
+    extras: [],
     rows: [],
     availCells: [],
     histLines: [],
@@ -252,6 +301,21 @@ const Torrent = component({
     hasFiles() {
       return this.files.size > 0;
     },
+    hasCreator() {
+      return this.creator !== "";
+    },
+    hasComment() {
+      return this.comment !== "";
+    },
+    hasCreated() {
+      return this.created !== "";
+    },
+    hasTrackers() {
+      return this.trackers !== "";
+    },
+    hasWebSeeds() {
+      return this.webSeeds !== "";
+    },
   },
   statics: {
     fromData(t) {
@@ -259,6 +323,7 @@ const Torrent = component({
       const availCells = t.avail_cells.map((c) => Cell.make(cellForAvail(c, t.nodes_seen)));
       const files = t.files.map((f) => FileRow.Class.fromData(f, t.name));
       const s = t.summary;
+      const m = t.torrent;
       return this.make({
         name: t.name,
         infoHash: t.info_hash,
@@ -271,6 +336,12 @@ const Torrent = component({
         redundancy: s.redundancy,
         fullyAvailable: s.fully_available,
         totalStored: s.total_stored,
+        creator: m.creator || "",
+        comment: m.comment || "",
+        created: m.creation_date ? new Date(m.creation_date * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC" : "",
+        trackers: (m.trackers || []).join(" "),
+        webSeeds: (m.web_seeds || []).join(" "),
+        extras: Object.entries(m.extras || {}).map(([k, v]) => ExtraGroup.Class.fromData(k, v)),
         rows,
         availCells,
         histLines: histogramLines(t.histogram),
@@ -289,6 +360,17 @@ const Torrent = component({
       <div class="stat"><span :class="$availabilityClass" @text="$availabilityText"></span><span class="lbl">availability</span></div>
       <div class="stat"><span class="num" @text="$storedText"></span><span class="lbl">stored across swarm</span></div>
     </div>
+
+    <h3>Torrent metadata</h3>
+    <div class="tmeta">
+      <div class="kv"><span class="muted">info-hash (v2)</span><span @text=".infoHash"></span></div>
+      <div class="kv" @show="$hasCreated"><span class="muted">created</span><span @text=".created"></span></div>
+      <div class="kv" @show="$hasCreator"><span class="muted">created by</span><span @text=".creator"></span></div>
+      <div class="kv" @show="$hasComment"><span class="muted">comment</span><span @text=".comment"></span></div>
+      <div class="kv" @show="$hasTrackers"><span class="muted">trackers</span><span @text=".trackers"></span></div>
+      <div class="kv" @show="$hasWebSeeds"><span class="muted">web seeds</span><span @text=".webSeeds"></span></div>
+    </div>
+    <x render-each=".extras"></x>
 
     <h3>Per-node ownership</h3>
     <div class="rows">
@@ -987,6 +1069,8 @@ function main() {
     NodeDetail,
     NodeTorrentRow,
     Torrent,
+    ExtraGroup,
+    ExtraRow,
     NodeRow,
     FileRow,
     Cell,
@@ -1070,6 +1154,8 @@ export function getComponents() {
     NodeDetail,
     NodeTorrentRow,
     Torrent,
+    ExtraGroup,
+    ExtraRow,
     NodeRow,
     FileRow,
     Cell,

@@ -151,6 +151,18 @@
         padding: 0.45rem 0.7rem;
         min-width: 7rem;
       }
+      .tmeta {
+        display: grid;
+        grid-template-columns: minmax(8rem, max-content) 1fr;
+        gap: 0.2rem 0.75rem;
+        font-size: 0.85rem;
+      }
+      .kv {
+        display: contents;
+      }
+      .kv > * {
+        overflow-wrap: anywhere;
+      }
       .num {
         font-size: 1.2rem;
         font-weight: 600;

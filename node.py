@@ -542,7 +542,46 @@ def file_list(ti) -> list:
     return out
 
 
-def dataset_meta(info_hash: str, entry: dict) -> dict:
+# Top-level .torrent keys the BitTorrent specs define. Anything else up there was
+# put there by whoever made the torrent, outside the info dict and so outside the
+# info-hash (the torrentizer's STAC/matadisco record, for one).
+_STANDARD_KEYS = {"info", "piece layers", "announce", "announce-list", "comment",
+                  "comment.utf-8", "created by", "creation date", "encoding",
+                  "url-list", "httpseeds", "nodes"}
+
+
+def _key(k) -> str:
+    return k.decode(errors="replace") if isinstance(k, bytes) else k
+
+
+def _plain(value):
+    """A bdecoded value as JSON-able data: byte strings become text, and text
+    that is itself JSON is decoded too."""
+    if isinstance(value, dict):
+        return {_key(k): _plain(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_plain(v) for v in value]
+    if isinstance(value, bytes):
+        try:
+            value = value.decode()
+        except UnicodeDecodeError:
+            return value.hex()
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
+def torrent_extras(blob: bytes) -> dict:
+    """The non-standard top-level keys of a .torrent, decoded."""
+    # Filtered before decoding: the info dict and piece layers are the bulk of
+    # the file and none of them is shown.
+    return {_key(k): _plain(v) for k, v in lt.bdecode(blob).items()
+            if _key(k) not in _STANDARD_KEYS}
+
+
+def dataset_meta(info_hash: str, entry: dict, blob: bytes) -> dict:
     """A dataset's static shape: name, size, piece layout, file -> piece ranges.
 
     Identical on every node and fixed for the dataset's lifetime — it is what the
@@ -556,7 +595,14 @@ def dataset_meta(info_hash: str, entry: dict) -> dict:
     ti = entry["ti"]
     return {"info_hash": info_hash, "name": ti.name(),
             "total_size": ti.total_size(), "piece_length": ti.piece_length(),
-            "num_pieces": ti.num_pieces(), "files": entry["files"]}
+            "num_pieces": ti.num_pieces(), "files": entry["files"],
+            # What the .torrent says about itself, outside the file layout. A
+            # creation date of 0 means the torrent doesn't carry one.
+            "creator": ti.creator(), "comment": ti.comment(),
+            "creation_date": ti.creation_date() or None,
+            "trackers": [t.url for t in ti.trackers()],
+            "web_seeds": [w["url"] for w in ti.web_seeds()],
+            "extras": torrent_extras(blob)}
 
 
 def transfer_row(info_hash: str, entry: dict, st) -> dict:
@@ -1270,14 +1316,14 @@ def make_handler(ns: NodeState):
             # streams say who that is.
             if not entry:
                 return self._send_json({"error": "not held here"}, 404)
-            if not raw:
-                return self._send_json(dataset_meta(info_hash, entry))
             try:
                 with open(held_path(torrents_dir(ns.node_id), entry["name"],
                                     info_hash, ".torrent"), "rb") as f:
                     body = f.read()
             except OSError:
                 return self._send_json({"error": "not readable"}, 404)
+            if not raw:
+                return self._send_json(dataset_meta(info_hash, entry, body))
             self._send(body, "application/x-bittorrent")
 
         def do_POST(self):

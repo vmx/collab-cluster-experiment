@@ -188,6 +188,8 @@ def torrent_detail(meta: dict, rows: list) -> dict:
         "info_hash": meta["info_hash"], "name": meta["name"],
         "num_pieces": num_pieces, "piece_length": piece_length,
         "total_size": total_size, "nodes_seen": len(rows),
+        "torrent": {k: meta.get(k) for k in ("creator", "comment", "creation_date",
+                                              "trackers", "web_seeds", "extras")},
         "rows": out_rows,
         "avail_cells": bucket_avail(avail, num_pieces, cols),
         "histogram": histogram, "files": files,
