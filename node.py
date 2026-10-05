@@ -245,10 +245,8 @@ def node_disk(node_id: int) -> dict:
 
 
 # --- the torrent files this node has -----------------------------------------
-# One .torrent per dataset held, and no others. A node used to keep a copy of
-# every torrent in the swarm so that it could list every dataset; it doesn't any
-# more (see the holdings section below), so this directory now tracks
-# ns.torrents exactly: written when a dataset is taken, deleted when it is
+# One .torrent per dataset held, and no others: this directory tracks
+# ns.torrents exactly, written when a dataset is taken, deleted when it is
 # dropped.
 
 def store_torrent(ns: NodeState, name: str, info_hash: str, blob: bytes) -> str:
@@ -672,8 +670,8 @@ def add_torrent(ns: NodeState, blob: bytes, serve_path: str = None,
                 web_seed: str = None) -> dict:
     """Start holding a dataset, given its .torrent bytes.
 
-    Takes the bytes rather than an info-hash because a node no longer keeps
-    torrents for datasets it doesn't hold: there is nowhere local to look one up.
+    Takes the bytes rather than an info-hash because a node keeps no torrents
+    for datasets it doesn't hold: there is nowhere local to look one up.
     They come from make_torrent.build (publish) or from a peer that holds the
     dataset (take, below), and either way the identity is read out of the bytes
     themselves rather than believed from whoever supplied them.

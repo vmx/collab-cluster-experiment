@@ -202,13 +202,6 @@ incus exec node0 -- chown debian:debian /home/debian/collab-cluster-utils/data-m
 incus exec node0 -- su --login debian --command 'systemctl --user enable --now collab-cluster-data-manager'
 ```
 
-Containers created before the profile included it don't have the checkout;
-cloud-init doesn't run again, so add it once:
-
-```sh
-incus exec node0 -- su --login debian --command 'git clone --depth 1 https://github.com/vmx/collab-cluster-utils.git && cp collab-cluster-utils/deploy/incus/collab-cluster-data-manager.service ~/.config/systemd/user/ && systemctl --user daemon-reload'
-```
-
 Update it like the node: `git pull` in the checkout, then restart the unit.
 
 ## 8. Optional: rescue nodes
@@ -229,13 +222,6 @@ by default). Re-run it with other values to change them. By hand, the same is:
 printf 'RESCUE_BYTES=2000000000000\nCOLLECTOR=10.0.0.2\n' | incus file push - rescue0/home/debian/collab-cluster-utils/rescuer.env
 incus exec rescue0 -- chown debian:debian /home/debian/collab-cluster-utils/rescuer.env
 incus exec rescue0 -- su --login debian --command 'systemctl --user enable --now collab-cluster-rescuer'
-```
-
-Containers created before the profile included the rescuer unit need it
-copied once (after a `git pull` in the checkout):
-
-```sh
-incus exec rescue0 -- su --login debian --command 'cp collab-cluster-utils/deploy/incus/collab-cluster-rescuer.service ~/.config/systemd/user/ && systemctl --user daemon-reload'
 ```
 
 ## Clean up

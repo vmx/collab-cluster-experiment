@@ -749,10 +749,9 @@ const Dashboard = component({
   response: {
     fetchOverview(res, err) {
       if (err) return this.setStatus("error").setError(String((err && err.message) || err));
-      // A page, rarest first, and the totals that used to be added up here from
-      // every dataset. Both come from the collector now: it keeps them as
-      // the nodes report changes, and it is the only thing that can, since this
-      // screen only ever sees a page.
+      // A page, rarest first, and the swarm-wide totals. Both come from the
+      // collector: it keeps them as the nodes report changes, and it is the
+      // only thing that can, since this screen only ever sees a page.
       lastDatasets = res.datasets;
       // Anything that wasn't in the previous poll is new to this swarm — which
       // is all "a dataset was published somewhere" means, since a dataset
