@@ -96,6 +96,8 @@ import node_client
 SAVE_FLAGS = lt.torrent_handle.save_info_dict | lt.torrent_handle.flush_disk_cache
 # How often (session loops) to checkpoint resume data for torrents that changed.
 RESUME_EVERY = 5
+# The leaves of a v2 merkle tree: one hash per this many bytes of a file.
+BLOCK_SIZE = 16 * 1024
 
 # The states in which libtorrent is still reading what is on disk rather than
 # missing anything. A torrent in one of these wants no peers — see mesh().
@@ -982,16 +984,71 @@ def _write_resume(ns: NodeState, alert) -> None:
     load_resumes has to skip."""
     info_hash = str(alert.params.info_hashes.v2)
     with ns.lock:
-        held = info_hash in ns.torrents
-    if not held:
+        entry = ns.torrents.get(info_hash)
+    if not entry:
         return
-    path = held_path(resume_dir(ns.node_id), alert.torrent_name, info_hash,
-                     ".resume")
+    buf = lt.write_resume_data_buf(alert.params)
+    buf = trim_trees(ns, buf, entry["ti"], info_hash) or buf
+    _store_resume(ns, alert.torrent_name, info_hash, buf)
+
+
+def _store_resume(ns: NodeState, name: str, info_hash: str, buf: bytes) -> None:
+    path = held_path(resume_dir(ns.node_id), name, info_hash, ".resume")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.tmp{os.getpid()}"
     with open(tmp, "wb") as f:
-        f.write(lt.write_resume_data_buf(alert.params))
+        f.write(buf)
     os.replace(tmp, path)
+
+
+def trim_trees(ns: NodeState, buf: bytes, ti, info_hash: str):
+    """Cut a complete torrent's resume data down to its piece layers, or return
+    None if there is nothing to cut.
+
+    libtorrent saves each file's merkle tree down to its BLOCK_SIZE leaves. A
+    restart reads all of them, re-hashes them before adding the torrent, and
+    keeps them in RAM, so they are what a restart costs. A complete torrent
+    needs no block hashes to seed; the piece layers are what peers ask it for.
+    They are taken from the stored .torrent rather than hashed up from the
+    blocks, and libtorrent saves the tree as loaded, so a torrent is cut once
+    and stays cut."""
+    resume = lt.bdecode(buf)
+    fs, piece_length = ti.files(), ti.piece_length()
+    have = sum(bin(b).count("1") for b in resume.get(b"pieces", b""))
+    if have < ti.num_pieces():
+        return None             # still downloading: the block hashes are in use
+    trees = resume.get(b"trees", [])
+    # A file of one piece has no piece layer; its tree is a handful of hashes.
+    oversized = [i for i, tree in enumerate(trees)
+                 if fs.file_size(i) > piece_length
+                 and len(tree.get(b"hashes", b""))
+                 > 32 * -(-fs.file_size(i) // piece_length)]
+    if not oversized:
+        return None
+    path = held_path(torrents_dir(ns.node_id), ti.name(), info_hash, ".torrent")
+    # Without the .torrent the trees stay whole: slower to resume, but held.
+    try:
+        with open(path, "rb") as f:
+            layers = lt.bdecode(f.read())[b"piece layers"]
+    except Exception as exc:
+        print(f"node {ns.node_id}: not trimming {os.path.basename(path)}: "
+              f"{exc!r}", flush=True)
+        return None
+    per_piece = piece_length // BLOCK_SIZE
+    for i in oversized:
+        layer = layers.get(fs.root(i).to_bytes())
+        if not layer:
+            return None
+        # The tree is padded to a power of two of blocks; the piece layer is
+        # the level with one node per piece, numbered breadth-first.
+        blocks = -(-fs.file_size(i) // BLOCK_SIZE)
+        first = (1 << (blocks - 1).bit_length()) // per_piece - 1
+        mask = bytearray(len(trees[i][b"mask"]))
+        for node in range(first, first + len(layer) // 32):
+            mask[node // 8] |= 0x80 >> (node % 8)
+        trees[i] = {b"hashes": layer, b"mask": bytes(mask),
+                    b"verified": bytes(len(trees[i][b"verified"]))}
+    return lt.bencode(resume)
 
 
 def _note_file_error(ns: NodeState, alert) -> None:
@@ -1067,7 +1124,8 @@ def load_resumes(ns: NodeState) -> int:
     for path in glob.iglob(os.path.join(resume_dir(ns.node_id), "*", "*.resume")):
         try:
             with open(path, "rb") as f:
-                atp = lt.read_resume_data(f.read())
+                buf = f.read()
+            atp = lt.read_resume_data(buf)
         except Exception as exc:
             print(f"node {ns.node_id}: skip {os.path.basename(path)}: {exc}", flush=True)
             continue
@@ -1077,6 +1135,11 @@ def load_resumes(ns: NodeState) -> int:
                   flush=True)
             continue
         info_hash = str(ti.info_hashes().v2)
+        # A checkpoint written before trees were cut would be re-hashed in full.
+        trimmed = trim_trees(ns, buf, ti, info_hash)
+        if trimmed:
+            _store_resume(ns, ti.name(), info_hash, trimmed)
+            atp = lt.read_resume_data(trimmed)
         handle = ns.ses.add_torrent(atp)
         entry = {"name": ti.name(), "save_path": atp.save_path, "ti": ti,
                  "files": file_list(ti), "handle": handle, "state": "downloading",
