@@ -225,13 +225,30 @@ function flatten(value, path = "", out = []) {
   return out;
 }
 
-// One key/value line of a torrent's extra metadata.
+// Where an AT Protocol record (an at:// URI, like a matadisco record's) is shown
+// in a browser.
+const AT_VIEWER = "https://pdsls.dev/";
+
+// One key/value line of a torrent's extra metadata. A web URL is a link, and so
+// is an at:// URI, through AT_VIEWER; both open in a new tab so the dashboard
+// keeps polling.
 const ExtraRow = component({
   name: "ExtraRow",
   fields: { key: "", value: "" },
+  methods: {
+    href() {
+      if (/^https?:\/\//.test(this.value)) return this.value;
+      if (this.value.startsWith("at://")) return AT_VIEWER + this.value;
+      return "";
+    },
+    isLink() {
+      return this.href() !== "";
+    },
+  },
   view: html`<div class="kv">
     <span class="muted" @text=".key"></span>
-    <span @text=".value"></span>
+    <a class="extlink" @show="$isLink" :href="$href" target="_blank" rel="noopener" @text=".value"></a>
+    <span @hide="$isLink" @text=".value"></span>
   </div>`,
 });
 
@@ -370,7 +387,6 @@ const Torrent = component({
       <div class="kv" @show="$hasTrackers"><span class="muted">trackers</span><span @text=".trackers"></span></div>
       <div class="kv" @show="$hasWebSeeds"><span class="muted">web seeds</span><span @text=".webSeeds"></span></div>
     </div>
-    <x render-each=".extras"></x>
 
     <h3>Per-node ownership</h3>
     <div class="rows">
@@ -384,6 +400,8 @@ const Torrent = component({
     </div>
     <h3>Availability histogram</h3>
     <ul class="hist"><li @each=".histLines"><x text="@value"></x></li></ul>
+
+    <x render-each=".extras"></x>
 
     <div @show="$hasFiles">
       <h3>Per-file replication</h3>
