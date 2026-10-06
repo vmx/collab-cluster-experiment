@@ -617,6 +617,11 @@ def transfer_row(info_hash: str, entry: dict, st) -> dict:
             "progress": st.progress, "bytes_done": st.total_done,
             "download_rate": st.download_rate, "upload_rate": st.upload_rate,
             "num_peers": st.num_peers, "error": entry.get("error"),
+            # Why a transfer with no peers is idle: still checking (mesh() offers
+            # it nobody), or paused by libtorrent's queue.
+            "lt_state": str(st.state),
+            "paused": bool(st.flags & lt.torrent_flags.paused),
+            "auto_managed": bool(st.flags & lt.torrent_flags.auto_managed),
             # Bytes received and thrown away: failed the piece hash, or already
             # had. A transfer with a rate but no progress shows up here.
             "failed_bytes": st.total_failed_bytes,
