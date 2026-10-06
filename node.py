@@ -906,7 +906,11 @@ def _write_resume(ns: NodeState, alert) -> None:
     checkpoint would be filed under a name that does not match its contents,
     that /remove never cleans up, and that silently brings the dataset back on
     the next restart. For the same reason a checkpoint still in flight when the
-    torrent is dropped is discarded rather than written."""
+    torrent is dropped is discarded rather than written.
+
+    Written via a temp file + rename, like store_torrent, so a node stopped
+    mid-write keeps the previous checkpoint instead of a truncated one that
+    load_resumes has to skip."""
     info_hash = str(alert.params.info_hashes.v2)
     with ns.lock:
         held = info_hash in ns.torrents
@@ -915,8 +919,10 @@ def _write_resume(ns: NodeState, alert) -> None:
     path = held_path(resume_dir(ns.node_id), alert.torrent_name, info_hash,
                      ".resume")
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb") as f:
+    tmp = f"{path}.tmp{os.getpid()}"
+    with open(tmp, "wb") as f:
         f.write(lt.write_resume_data_buf(alert.params))
+    os.replace(tmp, path)
 
 
 def _note_file_error(ns: NodeState, alert) -> None:
