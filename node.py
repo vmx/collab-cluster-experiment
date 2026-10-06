@@ -36,6 +36,9 @@ no coordinator.
                                  swarm (see take())
   POST /remove   {"info_hash"|"name": ...}     drop one, and delete the copy
                                  this node downloaded of it
+  POST /recheck  {"info_hash"|"name": ...}     re-hash a dataset's files; a
+                                 complete one found damaged goes back to
+                                 downloading (see recheck_torrent())
 
 Two background threads — the libtorrent session loop (tracks what is moving)
 and the sync loop (the engine, below) — while the main thread serves the HTTP
@@ -672,13 +675,15 @@ def make_session(node_id: int) -> "lt.session":
         # an IP; without this libtorrent allows only ONE peer connection per IP
         # per torrent, so a single-host swarm couldn't mesh.
         "allow_multiple_connections_per_ip": True,
-        # Only the two categories the session loop actually reads: fast-resume
-        # checkpoints, and the session counters it turns into this node's
-        # throughput. all_categories would additionally switch on the per-peer,
-        # per-piece and per-block log streams, which libtorrent generates at high
-        # volume all through a transfer and which we pop only to discard.
+        # Only the categories the session loop actually reads: fast-resume
+        # checkpoints, the session counters it turns into this node's
+        # throughput, and a /recheck finishing. all_categories would
+        # additionally switch on the per-peer, per-piece and per-block log
+        # streams, which libtorrent generates at high volume all through a
+        # transfer and which we pop only to discard.
         "alert_mask": (lt.alert.category_t.storage_notification
-                       | lt.alert.category_t.stats_notification),
+                       | lt.alert.category_t.stats_notification
+                       | lt.alert.category_t.status_notification),
         # libtorrent's queue is written for a client seeding a few torrents it
         # chose: it keeps `active_seeds` unpaused and rotates the rest out, and
         # a paused torrent refuses peers. A node has to answer for everything it
@@ -840,6 +845,15 @@ def take(ns: NodeState, info_hash: str, torrent_url: str = None,
     return add_torrent(ns, blob, web_seed=web_seed)
 
 
+def is_own_copy(ns: NodeState, info_hash: str, entry: dict) -> bool:
+    """Whether a dataset's files are a copy this node downloaded, rather than
+    somebody's own files it was handed to publish. Exactly the directory
+    add_torrent() made for a download, so a published dataset's save_path can
+    never match it."""
+    own_copy = held_path(data_dir(ns.node_id), entry["name"], info_hash)
+    return os.path.abspath(entry["save_path"]) == os.path.abspath(own_copy)
+
+
 def remove_torrent(ns: NodeState, info_hash: str) -> dict:
     """Stop holding a dataset, and stop being one of the places it exists.
 
@@ -868,16 +882,71 @@ def remove_torrent(ns: NodeState, info_hash: str) -> dict:
     except FileNotFoundError:
         pass
     drop_torrent(ns, entry["name"], info_hash)
-    # Exactly the directory add_torrent() made for a download, so a published
-    # dataset's save_path can never match it.
-    own_copy = held_path(data_dir(ns.node_id), entry["name"], info_hash)
-    deleted = os.path.abspath(entry["save_path"]) == os.path.abspath(own_copy)
+    deleted = is_own_copy(ns, info_hash, entry)
     if deleted:
-        shutil.rmtree(own_copy, ignore_errors=True)
+        shutil.rmtree(entry["save_path"], ignore_errors=True)
     print(f"node {ns.node_id}: -{entry['name']} [{info_hash[:8]}]"
           f"{' (files deleted)' if deleted else ''}", flush=True)
     return {"removed": True, "info_hash": info_hash, "name": entry["name"],
             "files_deleted": deleted}
+
+
+def recheck_torrent(ns: NodeState, info_hash: str) -> dict:
+    """Re-hash a dataset's files, and believe what is found.
+
+    A complete torrent is never read back: a restart trusts its resume data, so
+    a copy damaged on disk goes on being reported, and served, as complete. Its
+    downloaders ban it for corrupt pieces and stall without a word. A dataset
+    still downloading can be re-hashed too, which is how one whose pieces were
+    wrongly written off gets them back.
+
+    Nothing is announced while the check runs: a copy whose state turns out
+    right never changed, and the swarm need not hear about it. The torrent only
+    joins the in-flight set, so the session loop watches it and settles the
+    outcome when libtorrent says the check is done (see _note_checked).
+
+    The torrent is dropped from the session and added again without resume
+    data, which libtorrent answers with a full check of the files, rather than
+    re-checked in place. A torrent that has been seeding stops counting its
+    peers that are seeds as ones to connect to, and force_recheck() leaves that
+    standing: a damaged copy would go back to downloading and never dial the
+    very holders it needs. Added afresh, as a restart does, it starts with a
+    clean peer list.
+
+    It is added from the stored .torrent, not from what the session holds. A
+    torrent resumed after a restart was given its info dict alone; a v2 info
+    dict carries each file's root hash but not the piece layers, so a file with
+    one bad piece would fail as a whole and every piece of it be written off.
+    Its web seeds are carried over from the session, though: they were given to
+    /add, not written into the .torrent, and without them a damaged copy of a
+    dataset no other node holds has nowhere to fetch its missing pieces from.
+
+    A published dataset is only checked, never repaired: that would mean writing
+    into somebody's own files, which are never this node's to change. Upload
+    mode keeps libtorrent from fetching what is missing, while the pieces that
+    do verify are still served."""
+    with ns.lock:
+        entry = ns.torrents.get(info_hash)
+        if not entry:
+            return {"rechecking": False, "note": "not held"}
+        if entry.get("rechecking"):
+            return {"rechecking": True, "info_hash": info_hash,
+                    "name": entry["name"], "note": "already rechecking"}
+        atp = lt.add_torrent_params()
+        atp.ti = lt.torrent_info(held_path(torrents_dir(ns.node_id),
+                                           entry["name"], info_hash, ".torrent"))
+        atp.save_path = entry["save_path"]
+        atp.url_seeds = list(entry["handle"].url_seeds())
+        if not is_own_copy(ns, info_hash, entry):
+            atp.flags |= lt.torrent_flags.upload_mode
+        # Swapped under the lock, so a /remove never acts on the old handle.
+        ns.ses.remove_torrent(entry["handle"])
+        entry["handle"] = ns.ses.add_torrent(atp)
+        entry["rechecking"] = entry["checking"] = True
+        ns.in_flight.add(info_hash)
+    print(f"node {ns.node_id}: ?'{entry['name']}' [{info_hash[:8]}] rechecking",
+          flush=True)
+    return {"rechecking": True, "info_hash": info_hash, "name": entry["name"]}
 
 
 def publish(ns: NodeState, path: str) -> dict:
@@ -951,6 +1020,44 @@ def _note_file_error(ns: NodeState, alert) -> None:
     if said != message:      # libtorrent repeats itself; a log need not
         print(f"node {ns.node_id}: !'{alert.torrent_name}' [{info_hash[:8]}] "
               f"{message}: {alert.filename()}", flush=True)
+
+
+def _note_checked(ns: NodeState, alert) -> None:
+    """A /recheck has finished: settle what it found.
+
+    Every check ends in this alert, including the one each torrent gets when it
+    is added; only a torrent marked by recheck_torrent() is ours to settle. A
+    complete copy found intact leaves the in-flight set as quietly as it joined
+    it. A damaged one is announced as no longer complete, and from then on it is
+    an ordinary download: mesh() offers it peers and the session loop promotes
+    it once the missing pieces are back — unless it is published, and so stays
+    as it is. A dataset that was downloading stays one, and if every piece now
+    verifies, the session loop promotes it as it would any finished download."""
+    info_hash = str(alert.handle.info_hashes().v2)
+    with ns.lock:
+        entry = ns.torrents.get(info_hash)
+        if not entry or not entry.pop("rechecking", False):
+            return
+    try:
+        st = alert.handle.status()
+    except RuntimeError:
+        return                  # removed in the meantime
+    intact = st.progress >= 1.0
+    with ns.lock:
+        if ns.torrents.get(info_hash) is not entry:
+            return
+        entry["checking"] = False
+        if entry["state"] == "complete":
+            if intact:
+                ns.in_flight.discard(info_hash)
+            else:
+                entry["state"] = "downloading"
+                note_holding(ns, holding_row(info_hash, entry), "complete")
+    if intact:
+        alert.handle.unset_flags(lt.torrent_flags.upload_mode)
+    print(f"node {ns.node_id}: ?'{alert.torrent_name}' [{info_hash[:8]}] "
+          f"{'intact' if intact else f'damaged, {st.progress:.1%} verifies'}",
+          flush=True)
 
 
 def load_resumes(ns: NodeState) -> int:
@@ -1062,6 +1169,8 @@ def session_loop(ns: NodeState) -> None:
                 _write_resume(ns, a)
             elif isinstance(a, lt.file_error_alert):
                 _note_file_error(ns, a)
+            elif isinstance(a, lt.torrent_checked_alert):
+                _note_checked(ns, a)
             elif isinstance(a, lt.session_stats_alert):
                 # Only the newest: a batch can hold a loop's reply and this
                 # one's, and reading both against the same clock would divide a
@@ -1088,7 +1197,12 @@ def session_loop(ns: NodeState) -> None:
             checked.append((entry, st.state in CHECKING_STATES))
             if entry.get("error") and st.total_done > entry["error_at"]:
                 entry["error"] = None          # moving again, so it is over
-            if st.is_seeding or st.progress >= 1.0:
+            if entry.get("rechecking"):
+                # Still complete until _note_checked says otherwise, though it
+                # looks like a download while the check runs. Listed, so the
+                # check can be watched.
+                transfers.append(transfer_row(info_hash, entry, st))
+            elif st.is_seeding or st.progress >= 1.0:
                 finished.append((info_hash, entry))
             else:
                 transfers.append(transfer_row(info_hash, entry, st))
@@ -1355,6 +1469,9 @@ def make_handler(ns: NodeState):
                 elif self.path == "/remove":
                     info_hash = resolve(ns, body.get("info_hash"), body.get("name"))
                     self._send_json(remove_torrent(ns, info_hash))
+                elif self.path == "/recheck":
+                    info_hash = resolve(ns, body.get("info_hash"), body.get("name"))
+                    self._send_json(recheck_torrent(ns, info_hash))
                 else:
                     self._send_json({"error": "not found"}, 404)
             except FileNotFoundError as exc:

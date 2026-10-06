@@ -250,6 +250,7 @@ GET  /peers                          {"self": …, "peers": […]} — its view 
 POST /publish  {"path": …}           hash a local path in and seed it
 POST /add      {"info_hash": …}      take a dataset from whoever has it
 POST /remove   {"name"|"info_hash"}  drop one, deleting its downloaded copy
+POST /recheck  {"name"|"info_hash"}  re-hash one; a damaged complete one is downloading again
 ```
 
 A producer outside the swarm, which no beacon announces, adds two fields to

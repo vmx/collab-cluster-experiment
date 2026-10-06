@@ -6,6 +6,7 @@
     python control.py status   10.0.0.5           # datasets it actually holds
     python control.py add      10.0.0.6 photos    # tell that node to take it
     python control.py remove   10.0.0.6 photos    # drop it
+    python control.py recheck  10.0.0.6 photos    # re-hash its files, repair damage
     python control.py map      10.0.0.5           # copies of every dataset
     python control.py map      10.0.0.5 photos     # ...and one dataset's pieces
 
@@ -60,9 +61,9 @@ def _post(endpoint: str, path: str, payload: dict, timeout: float = 5.0):
 
 
 def _dataset_ref(ref: str) -> dict:
-    """Address a dataset the way the user typed it, for /remove — which acts on
-    something the node already holds, so the node can resolve either form
-    itself, falling back to a name if a hex-looking ref matches no hash. /add is
+    """Address a dataset the way the user typed it, for /remove and /recheck —
+    which act on something the node already holds, so the node can resolve
+    either form itself, falling back to a name if a hex-looking ref matches no hash. /add is
     different: nothing is held yet and a node knows nothing about datasets it
     does not hold, so control.py resolves the name across the swarm and sends a
     hash."""
@@ -305,6 +306,21 @@ def cmd_remove(args) -> None:
     print("if that was the last copy, the dataset has left the swarm: nothing "
           "keeps a\nrecord of datasets nobody holds. Re-publishing the same "
           "path brings it back\nunchanged - the dataset is its content.")
+
+
+def cmd_recheck(args) -> None:
+    res = _checked(args.endpoint, _post(args.endpoint, "/recheck",
+                                        _dataset_ref(args.dataset)))
+    if not res.get("rechecking"):
+        print(f"{args.endpoint}: not holding {args.dataset!r} - nothing to check")
+        return
+    print(f"{args.endpoint}: re-hashing {res['name']!r} [{res['info_hash'][:16]}]"
+          + (" - already under way" if res.get("note") else ""))
+    print("a complete dataset stays complete if its files are intact. If not, it "
+          "goes back\nto downloading and fetches the damaged pieces from its peers "
+          "- unless this node\npublished it, in which case its files are left as "
+          "they are. Watch with:")
+    print(f"  python control.py status {args.endpoint}")
 
 
 # --- the swarm map -----------------------------------------------------------
@@ -573,7 +589,9 @@ def main() -> None:
 
     for name, help_text, func in [
             ("add", "tell a node to take a dataset (manual mode)", cmd_add),
-            ("remove", "tell a node to drop a dataset", cmd_remove)]:
+            ("remove", "tell a node to drop a dataset", cmd_remove),
+            ("recheck", "tell a node to re-hash a dataset's files",
+             cmd_recheck)]:
         p = with_endpoint(name, help_text, func)
         p.add_argument("dataset", help="dataset name, or its v2 info-hash")
 
