@@ -65,6 +65,7 @@ What a node holds is only ever what it was given: /publish puts local data in,
 /add takes a copy of somebody else's. Nothing arrives unasked.
 """
 import argparse
+import ctypes
 import glob
 import heapq
 import json
@@ -969,19 +970,15 @@ def publish(ns: NodeState, path: str) -> dict:
             "serving": res.get("added", False), "note": res.get("note")}
 
 
-def _write_resume(ns: NodeState, alert) -> None:
-    """Checkpoint one torrent's fast-resume data.
+def _write_resume(ns: NodeState, alert, staged: dict) -> None:
+    """Checkpoint one torrent's fast-resume data, staged for _commit_resumes.
 
     The name comes from the alert's own params, not from its handle: a handle
     whose torrent has already been removed reports an all-zero info-hash, so the
     checkpoint would be filed under a name that does not match its contents,
     that /remove never cleans up, and that silently brings the dataset back on
     the next restart. For the same reason a checkpoint still in flight when the
-    torrent is dropped is discarded rather than written.
-
-    Written via a temp file + rename, like store_torrent, so a node stopped
-    mid-write keeps the previous checkpoint instead of a truncated one that
-    load_resumes has to skip."""
+    torrent is dropped is discarded rather than written."""
     info_hash = str(alert.params.info_hashes.v2)
     with ns.lock:
         entry = ns.torrents.get(info_hash)
@@ -989,16 +986,72 @@ def _write_resume(ns: NodeState, alert) -> None:
         return
     buf = lt.write_resume_data_buf(alert.params)
     buf = trim_trees(ns, buf, entry["ti"], info_hash) or buf
-    _store_resume(ns, alert.torrent_name, info_hash, buf)
+    _stage_resume(ns, alert.torrent_name, info_hash, buf, staged)
 
 
-def _store_resume(ns: NodeState, name: str, info_hash: str, buf: bytes) -> None:
+def _stage_resume(ns: NodeState, name: str, info_hash: str, buf: bytes,
+                  staged: dict) -> None:
+    """Write a checkpoint to a temp file beside its .resume, and note it in
+    `staged` (path -> (tmp, info_hash)) for _commit_resumes to move into place.
+    A later checkpoint of the same torrent overwrites the temp file, so it is
+    the one that lands."""
     path = held_path(resume_dir(ns.node_id), name, info_hash, ".resume")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.tmp{os.getpid()}"
     with open(tmp, "wb") as f:
         f.write(buf)
-    os.replace(tmp, path)
+    staged[path] = (tmp, info_hash)
+
+
+_libc = ctypes.CDLL(None, use_errno=True)
+
+
+def _sync_disk(directory: str) -> None:
+    """Flush everything written to the filesystem holding `directory`."""
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        if _libc.syncfs(fd) != 0:
+            err = ctypes.get_errno()
+            raise OSError(err, os.strerror(err), directory)
+    finally:
+        os.close(fd)
+
+
+def _commit_resumes(ns: NodeState, staged: dict) -> None:
+    """Move staged checkpoints into place, once what they vouch for is on disk.
+
+    A restart believes a checkpoint without reading the data back. Were it on
+    disk before the pieces it lists, a host going down in between would come
+    back with holes of zeros in files its checkpoints call complete. So the
+    downloaded data and the temp files are synced first, and only then renamed
+    over the previous checkpoints: a node stopped at any point keeps either the
+    old checkpoint or the new one, never a truncated one or one ahead of its
+    data. Published data is not synced; the node never writes to it.
+
+    Synced once per batch rather than per file, because a restart checkpoints
+    again every dataset it resumes. A checkpoint of a dataset removed since it
+    was staged is dropped, so it cannot bring the dataset back, and so is the
+    whole batch if the sync fails: the previous checkpoints stay, which claim
+    no more than is known to be on disk."""
+    if not staged:
+        return
+    try:
+        for directory in (data_dir(ns.node_id), resume_dir(ns.node_id)):
+            if os.path.isdir(directory):
+                _sync_disk(directory)
+    except OSError as exc:
+        print(f"node {ns.node_id}: {len(staged)} checkpoints not written: {exc}",
+              flush=True)
+        for tmp, _ in staged.values():
+            os.remove(tmp)
+        return
+    for path, (tmp, info_hash) in staged.items():
+        with ns.lock:
+            held = info_hash in ns.torrents
+        if held:
+            os.replace(tmp, path)
+        else:
+            os.remove(tmp)
 
 
 def trim_trees(ns: NodeState, buf: bytes, ti, info_hash: str):
@@ -1120,7 +1173,7 @@ def _note_checked(ns: NodeState, alert) -> None:
 def load_resumes(ns: NodeState) -> int:
     """Re-add every torrent saved as a .resume file (native fast-resume). The
     resume file is self-contained (save_info_dict), so torrents/ is not read."""
-    count = 0
+    count, staged = 0, {}
     for path in glob.iglob(os.path.join(resume_dir(ns.node_id), "*", "*.resume")):
         try:
             with open(path, "rb") as f:
@@ -1138,7 +1191,7 @@ def load_resumes(ns: NodeState) -> int:
         # A checkpoint written before trees were cut would be re-hashed in full.
         trimmed = trim_trees(ns, buf, ti, info_hash)
         if trimmed:
-            _store_resume(ns, ti.name(), info_hash, trimmed)
+            _stage_resume(ns, ti.name(), info_hash, trimmed, staged)
             atp = lt.read_resume_data(trimmed)
         handle = ns.ses.add_torrent(atp)
         entry = {"name": ti.name(), "save_path": atp.save_path, "ti": ti,
@@ -1150,6 +1203,7 @@ def load_resumes(ns: NodeState) -> int:
             note_holding(ns, holding_row(info_hash, entry))
         count += 1
         print(f"node {ns.node_id}: resumed '{ti.name()}' [{info_hash[:8]}]", flush=True)
+    _commit_resumes(ns, staged)
     return count
 
 
@@ -1162,14 +1216,16 @@ def flush_resume(ns: NodeState) -> None:
         e["handle"].save_resume_data(SAVE_FLAGS)
         pending += 1
     deadline = time.time() + 5
+    staged = {}
     while pending > 0 and time.time() < deadline:
         for a in ns.ses.pop_alerts():
             if isinstance(a, lt.save_resume_data_alert):
-                _write_resume(ns, a)
+                _write_resume(ns, a, staged)
                 pending -= 1
             elif isinstance(a, lt.save_resume_data_failed_alert):
                 pending -= 1
         time.sleep(0.05)
+    _commit_resumes(ns, staged)
 
 
 def _note_rates(ns: NodeState, alert, prev, now: float):
@@ -1226,10 +1282,10 @@ def session_loop(ns: NodeState) -> None:
         loops += 1
         now = time.time()
         ns.ses.post_session_stats()
-        counters = None
+        counters, staged = None, {}
         for a in ns.ses.pop_alerts():
             if isinstance(a, lt.save_resume_data_alert):
-                _write_resume(ns, a)
+                _write_resume(ns, a, staged)
             elif isinstance(a, lt.file_error_alert):
                 _note_file_error(ns, a)
             elif isinstance(a, lt.torrent_checked_alert):
@@ -1240,6 +1296,7 @@ def session_loop(ns: NodeState) -> None:
                 # loop's worth of bytes by no time at all.
                 counters = a
             # save_resume_data_failed_alert: nothing to persist yet; ignore.
+        _commit_resumes(ns, staged)
         if counters is not None:
             prev = _note_rates(ns, counters, prev, now)
 
