@@ -113,8 +113,8 @@ Downloads that do need peers wait behind them.
 
 So `mesh()` offers peers only to torrents missing bytes. That is not the same as
 torrents not yet complete. A dataset being checked is not complete yet, but it
-misses nothing. That covers every freshly published dataset, and everything held
-after a restart. `mesh()` skips it until the check is done.
+misses nothing. That covers every freshly published dataset, and every download
+resumed after a restart. `mesh()` skips it until the check is done.
 
 **Choking protects nothing.** Choking exists so that strangers who give nothing
 back get nothing. A private segment has no strangers. With the default eight
@@ -188,11 +188,11 @@ What is left, in the order it bites, each with a proposed fix.
   ~200 MB at 1.1M.
   **Fix:** persist `{epoch, seq}` across a restart, so an up-to-date reader gets
   an empty delta. The catch is that the restart must then stop *emitting*
-  transitions. At 1.1M held that would be 2.2M transitions, which would overrun
-  the log anyway. So the torrent state is restored from resume data without
-  publishing it. Restored torrents that claim to be complete are then verified
-  once. Otherwise a node that lost files while it was down would advertise
-  copies it no longer has.
+  transitions. It emits one per dataset held, which at 1.1M would overrun the
+  log anyway. So the torrent state is restored from resume data without
+  publishing it. Restored torrents that claim to be complete are already
+  believed and only demoted if libtorrent finds their files gone, so that part
+  carries over.
 - **The index keeps its aggregate in memory.** At 9.1M datasets that is 4.9
   GB. It is lost on restart and rebuilt by re-listing 27.5M rows. A name search
   has no index either, so it is a pass over all 9.1M datasets. That is why

@@ -66,7 +66,6 @@ What a node holds is only ever what it was given: /publish puts local data in,
 """
 import argparse
 import ctypes
-import glob
 import heapq
 import json
 import os
@@ -97,6 +96,10 @@ import node_client
 SAVE_FLAGS = lt.torrent_handle.save_info_dict | lt.torrent_handle.flush_disk_cache
 # How often (session loops) to checkpoint resume data for torrents that changed.
 RESUME_EVERY = 5
+# How many torrents a restart adds between taking libtorrent's alerts. Each one
+# added posts a handful, and the queue (alert_queue_size) drops what does not
+# fit, so this has to stay well below the queue's size divided by that handful.
+ALERTS_EVERY = 100
 # The leaves of a v2 merkle tree: one hash per this many bytes of a file.
 BLOCK_SIZE = 16 * 1024
 
@@ -1045,11 +1048,12 @@ def _commit_resumes(ns: NodeState, staged: dict) -> None:
     old checkpoint or the new one, never a truncated one or one ahead of its
     data. Published data is not synced; the node never writes to it.
 
-    Synced once per batch rather than per file, because a restart checkpoints
-    again every dataset it resumes. A checkpoint of a dataset removed since it
-    was staged is dropped, so it cannot bring the dataset back, and so is the
-    whole batch if the sync fails: the previous checkpoints stay, which claim
-    no more than is known to be on disk."""
+    Synced once per batch rather than per file, because a batch can hold a
+    checkpoint for every dataset held: a restart rewrites each one it trims.
+    A checkpoint of a dataset removed since it was staged is dropped, so it
+    cannot bring the dataset back, and so is the whole batch if the sync fails:
+    the previous checkpoints stay, which claim no more than is known to be on
+    disk."""
     if not staged:
         return
     try:
@@ -1150,26 +1154,40 @@ def _note_file_error(ns: NodeState, alert) -> None:
 
 
 def _note_checked(ns: NodeState, alert) -> None:
-    """A /recheck has finished: settle what it found.
+    """A /recheck, or the look at a resumed complete dataset, has finished:
+    settle what it found.
 
     Every check ends in this alert, including the one each torrent gets when it
-    is added; only a torrent marked by recheck_torrent() is ours to settle. A
-    complete copy found intact leaves the in-flight set as quietly as it joined
-    it. A damaged one is announced as no longer complete, and from then on it is
-    an ordinary download: mesh() offers it peers and the session loop promotes
-    it once the missing pieces are back — unless it is published, and so stays
-    as it is. A dataset that was downloading stays one, and if every piece now
-    verifies, the session loop promotes it as it would any finished download."""
+    is added; only a torrent marked by recheck_torrent() or load_resumes() is
+    ours to settle. A complete copy found intact leaves the in-flight set as
+    quietly as it joined it. A damaged one is announced as no longer complete,
+    and from then on it is an ordinary download: mesh() offers it peers and the
+    session loop promotes it once the missing pieces are back — unless it is
+    published, and so stays as it is. A dataset that was downloading stays one,
+    and if every piece now verifies, the session loop promotes it as it would
+    any finished download.
+
+    A resumed dataset was announced complete without waiting for libtorrent,
+    which only looks whether its files are there, not at what is in them. One
+    whose files are gone is demoted here like a damaged /recheck; an intact
+    one, the case for nearly every dataset at every restart, is passed over
+    without a word."""
     info_hash = str(alert.handle.info_hashes().v2)
     with ns.lock:
         entry = ns.torrents.get(info_hash)
-        if not entry or not entry.pop("rechecking", False):
+        if not entry:
+            return
+        rechecking = entry.pop("rechecking", False)
+        resumed = entry.pop("resumed", False)
+        if not (rechecking or resumed):
             return
     try:
         st = alert.handle.status()
     except RuntimeError:
         return                  # removed in the meantime
     intact = st.progress >= 1.0
+    if resumed and intact:
+        return
     with ns.lock:
         if ns.torrents.get(info_hash) is not entry:
             return
@@ -1187,11 +1205,45 @@ def _note_checked(ns: NodeState, alert) -> None:
           flush=True)
 
 
+def _resume_files(ns: NodeState) -> list:
+    """Every .resume file, in the order their inodes are numbered.
+
+    A restart reads one small file per dataset held, and on a spinning disk it
+    is the seeks between them that cost, not the reading. A directory lists its
+    entries in hash order, which is as good as random on disk; inodes are
+    allocated, and their data placed, roughly in the order the files were
+    made, so reading by inode turns most of the seeks into short hops. The
+    inode numbers come with the directory listing, so ordering costs no extra
+    read."""
+    found = []
+    try:
+        shards = [e.path for e in os.scandir(resume_dir(ns.node_id)) if e.is_dir()]
+    except FileNotFoundError:
+        return []
+    for shard in shards:
+        with os.scandir(shard) as entries:
+            found.extend((e.inode(), e.path) for e in entries
+                         if e.name.endswith(".resume"))
+    return [path for _, path in sorted(found)]
+
+
 def load_resumes(ns: NodeState) -> int:
     """Re-add every torrent saved as a .resume file (native fast-resume). The
-    resume file is self-contained (save_info_dict), so torrents/ is not read."""
+    resume file is self-contained (save_info_dict), so torrents/ is not read.
+
+    A dataset whose checkpoint has every piece is held as complete straight
+    away, rather than announced as downloading until libtorrent has looked at
+    it: at a restart that is nearly all of them, and each would otherwise go
+    through the session loop, be announced twice, and be checkpointed again
+    although nothing about it changed. libtorrent still looks whether its files
+    are there, and _note_checked demotes one whose files are gone.
+
+    libtorrent posts a handful of alerts for every torrent added, and its queue
+    drops what does not fit, so they are taken as the torrents go in rather
+    than left for the session loop: dropped, the alert that a resumed dataset's
+    files are gone would leave it announced as complete."""
     count, staged = 0, {}
-    for path in glob.iglob(os.path.join(resume_dir(ns.node_id), "*", "*.resume")):
+    for path in _resume_files(ns):
         try:
             with open(path, "rb") as f:
                 buf = f.read()
@@ -1210,24 +1262,35 @@ def load_resumes(ns: NodeState) -> int:
         if trimmed:
             _stage_resume(ns, ti.name(), info_hash, trimmed, staged)
             atp = lt.read_resume_data(trimmed)
+        # The bitfield is padded to whole bytes, so only the real pieces count.
+        complete = atp.have_pieces[:ti.num_pieces()].count(True) == ti.num_pieces()
         handle = ns.ses.add_torrent(atp)
         entry = {"name": ti.name(), "save_path": atp.save_path, "ti": ti,
-                 "files": file_list(ti), "handle": handle, "state": "downloading",
-                 "checking": True,   # as in add_torrent, and here it is all of them
+                 "files": file_list(ti), "handle": handle,
+                 "state": "complete" if complete else "downloading",
+                 # A download is checked as in add_torrent; a complete one is
+                 # believed, and settled by _note_checked.
+                 "checking": not complete, "resumed": complete,
                  "total_size": ti.total_size(), "piece_length": ti.piece_length()}
         with ns.lock:
             ns.torrents[info_hash] = entry
             note_holding(ns, holding_row(info_hash, entry))
         count += 1
         print(f"node {ns.node_id}: resumed '{ti.name()}' [{info_hash[:8]}]", flush=True)
+        if count % ALERTS_EVERY == 0:
+            _handle_alerts(ns, staged)
+    _handle_alerts(ns, staged)
     _commit_resumes(ns, staged)
     return count
 
 
 def flush_resume(ns: NodeState) -> None:
-    """Synchronously checkpoint all torrents (used on shutdown)."""
+    """Synchronously checkpoint the torrents still in flight (used on shutdown).
+
+    A complete torrent was checkpointed when it completed, and nothing about it
+    has changed since, so only what is still moving is written."""
     with ns.lock:
-        entries = list(ns.torrents.values())
+        entries = [ns.torrents[ih] for ih in ns.in_flight]
     pending = 0
     for e in entries:
         e["handle"].save_resume_data(SAVE_FLAGS)
@@ -1282,6 +1345,27 @@ def _save_resume(entry: dict, only_if_needed: bool = False) -> None:
         pass
 
 
+def _handle_alerts(ns: NodeState, staged: dict):
+    """Act on everything libtorrent has posted since the last call. Checkpoints
+    land in `staged` for the caller to commit. Returns the newest session stats
+    alert, if there is one."""
+    counters = None
+    for a in ns.ses.pop_alerts():
+        if isinstance(a, lt.save_resume_data_alert):
+            _write_resume(ns, a, staged)
+        elif isinstance(a, lt.file_error_alert):
+            _note_file_error(ns, a)
+        elif isinstance(a, lt.torrent_checked_alert):
+            _note_checked(ns, a)
+        elif isinstance(a, lt.session_stats_alert):
+            # Only the newest: a batch can hold a loop's reply and this
+            # one's, and reading both against the same clock would divide a
+            # loop's worth of bytes by no time at all.
+            counters = a
+        # save_resume_data_failed_alert: nothing to persist yet; ignore.
+    return counters
+
+
 def session_loop(ns: NodeState) -> None:
     """Live state: what is moving right now, and what this node is doing overall.
 
@@ -1301,20 +1385,8 @@ def session_loop(ns: NodeState) -> None:
         loops += 1
         now = time.time()
         ns.ses.post_session_stats()
-        counters, staged = None, {}
-        for a in ns.ses.pop_alerts():
-            if isinstance(a, lt.save_resume_data_alert):
-                _write_resume(ns, a, staged)
-            elif isinstance(a, lt.file_error_alert):
-                _note_file_error(ns, a)
-            elif isinstance(a, lt.torrent_checked_alert):
-                _note_checked(ns, a)
-            elif isinstance(a, lt.session_stats_alert):
-                # Only the newest: a batch can hold a loop's reply and this
-                # one's, and reading both against the same clock would divide a
-                # loop's worth of bytes by no time at all.
-                counters = a
-            # save_resume_data_failed_alert: nothing to persist yet; ignore.
+        staged = {}
+        counters = _handle_alerts(ns, staged)
         _commit_resumes(ns, staged)
         if counters is not None:
             prev = _note_rates(ns, counters, prev, now)
@@ -1436,8 +1508,8 @@ def mesh(ns: NodeState) -> None:
     heal.
 
     A torrent being *checked* is skipped too: not complete, but not missing
-    anything either — publishing seeds in place, and a restart re-checks
-    everything held. An offer is not a request but a lasting entry in that
+    anything either — publishing seeds in place, and a restart checks every
+    download it resumes. An offer is not a request but a lasting entry in that
     torrent's peer list, which a torrent that turns out to be a seed keeps, and
     keeps dialling: a node that has just published a batch nobody asked for
     would dial at connection_speed, indefinitely."""
