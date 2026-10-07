@@ -31,7 +31,8 @@ Endpoints:
   GET  /api/transfers - {"ts", "transfers": [...]} in-flight transfers (one row
                    per incomplete (node, dataset)) with progress, rate and ETA.
   GET  /api/nodes - {"ts", "nodes": [...]} per-node storage + activity: bytes
-                   stored, datasets held/complete, throughput, peer count.
+                   stored, datasets held/complete, throughput, peer count, and
+                   what is holding its transfers back (see limited_by()).
   GET  /api/node/<addr>
                  - one node's held datasets (drill-down from /nodes): per torrent
                    completion, stored, rate + info_hash. 404 if not reporting.
@@ -331,11 +332,45 @@ def build_transfers() -> dict:
 # its holdings stream. The totals come from the node — it keeps them as it goes,
 # so neither it nor we have to add up everything it holds.
 
+# A rate this close to its cap counts as held at it: libtorrent's cap covers
+# protocol overhead too, so the payload rate never quite reaches it.
+AT_CAP = 0.9
+
+
+def limited_by(st: dict) -> list:
+    """What is holding a node's transfers back, from its own counters: its
+    download cap, its upload cap, its disk, or nothing.
+
+    A cap holds a node back when peers queue on its rate limiter, or when the
+    rate sits at the cap. An upload cap that is spent starves every node
+    downloading from this one, so it is the verdict to look for on a holder."""
+    out = []
+
+    def at_cap(rate, cap, queue):
+        return int(st.get(queue) or 0) > 0 or (
+            cap > 0 and int(st.get(rate) or 0) >= AT_CAP * cap)
+
+    if at_cap("download_rate", int(st.get("download_rate_limit") or 0),
+              "limiter_down_queue"):
+        out.append("download cap")
+    if at_cap("upload_rate", int(st.get("upload_rate_limit") or 0),
+              "limiter_up_queue"):
+        out.append("upload cap")
+    if int(st.get("peers_down_disk") or 0) or int(st.get("peers_up_disk") or 0):
+        out.append("disk")
+    return out
+
+
 def node_summary(rec: dict) -> dict:
     """One line for a node, however much it holds."""
     st = rec.get("stats") or {}
     disk = st.get("disk") or {}
     return {"addr": rec["addr"], "name": rec["name"],
+            "limited_by": limited_by(st),
+            # The counters behind the verdict, for whoever wants to check it.
+            "pressure": {key: int(st.get(key) or 0) for key in (
+                "limiter_down_queue", "limiter_up_queue", "peers_down_disk",
+                "peers_up_disk", "disk_queue")},
             "datasets": int(st.get("held") or 0),
             "complete": int(st.get("complete") or 0),
             "stored": int(st.get("stored") or 0),

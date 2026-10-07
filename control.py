@@ -249,9 +249,13 @@ def cmd_status(args) -> None:
             parts.append(f"{name}[seed]")
         else:
             live = moving.get(row["info_hash"])
+            # A paused download is waiting its turn in libtorrent's queue,
+            # which is why it has no peers; it is not stuck.
+            peers = ("queued" if live and live.get("paused")
+                     else f"p{live['num_peers'] if live else 0}")
             parts.append(f"{name}[leech "
                          f"{(live['progress'] if live else 0.0) * 100:.0f}% "
-                         f"p{live['num_peers'] if live else 0}]")
+                         f"{peers}]")
     print(f"{args.endpoint}: " + "  ".join(parts))
     print(f"  {stats.get('complete', 0)}/{held} complete, "
           f"{human(stats.get('stored', 0))} stored")

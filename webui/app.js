@@ -469,10 +469,21 @@ const DatasetRow = component({
   </a>`,
 });
 
+// Why a transfer is or isn't moving: "queued", "checking", "stuck" or "active".
+// A node runs only a few downloads at once and libtorrent pauses the rest, and
+// a paused torrent has no peers; a torrent being checked is offered none. So 0
+// peers means stuck only when it is neither. Exported for unit testing.
+export function transferStatus(tr) {
+  if (tr.paused) return "queued";
+  if (String(tr.lt_state || "").includes("checking")) return "checking";
+  if (tr.num_peers === 0) return "stuck";
+  return "active";
+}
+
 // One in-flight transfer (a (node, dataset) pair that isn't complete yet): a
-// progress bar, percent, live rate and ETA. An incomplete transfer with 0 peers
-// is stuck — it has nobody to pull from — so flag it in the peers cell. Backed
-// by /transfers.
+// progress bar, percent, live rate and ETA. A queued or checking transfer says
+// so in the peers cell; one that is neither and has 0 peers is stuck — it has
+// nobody to pull from — and is flagged. Backed by /transfers.
 const TransferRow = component({
   name: "TransferRow",
   fields: {
@@ -497,7 +508,8 @@ const TransferRow = component({
     fromData(tr) {
       const pct = Math.round(tr.progress * 100);
       const active = tr.download_rate > 0;
-      const stuck = tr.num_peers === 0;
+      const status = transferStatus(tr);
+      const waiting = status === "queued" || status === "checking";
       return this.make({
         id: `${tr.addr}/${tr.info_hash}`,
         node: tr.node,
@@ -512,9 +524,9 @@ const TransferRow = component({
         barStyle: `width:${pct}%`,
         barClass: active ? "pbar-fill" : "pbar-fill stalled",
         rateText: active ? `▼${human(tr.download_rate)}/s` : "—",
-        etaText: formatEta(tr.eta),
-        peersText: stuck ? "0 · stuck" : String(tr.num_peers),
-        peersClass: tr.error || stuck ? "nnum bad" : "nnum",
+        etaText: waiting ? "—" : formatEta(tr.eta),
+        peersText: waiting ? status : status === "stuck" ? "0 · stuck" : String(tr.num_peers),
+        peersClass: tr.error || status === "stuck" ? "nnum bad" : waiting ? "nnum muted" : "nnum",
       });
     },
   },
@@ -530,11 +542,39 @@ const TransferRow = component({
   </div>`,
 });
 
+// What is holding a node's transfers back, as the collector judged it, with the
+// counters it judged from for the tooltip.
+function limitedText(n) {
+  return n.limited_by && n.limited_by.length ? n.limited_by.join(", ") : "—";
+}
+
+function pressureTitle(n) {
+  const p = n.pressure || {};
+  return (
+    `peers waiting on the rate limiter: ${p.limiter_down_queue || 0} down, ${p.limiter_up_queue || 0} up\n` +
+    `peers waiting on the disk: ${p.peers_down_disk || 0} down, ${p.peers_up_disk || 0} up\n` +
+    `disk jobs queued: ${p.disk_queue || 0}`
+  );
+}
+
 // One node's storage + activity line; the whole row links to its drill-down.
 // Backed by /nodes.
 const NodeStatRow = component({
   name: "NodeStatRow",
-  fields: { name: "", addr: "", href: "#", datasetsText: "", storedText: "", freeText: "", dlText: "", ulText: "", peersText: "" },
+  fields: {
+    name: "",
+    addr: "",
+    href: "#",
+    datasetsText: "",
+    storedText: "",
+    freeText: "",
+    dlText: "",
+    ulText: "",
+    peersText: "",
+    limitedText: "",
+    limitedClass: "nnum",
+    limitedTitle: "",
+  },
   statics: {
     fromData(n) {
       return this.make({
@@ -547,6 +587,9 @@ const NodeStatRow = component({
         dlText: n.download_rate ? `▼${human(n.download_rate)}/s` : "—",
         ulText: n.upload_rate ? `▲${human(n.upload_rate)}/s` : "—",
         peersText: String(n.num_peers),
+        limitedText: limitedText(n),
+        limitedClass: n.limited_by && n.limited_by.length ? "nnum warn" : "nnum muted",
+        limitedTitle: pressureTitle(n),
       });
     },
   },
@@ -558,6 +601,7 @@ const NodeStatRow = component({
     <span class="nnum" @text=".dlText"></span>
     <span class="nnum" @text=".ulText"></span>
     <span class="nnum" @text=".peersText"></span>
+    <span :class=".limitedClass" :title=".limitedTitle" @text=".limitedText"></span>
   </a>`,
 });
 
@@ -612,7 +656,7 @@ const NodeDetail = component({
       return this.make({
         name: n.name,
         addr: n.addr,
-        metaText: `${n.complete}/${n.datasets} complete  ·  ${diskFreeText(n.disk_free, n.disk_total)} free  ·  ▼${human(n.download_rate)}/s ▲${human(n.upload_rate)}/s  ·  ${n.num_peers} peers`,
+        metaText: `${n.complete}/${n.datasets} complete  ·  ${diskFreeText(n.disk_free, n.disk_total)} free  ·  ▼${human(n.download_rate)}/s ▲${human(n.upload_rate)}/s  ·  ${n.num_peers} peers  ·  limited by ${limitedText(n)}`,
         storedText: human(n.stored),
         rows: n.torrents.map((t) => NodeTorrentRow.Class.fromData(t)),
       });
@@ -695,6 +739,7 @@ const Dashboard = component({
     transfers: [],
     transfersCount: 0,
     transfersDlText: "0 B/s",
+    transfersQueued: 0,
     transfersStuck: 0,
     transfersStuckClass: "num",
     // nodes screen
@@ -903,13 +948,15 @@ const Dashboard = component({
       if (err) return this.setStatus("error").setError(String((err && err.message) || err));
       let dl = 0;
       for (const tr of res.transfers) dl += tr.download_rate;
-      const stuck = res.transfers.filter((tr) => tr.num_peers === 0).length;
+      const stuck = res.transfers.filter((tr) => transferStatus(tr) === "stuck").length;
+      const queued = res.transfers.filter((tr) => transferStatus(tr) === "queued").length;
       return this.setError("")
         .setStatus("live")
         .setTs(res.ts)
         .setTransfers(res.transfers.map((tr) => TransferRow.Class.fromData(tr)))
         .setTransfersCount(res.transfers.length)
         .setTransfersDlText(`${human(dl)}/s`)
+        .setTransfersQueued(queued)
         .setTransfersStuck(stuck)
         .setTransfersStuckClass(stuck ? "num bad" : "num");
     },
@@ -1009,6 +1056,7 @@ const Dashboard = component({
       <div class="summary">
         <div class="stat"><span class="num" @text=".transfersCount"></span><span class="lbl">in-flight transfers</span></div>
         <div class="stat"><span class="num" @text=".transfersDlText"></span><span class="lbl">total download</span></div>
+        <div class="stat"><span class="num" @text=".transfersQueued"></span><span class="lbl">queued</span></div>
         <div class="stat"><span :class=".transfersStuckClass" @text=".transfersStuck"></span><span class="lbl">stuck (0 peers)</span></div>
       </div>
       <h3>Transfers in flight</h3>
@@ -1032,6 +1080,7 @@ const Dashboard = component({
       <div class="node-head">
         <span>node</span><span class="nnum">complete/held</span><span class="nnum">stored</span>
         <span class="nnum">free</span><span class="nnum">download</span><span class="nnum">upload</span><span class="nnum">peers</span>
+        <span class="nnum">limited by</span>
       </div>
       <x render-each=".nodes"></x>
       <div class="empty" @show="$isEmptyNodes">No nodes reporting yet.</div>

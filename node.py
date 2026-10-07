@@ -116,6 +116,17 @@ LISTING_PAGE = 10_000
 # growing without limit on a long-lived node.
 CHANGE_LOG_LIMIT = 100000
 
+# What a node's throughput is waiting on: libtorrent's gauges -> the /stats
+# field each is reported as. A peer waits on the rate limiter when its node's
+# cap is spent, and on the disk when a read or write is queued behind others.
+PRESSURE_COUNTERS = {
+    "net.limiter_down_queue": "limiter_down_queue",
+    "net.limiter_up_queue": "limiter_up_queue",
+    "peer.num_peers_down_disk": "peers_down_disk",
+    "peer.num_peers_up_disk": "peers_up_disk",
+    "disk.queued_disk_jobs": "disk_queue",
+}
+
 
 class NodeState:
     def __init__(self, node_id: int, node_key: str, name: str, ses: "lt.session"):
@@ -170,10 +181,12 @@ class NodeState:
         # only place per-dataset per-second numbers exist, and bounded by what is
         # in flight rather than by how much this node holds.
         self.transfers: list = []
-        # Session-wide throughput, from libtorrent's own counters. Summing the
-        # torrents would mean asking every one of them every second, which is
-        # precisely what must not scale with the number held.
-        self.rates = {"download_rate": 0, "upload_rate": 0, "num_peers": 0}
+        # Session-wide throughput, and what is holding it back, from
+        # libtorrent's own counters. Summing the torrents would mean asking every
+        # one of them every second, which is precisely what must not scale with
+        # the number held.
+        self.rates = {"download_rate": 0, "upload_rate": 0, "num_peers": 0,
+                      **{key: 0 for key in PRESSURE_COUNTERS.values()}}
         self.stop = threading.Event()
 
 
@@ -513,6 +526,10 @@ def node_stats(ns: NodeState) -> dict:
             # write their files. Bounded by what is in flight, like the rest of
             # this, and enough for a reader to know to look.
             "errors": sum(1 for t in moving if t.get("error")),
+            # The caps the rates run against, so a reader can tell a node
+            # pinned at its cap from one that is merely busy.
+            "download_rate_limit": config.DOWNLOAD_RATE_LIMIT,
+            "upload_rate_limit": config.UPLOAD_RATE_LIMIT,
             "cursor": cursor, **rates}
 
 
@@ -1249,7 +1266,9 @@ def _note_rates(ns: NodeState, alert, prev, now: float):
         with ns.lock:
             ns.rates = {"download_rate": int(max(0, recv - prev[1]) / dt),
                         "upload_rate": int(max(0, sent - prev[2]) / dt),
-                        "num_peers": peers}
+                        "num_peers": peers,
+                        **{key: alert.values.get(name, 0)
+                           for name, key in PRESSURE_COUNTERS.items()}}
     return (now, recv, sent)
 
 
