@@ -647,6 +647,9 @@ def transfer_row(info_hash: str, entry: dict, st) -> dict:
             # it nobody), or paused by libtorrent's queue.
             "lt_state": str(st.state),
             "paused": bool(st.flags & lt.torrent_flags.paused),
+            # Payload received since libtorrent last resumed it; 0 is a transfer
+            # the queue has just let go that has not had its first block yet.
+            "total_payload_download": st.total_payload_download,
             "auto_managed": bool(st.flags & lt.torrent_flags.auto_managed),
             # Bytes received and thrown away: failed the piece hash, or already
             # had. A transfer with a rate but no progress shows up here.

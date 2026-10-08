@@ -469,20 +469,23 @@ const DatasetRow = component({
   </a>`,
 });
 
-// Why a transfer is or isn't moving: "queued", "checking", "stuck" or "active".
-// A node runs only a few downloads at once and libtorrent pauses the rest, and
-// a paused torrent has no peers; a torrent being checked is offered none. So 0
-// peers means stuck only when it is neither. Exported for unit testing.
+// Why a transfer is or isn't moving: "queued", "checking", "stuck", "starting"
+// or "active". A node runs only a few downloads at once and libtorrent pauses
+// the rest, and a paused torrent has no peers; a torrent being checked is
+// offered none. So 0 peers means stuck only when it is neither. One with peers
+// that has received nothing since it was unpaused is starting: its rate is 0
+// only because no block has arrived yet. Exported for unit testing.
 export function transferStatus(tr) {
   if (tr.paused) return "queued";
   if (String(tr.lt_state || "").includes("checking")) return "checking";
   if (tr.num_peers === 0) return "stuck";
+  if (tr.total_payload_download === 0) return "starting";
   return "active";
 }
 
 // One in-flight transfer (a (node, dataset) pair that isn't complete yet): a
-// progress bar, percent, live rate and ETA. A queued or checking transfer says
-// so in the peers cell; one that is neither and has 0 peers is stuck — it has
+// progress bar, percent, live rate and ETA. A queued, checking or starting
+// transfer says so in the peers cell; one that is neither and has 0 peers is stuck — it has
 // nobody to pull from — and is flagged. Backed by /transfers.
 const TransferRow = component({
   name: "TransferRow",
@@ -509,7 +512,7 @@ const TransferRow = component({
       const pct = Math.round(tr.progress * 100);
       const active = tr.download_rate > 0;
       const status = transferStatus(tr);
-      const waiting = status === "queued" || status === "checking";
+      const waiting = status === "queued" || status === "checking" || status === "starting";
       return this.make({
         id: `${tr.addr}/${tr.info_hash}`,
         node: tr.node,
