@@ -739,13 +739,20 @@ def make_session(node_id: int) -> "lt.session":
         # whole batch.
         "unchoke_slots_limit": -1,
         # Pace the transfer so progress is observable as it happens (see config).
-        # By default libtorrent exempts loopback/LAN peers from rate limits, so
-        # we must turn that off for the cap to apply within a single-host swarm.
         "upload_rate_limit": config.UPLOAD_RATE_LIMIT,
         "download_rate_limit": config.DOWNLOAD_RATE_LIMIT,
-        "ignore_limits_on_local_network": False,
     }
-    return lt.session(settings)
+    session = lt.session(settings)
+    # The caps above bind the global peer class, but by default libtorrent puts
+    # peers on private, link-local and loopback addresses in an unlimited local
+    # class instead — every peer on a container bridge or a single-host swarm.
+    # Put every address in the global class so the caps apply to them too.
+    every = lt.ip_filter()
+    global_class = 1 << int(lt.session.global_peer_class_id)
+    every.add_rule("0.0.0.0", "255.255.255.255", global_class)
+    every.add_rule("::", "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", global_class)
+    session.set_peer_class_filter(every)
+    return session
 
 
 def add_torrent(ns: NodeState, blob: bytes, serve_path: str = None,
