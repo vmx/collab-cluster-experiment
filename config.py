@@ -6,8 +6,25 @@ multicast beacon on the local network. Services can be co-located on one host fo
 a deterministic dev run or spread across a real network.
 """
 import os
+import subprocess
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _git_version() -> str:
+    try:
+        out = subprocess.run(["git", "describe", "--always", "--dirty"],
+                             cwd=BASE_DIR, capture_output=True, text=True,
+                             timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return out.stdout.strip() if out.returncode == 0 else "unknown"
+
+
+# The commit this process runs, e.g. "413b5e8" or "413b5e8-dirty". Every
+# deployment is a git checkout, so the commit is the version. Read once at
+# import: a checkout pulled but not yet restarted still reports what it runs.
+VERSION = _git_version()
 DATA_DIR = os.path.join(BASE_DIR, "data")
 # Override to move a node's storage (nodes/<id>/data, torrents, .resume) off the
 # checkout entirely, e.g. onto a disk mounted elsewhere.

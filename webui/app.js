@@ -577,6 +577,7 @@ const NodeStatRow = component({
     limitedText: "",
     limitedClass: "nnum",
     limitedTitle: "",
+    version: "",
   },
   statics: {
     fromData(n) {
@@ -593,6 +594,7 @@ const NodeStatRow = component({
         limitedText: limitedText(n),
         limitedClass: n.limited_by && n.limited_by.length ? "nnum warn" : "nnum muted",
         limitedTitle: pressureTitle(n),
+        version: n.version,
       });
     },
   },
@@ -605,6 +607,7 @@ const NodeStatRow = component({
     <span class="nnum" @text=".ulText"></span>
     <span class="nnum" @text=".peersText"></span>
     <span :class=".limitedClass" :title=".limitedTitle" @text=".limitedText"></span>
+    <span class="nnum muted" @text=".version"></span>
   </a>`,
 });
 
@@ -749,6 +752,7 @@ const Dashboard = component({
     nodes: [],
     nodesCount: 0,
     nodesStoredText: "0 B",
+    collectorVersion: "",
     // node drill-down: 0 or 1 NodeDetail vm
     nodeDetail: [],
     // newly-appeared-dataset toast (see fetchOverview).
@@ -972,7 +976,8 @@ const Dashboard = component({
         .setTs(res.ts)
         .setNodes(res.nodes.map((n) => NodeStatRow.Class.fromData(n)))
         .setNodesCount(res.nodes.length)
-        .setNodesStoredText(human(stored));
+        .setNodesStoredText(human(stored))
+        .setCollectorVersion(res.version);
     },
   },
   view: html`<div class="dash">
@@ -1078,12 +1083,13 @@ const Dashboard = component({
       <div class="summary">
         <div class="stat"><span class="num" @text=".nodesCount"></span><span class="lbl">nodes</span></div>
         <div class="stat"><span class="num" @text=".nodesStoredText"></span><span class="lbl">stored across swarm</span></div>
+        <div class="stat"><span class="num" @text=".collectorVersion"></span><span class="lbl">collector version</span></div>
       </div>
       <h3>Nodes</h3>
       <div class="node-head">
         <span>node</span><span class="nnum">complete/held</span><span class="nnum">stored</span>
         <span class="nnum">free</span><span class="nnum">download</span><span class="nnum">upload</span><span class="nnum">peers</span>
-        <span class="nnum">limited by</span>
+        <span class="nnum">limited by</span><span class="nnum">version</span>
       </div>
       <x render-each=".nodes"></x>
       <div class="empty" @show="$isEmptyNodes">No nodes reporting yet.</div>

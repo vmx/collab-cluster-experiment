@@ -4,8 +4,9 @@ Run one per host. Nodes find each other with a UDP multicast beacon and move the
 bytes with BitTorrent v2. There is no tracker, no central index of datasets and
 no coordinator.
 
-  GET  /stats                    what this node is, as a whole: disk, counts,
-                                 throughput, and the cursor below. Constant
+  GET  /stats                    what this node is, as a whole: the commit it
+                                 runs, disk, counts, throughput, and the cursor
+                                 below. Constant
                                  size — it says nothing per dataset.
   GET  /holdings[?since=<cursor>|?match=<ref>]   which datasets this node holds
                                  and whether
@@ -516,6 +517,7 @@ def node_stats(ns: NodeState) -> dict:
         cursor, rates = cursor_of(ns), dict(ns.rates)
         moving = list(ns.transfers)
     return {"node_key": ns.node_key, "name": ns.name, "ts": time.time(),
+            "version": config.VERSION,
             "bt_port": config.bt_port(ns.node_id),
             "http_port": config.stats_port(ns.node_id),
             "disk": node_disk(ns.node_id),
@@ -1755,7 +1757,7 @@ def main() -> None:
     # threads they'd keep the process alive after Ctrl-C, hanging shutdown.
     srv.daemon_threads = True
     state = f"{resumed} held"
-    print(f"node {args.id} up '{name}' [{node_key[:8]}] - bt:{config.bt_port(args.id)} "
+    print(f"node {args.id} up '{name}' [{node_key[:8]}] {config.VERSION} - bt:{config.bt_port(args.id)} "
           f"http:{config.stats_port(args.id)}  "
           f"beacon:{config.BEACON_GROUP}:{config.BEACON_PORT}  "
           f"({state})", flush=True)

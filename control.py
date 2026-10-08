@@ -234,8 +234,10 @@ def cmd_status(args) -> None:
     except Exception:
         _unreachable(args.endpoint)
     held = int(stats.get("held") or 0)
+    version = stats.get("version") or "unknown"
     if not held:
         print(f"{args.endpoint}: holding nothing yet")
+        print(f"  version {version}")
         return
     moving = {t["info_hash"]: t for t in node_client.fetch_transfers(base)}
     parts, shown = [], 0
@@ -258,7 +260,7 @@ def cmd_status(args) -> None:
                          f"{peers}]")
     print(f"{args.endpoint}: " + "  ".join(parts))
     print(f"  {stats.get('complete', 0)}/{held} complete, "
-          f"{human(stats.get('stored', 0))} stored")
+          f"{human(stats.get('stored', 0))} stored, version {version}")
 
 
 def cmd_publish(args) -> None:

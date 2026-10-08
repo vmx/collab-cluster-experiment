@@ -30,9 +30,11 @@ Endpoints:
                    node reports that info_hash.
   GET  /api/transfers - {"ts", "transfers": [...]} in-flight transfers (one row
                    per incomplete (node, dataset)) with progress, rate and ETA.
-  GET  /api/nodes - {"ts", "nodes": [...]} per-node storage + activity: bytes
-                   stored, datasets held/complete, throughput, peer count, and
-                   what is holding its transfers back (see limited_by()).
+  GET  /api/nodes - {"ts", "version", "nodes": [...]} per-node storage +
+                   activity: bytes stored, datasets held/complete, throughput,
+                   peer count, what is holding its transfers back (see
+                   limited_by()) and the commit it runs; "version" is the
+                   collector's own.
   GET  /api/node/<addr>
                  - one node's held datasets (drill-down from /nodes): per torrent
                    completion, stored, rate + info_hash. 404 if not reporting.
@@ -366,6 +368,7 @@ def node_summary(rec: dict) -> dict:
     st = rec.get("stats") or {}
     disk = st.get("disk") or {}
     return {"addr": rec["addr"], "name": rec["name"],
+            "version": st.get("version") or "unknown",
             "limited_by": limited_by(st),
             # The counters behind the verdict, for whoever wants to check it.
             "pressure": {key: int(st.get(key) or 0) for key in (
@@ -390,7 +393,8 @@ def build_nodes() -> dict:
     now = time.time()
     nodes = [node_summary(rec) for rec in poll(now)]
     nodes.sort(key=lambda n: (n["name"], n["addr"]))
-    return {"ts": now, "nodes": nodes}
+    # The collector runs no node, so this is where it says what it runs.
+    return {"ts": now, "version": config.VERSION, "nodes": nodes}
 
 
 def build_node_detail(addr: str, limit: int = LIST_PAGE,
@@ -563,7 +567,7 @@ def main() -> None:
                               make_handler())
     srv.daemon_threads = True
     via = seed or f"any node beaconing on {config.BEACON_GROUP}:{config.BEACON_PORT}"
-    print(f"collector on http://{config.COLLECTOR_HOST}:{config.COLLECTOR_PORT}/  "
+    print(f"collector {config.VERSION} on http://{config.COLLECTOR_HOST}:{config.COLLECTOR_PORT}/  "
           f"(web UI + /api/*) reading the swarm through {via}", flush=True)
     try:
         srv.serve_forever()
