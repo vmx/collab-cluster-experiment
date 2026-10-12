@@ -66,7 +66,6 @@ What a node holds is only ever what it was given: /publish puts local data in,
 /add takes a copy of somebody else's. Nothing arrives unasked.
 """
 import argparse
-import ctypes
 import heapq
 import json
 import os
@@ -1035,18 +1034,34 @@ def _stage_resume(ns: NodeState, name: str, info_hash: str, buf: bytes,
     staged[path] = (tmp, info_hash)
 
 
-_libc = ctypes.CDLL(None, use_errno=True)
-
-
-def _sync_disk(directory: str) -> None:
-    """Flush everything written to the filesystem holding `directory`."""
-    fd = os.open(directory, os.O_RDONLY)
+def _fsync(path: str) -> None:
+    fd = os.open(path, os.O_RDONLY)
     try:
-        if _libc.syncfs(fd) != 0:
-            err = ctypes.get_errno()
-            raise OSError(err, os.strerror(err), directory)
+        os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _sync_batch(ns: NodeState, staged: dict) -> None:
+    """Flush a batch's temp checkpoints and the downloaded files they vouch for.
+
+    Only those files: the filesystem is shared with every other node on the
+    host, and syncing all of it waits on their writes too."""
+    for tmp, info_hash in staged.values():
+        with ns.lock:
+            entry = ns.torrents.get(info_hash)
+        if entry is None:
+            continue    # removed: its checkpoint is dropped, not committed
+        if is_own_copy(ns, info_hash, entry):
+            fs = entry["ti"].files()
+            for i in range(fs.num_files()):
+                if _is_pad(fs, i):
+                    continue
+                try:
+                    _fsync(os.path.join(entry["save_path"], fs.file_path(i)))
+                except FileNotFoundError:
+                    pass    # nothing of it written yet, or removed meanwhile
+        _fsync(tmp)
 
 
 def _commit_resumes(ns: NodeState, staged: dict) -> None:
@@ -1060,8 +1075,6 @@ def _commit_resumes(ns: NodeState, staged: dict) -> None:
     old checkpoint or the new one, never a truncated one or one ahead of its
     data. Published data is not synced; the node never writes to it.
 
-    Synced once per batch rather than per file, because a batch can hold a
-    checkpoint for every dataset held: a restart rewrites each one it trims.
     A checkpoint of a dataset removed since it was staged is dropped, so it
     cannot bring the dataset back, and so is the whole batch if the sync fails:
     the previous checkpoints stay, which claim no more than is known to be on
@@ -1069,9 +1082,7 @@ def _commit_resumes(ns: NodeState, staged: dict) -> None:
     if not staged:
         return
     try:
-        for directory in (data_dir(ns.node_id), resume_dir(ns.node_id)):
-            if os.path.isdir(directory):
-                _sync_disk(directory)
+        _sync_batch(ns, staged)
     except OSError as exc:
         print(f"node {ns.node_id}: {len(staged)} checkpoints not written: {exc}",
               flush=True)
