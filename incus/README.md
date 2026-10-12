@@ -20,6 +20,23 @@ incrementally, or to spread it across several hosts.
 - Incus with a managed bridge (default `incusbr0`) providing DNS.
 - A cloud-init-enabled image for the profile, e.g. `images:debian/14/cloud`.
 - Containers can reach the git URL in the profile (clone happens at first boot).
+- Host inotify limits raised, as in Incus's
+  [production setup](https://linuxcontainers.org/incus/docs/main/reference/server_settings/).
+  Every container's inotify instances count against host root's
+  `fs.inotify.max_user_instances`, and the default of 128 runs out after a
+  handful of containers. A new container then can't start
+  `systemd-networkd`, so it gets no address or DNS and cloud-init fails
+  installing packages (`cloud-init status --long` reports
+  `package-update-upgrade-install`; its networkd journal shows `Failed to
+  allocate directory watch: Too many open files`). Raise the limits and keep
+  them across reboots:
+
+  ```sh
+  printf 'fs.inotify.max_user_instances = 1048576\nfs.inotify.max_user_watches = 1048576\nfs.inotify.max_queued_events = 1048576\n' | sudo tee /etc/sysctl.d/90-incus.conf && sudo sysctl --system
+  ```
+
+  A container that already failed provisioning has to be deleted and launched
+  again: cloud-init only runs on first boot.
 
 The profile provisions the rest per container: it clones this repo into
 `/home/debian/collab-cluster-experiment` (owned by the image's default `debian`
