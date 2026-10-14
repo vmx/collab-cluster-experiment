@@ -6,6 +6,7 @@
     python control.py status   10.0.0.5           # datasets it actually holds
     python control.py add      10.0.0.6 photos    # tell that node to take it
     python control.py remove   10.0.0.6 photos    # drop it
+    python control.py remove   10.0.0.6 --partial # drop all it holds only part of
     python control.py recheck  10.0.0.6 photos    # re-hash its files, repair damage
     python control.py map      10.0.0.5           # copies of every dataset
     python control.py map      10.0.0.5 photos     # ...and one dataset's pieces
@@ -301,14 +302,33 @@ def cmd_add(args) -> None:
 
 
 def cmd_remove(args) -> None:
-    res = _checked(args.endpoint, _post(args.endpoint, "/remove",
-                                        _dataset_ref(args.dataset)))
-    if not res.get("removed"):
-        print(f"{args.endpoint}: not holding {args.dataset!r} - nothing to do")
-        return
-    print(f"{args.endpoint}: dropped {res['name']!r} [{res['info_hash'][:16]}] "
-          + ("- its downloaded copy is deleted" if res.get("files_deleted")
-             else "- the published files stay where they are"))
+    if args.partial == bool(args.dataset):
+        sys.exit("give either a dataset or --partial")
+    if args.partial:
+        base = node_client.base_url(args.endpoint)
+        # Collected before anything is removed, so the holdings aren't read
+        # while the node changes them.
+        try:
+            refs = [{"info_hash": row["info_hash"]}
+                    for row in node_client.holdings_stream(base)
+                    if row.get("state") != "complete"]
+        except Exception:
+            _unreachable(args.endpoint)
+        if not refs:
+            print(f"{args.endpoint}: holding nothing partially - nothing to do")
+            return
+    else:
+        refs = [_dataset_ref(args.dataset)]
+    for ref in refs:
+        res = _checked(args.endpoint, _post(args.endpoint, "/remove", ref))
+        if not res.get("removed"):
+            print(f"{args.endpoint}: not holding "
+                  f"{args.dataset or ref['info_hash'][:16]!r} - nothing to do")
+            continue
+        print(f"{args.endpoint}: dropped {res['name']!r} "
+              f"[{res['info_hash'][:16]}] "
+              + ("- its downloaded copy is deleted" if res.get("files_deleted")
+                 else "- the published files stay where they are"))
     print("if that was the last copy, the dataset has left the swarm: nothing "
           "keeps a\nrecord of datasets nobody holds. Re-publishing the same "
           "path brings it back\nunchanged - the dataset is its content.")
@@ -595,11 +615,16 @@ def main() -> None:
 
     for name, help_text, func in [
             ("add", "tell a node to take a dataset (manual mode)", cmd_add),
-            ("remove", "tell a node to drop a dataset", cmd_remove),
             ("recheck", "tell a node to re-hash a dataset's files",
              cmd_recheck)]:
         p = with_endpoint(name, help_text, func)
         p.add_argument("dataset", help="dataset name, or its v2 info-hash")
+
+    p_rm = with_endpoint("remove", "tell a node to drop a dataset", cmd_remove)
+    p_rm.add_argument("dataset", nargs="?",
+                      help="dataset name, or its v2 info-hash")
+    p_rm.add_argument("--partial", action="store_true",
+                      help="every dataset the node holds only part of")
 
     args = ap.parse_args()
     args.func(args)
