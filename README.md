@@ -210,6 +210,10 @@ per-dataset piece map, in-flight transfers and per-node storage, and reads the
 nodes at most once a second however many browsers are open — not at all while
 none is.
 
+A file that some node holds in full opens in the browser from the per-dataset
+page, relayed from that node. It is served sandboxed, so an HTML file in a
+dataset renders but runs no scripts.
+
 Who holds what is kept by `index.py`, which the collector runs in-process. Besides
 the dashboard it answers `GET /api/rescue?node=<node_key>`: a random sample of
 the rarest datasets that node doesn't hold, and its own most-copied holdings —
@@ -246,6 +250,7 @@ GET  /holdings/<info_hash>           one dataset here, with its piece bitfield
 GET  /transfers                      what is moving right now: progress and rates
 GET  /dataset/<info_hash>            the dataset: name, size, file -> piece map (holders only)
 GET  /dataset/<info_hash>.torrent    the same, as the raw .torrent (holders only)
+GET  /dataset/<info_hash>/files/<n>  the n-th file of that map, once all of it is here
 GET  /peers                          {"self": …, "peers": […]} — its view of the swarm
 POST /publish  {"path": …}           hash a local path in and seed it
 POST /add      {"info_hash": …}      take a dataset from whoever has it

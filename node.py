@@ -26,6 +26,10 @@ no coordinator.
   GET  /dataset/<info_hash>.torrent   the same, as the raw .torrent. Held
                                  datasets only — whoever holds the data has the
                                  torrent.
+  GET  /dataset/<info_hash>/files/<n>   the n-th file of the file -> piece
+                                 map, its bytes as stored here, with Range
+                                 support. Only once this node has every piece
+                                 of it; 409 until then.
   GET  /peers                    {"self": {...}, "peers": [...]} — this node's
                                  view of the swarm.
   POST /publish  {"path": ...}   hash a local file/dir into a dataset and seed it
@@ -68,6 +72,7 @@ What a node holds is only ever what it was given: /publish puts local data in,
 import argparse
 import heapq
 import json
+import mimetypes
 import os
 import re
 import shutil
@@ -78,7 +83,7 @@ import time
 import traceback
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 import libtorrent as lt
 
@@ -1565,6 +1570,32 @@ def sync_loop(ns: NodeState, sock) -> None:
 # --- HTTP --------------------------------------------------------------------
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_FILE_PATH = re.compile(r"^/dataset/([0-9a-fA-F]{64})/files/(\d+)$")
+_RANGE = re.compile(r"^bytes=(\d*)-(\d*)$")
+
+# Whatever a dataset holds is served as it is, so a browser must not run it with
+# the rights of the page that linked to it: an HTML or SVG file is rendered
+# sandboxed, without scripts and on an origin of its own, and no type is guessed
+# past the one sent.
+FILE_HEADERS = {"Content-Security-Policy": "sandbox",
+                "X-Content-Type-Options": "nosniff"}
+
+
+def byte_range(header: str, size: int):
+    """A single-range Range header -> (start, end) inclusive, None for the whole
+    file, or ValueError when it lies outside it. Several ranges in one header
+    are answered with the whole file, which the RFC allows."""
+    m = _RANGE.match((header or "").strip())
+    if not m or not (m[1] or m[2]):
+        return None
+    if m[1]:
+        start = int(m[1])
+        end = min(int(m[2]), size - 1) if m[2] else size - 1
+    else:
+        start, end = max(0, size - int(m[2])), size - 1
+    if start > end or start >= size:
+        raise ValueError(header)
+    return start, end
 
 
 def make_handler(ns: NodeState):
@@ -1614,6 +1645,9 @@ def make_handler(ns: NodeState):
                 self._send_json({"ts": time.time(), "transfers": rows})
             elif path == "/peers":
                 self._send_json(self._peers_view())
+            elif _FILE_PATH.match(path):
+                info_hash, n = _FILE_PATH.match(path).groups()
+                self._file(info_hash.lower(), int(n))
             elif path.startswith("/dataset/"):
                 self._dataset(path[len("/dataset/"):])
             else:
@@ -1684,6 +1718,60 @@ def make_handler(ns: NodeState):
             if not raw:
                 return self._send_json(dataset_meta(info_hash, entry, body))
             self._send(body, "application/x-bittorrent")
+
+        def _file(self, info_hash: str, n: int):
+            # Addressed by position in the dataset's file -> piece map, which is
+            # the same on every holder, so a reader never sends a path and
+            # nothing outside the torrent's own files can be named.
+            with ns.lock:
+                entry = ns.torrents.get(info_hash)
+            if not entry:
+                return self._send_json({"error": "not held here"}, 404)
+            if n >= len(entry["files"]):
+                return self._send_json({"error": "no such file"}, 404)
+            f = entry["files"][n]
+            pieces = entry["handle"].status().pieces
+            if not all(pieces[f["first_piece"]:f["last_piece"] + 1]):
+                return self._send_json({"error": "not complete here"}, 409)
+            size = f["size"]
+            try:
+                fh = open(os.path.join(entry["save_path"], f["path"]), "rb")
+            except OSError:
+                return self._send_json({"error": "not readable"}, 404)
+            with fh:
+                try:
+                    rng = byte_range(self.headers.get("Range"), size)
+                except ValueError:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                start, end = rng or (0, size - 1)
+                self.send_response(206 if rng else 200)
+                ctype = mimetypes.guess_type(f["path"])[0]
+                self.send_header("Content-Type", ctype or "application/octet-stream")
+                self.send_header("Content-Length", str(end - start + 1))
+                self.send_header("Accept-Ranges", "bytes")
+                if rng:
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+                name = quote(f["path"].rsplit("/", 1)[-1])
+                self.send_header("Content-Disposition", f"inline; filename*=UTF-8''{name}")
+                for k, v in FILE_HEADERS.items():
+                    self.send_header(k, v)
+                self.end_headers()
+                fh.seek(start)
+                left = end - start + 1
+                while left > 0:
+                    chunk = fh.read(min(left, 1 << 20))
+                    if not chunk:
+                        # Shorter on disk than the torrent says: the length
+                        # already sent is wrong, so the connection can't be
+                        # reused.
+                        self.close_connection = True
+                        break
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
 
         def do_POST(self):
             body = {}

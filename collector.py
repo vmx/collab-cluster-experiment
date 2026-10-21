@@ -28,6 +28,9 @@ Endpoints:
                    availability histogram, per-file replication, copies summary).
                    The heavy payload, fetched only on drill-down. 404 if no fresh
                    node reports that info_hash.
+  GET  /api/dataset/<info_hash>/files/<n>
+                 - the n-th file of that dataset, relayed from a node that holds
+                   all of it, Range requests included. 404 if none does.
   GET  /api/transfers - {"ts", "transfers": [...]} in-flight transfers (one row
                    per incomplete (node, dataset)) with progress, rate and ETA.
   GET  /api/nodes - {"ts", "version", "nodes": [...]} per-node storage +
@@ -48,8 +51,11 @@ import argparse
 import concurrent.futures
 import json
 import os
+import re
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -304,6 +310,27 @@ def _holding_or_none(base: str, info_hash: str):
         return None
 
 
+def file_sources(info_hash: str) -> list:
+    """The nodes to ask for one of a dataset's files, complete holders first.
+
+    A partial holder may well have all of the file it is asked for, and the node
+    is the one that knows, so nothing here reads a bitfield to choose: each is
+    asked in turn until one serves it."""
+    nodes = poll()
+    ds = index.dataset(info_hash)
+    if not ds:
+        return []
+    base = {(rec.get("stats") or {}).get("node_key"): rec["base"] for rec in nodes}
+    return [base[key] for key in ds["complete"] + ds["partial"] if key in base]
+
+
+# What a node's file response carries that the browser needs as well.
+FILE_RELAY_HEADERS = ("Content-Type", "Content-Length", "Content-Range",
+                      "Accept-Ranges", "Content-Disposition",
+                      "Content-Security-Policy", "X-Content-Type-Options")
+_FILE_PATH = re.compile(r"^/api/dataset/([0-9a-fA-F]{64})/files/(\d+)$")
+
+
 def build_transfers() -> dict:
     """In-flight transfers across the swarm: one row per (node, dataset) still
     moving, with progress, the live download rate and an ETA.
@@ -495,6 +522,30 @@ def make_handler():
                                   code=404)
             self._send(body, ctype)
 
+        def _relay_file(self, info_hash: str, n: int) -> None:
+            headers = {"Range": self.headers["Range"]} if self.headers.get("Range") else {}
+            for base in file_sources(info_hash):
+                req = urllib.request.Request(
+                    f"{base}/dataset/{info_hash}/files/{n}", headers=headers)
+                try:
+                    resp = urllib.request.urlopen(req, timeout=10)
+                except urllib.error.HTTPError as e:
+                    if e.code != 416:
+                        continue     # not held there, or not all of it: next
+                    resp = e
+                except OSError:
+                    continue
+                with resp:
+                    self.send_response(resp.status)
+                    for k in FILE_RELAY_HEADERS:
+                        if resp.headers.get(k) is not None:
+                            self.send_header(k, resp.headers[k])
+                    self.end_headers()
+                    while chunk := resp.read(1 << 20):
+                        self.wfile.write(chunk)
+                return
+            self._send_json({"error": "no node holds all of this file"}, 404)
+
         def do_GET(self):
             path = self.path
             # Every data/machine endpoint lives under /api/ so it can't collide
@@ -509,6 +560,9 @@ def make_handler():
                     limit=(q.get("limit") or [LIST_PAGE])[0],
                     query=(q.get("q") or [""])[0],
                     status=(q.get("status") or ["all"])[0]))
+            elif _FILE_PATH.match(path):
+                info_hash, n = _FILE_PATH.match(path).groups()
+                self._relay_file(info_hash.lower(), int(n))
             elif path.startswith("/api/dataset/"):
                 # On-demand detail for one dataset (the drill-down).
                 self._send_or_404(build_torrent_detail(path[len("/api/dataset/"):]))

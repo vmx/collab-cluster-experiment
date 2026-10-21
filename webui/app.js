@@ -171,11 +171,15 @@ const NodeRow = component({
   </div>`,
 });
 
-// One file's replication line.
+// One file's replication line. The name opens the file itself, in a new tab so
+// the dashboard keeps polling, once some node holds all of it.
 const FileRow = component({
   name: "FileRow",
-  fields: { name: "", size: 0, fullCopies: 0, reconCopies: 0, holders: "", partial: "" },
+  fields: { name: "", href: "", size: 0, fullCopies: 0, reconCopies: 0, holders: "", partial: "" },
   methods: {
+    isLink() {
+      return this.fullCopies > 0;
+    },
     sizeText() {
       return human(this.size);
     },
@@ -184,7 +188,7 @@ const FileRow = component({
     },
   },
   statics: {
-    fromData(f, torrentName) {
+    fromData(f, i, torrentName, infoHash) {
       let disp = f.path;
       const prefix = `${torrentName}/`;
       if (torrentName && disp.startsWith(prefix)) disp = disp.slice(prefix.length);
@@ -192,6 +196,7 @@ const FileRow = component({
       const partial = f.partial.map((p) => `${p.name}=${Math.round(p.pct)}%`).join(" ");
       return this.make({
         name: disp,
+        href: `/api/dataset/${infoHash}/files/${i}`,
         size: f.size,
         fullCopies: f.full_copies,
         reconCopies: f.recon_copies,
@@ -201,7 +206,8 @@ const FileRow = component({
     },
   },
   view: html`<div class="filerow">
-    <span class="fname" @text=".name"></span>
+    <a class="fname extlink" @show="$isLink" :href=".href" target="_blank" rel="noopener" @text=".name"></a>
+    <span class="fname" @hide="$isLink" @text=".name"></span>
     <span class="fnum" @text="$sizeText"></span>
     <span class="fnum" @text=".fullCopies"></span>
     <span class="fnum" @text=".reconCopies"></span>
@@ -338,7 +344,7 @@ const Torrent = component({
     fromData(t) {
       const rows = t.rows.map((r) => NodeRow.Class.fromData(r, t.num_pieces));
       const availCells = t.avail_cells.map((c) => Cell.make(cellForAvail(c, t.nodes_seen)));
-      const files = t.files.map((f) => FileRow.Class.fromData(f, t.name));
+      const files = t.files.map((f, i) => FileRow.Class.fromData(f, i, t.name, t.info_hash));
       const s = t.summary;
       const m = t.torrent;
       return this.make({
