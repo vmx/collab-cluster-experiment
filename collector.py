@@ -75,6 +75,9 @@ STATIC_FILES = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/tutuca.js": ("tutuca.js", "text/javascript; charset=utf-8"),
+    "/tiff.html": ("tiff.html", "text/html; charset=utf-8"),
+    "/tiff.js": ("tiff.js", "text/javascript; charset=utf-8"),
+    "/geotiff.js": ("geotiff.js", "text/javascript; charset=utf-8"),
 }
 
 # How many rows a list view hands back unless asked for more. The rarest are
@@ -551,8 +554,8 @@ def make_handler():
             # Every data/machine endpoint lives under /api/ so it can't collide
             # with the SPA's client-side page routes (/, /dataset/<hash>,
             # /transfers, /nodes), which all fall through to the app shell below.
-            if path in STATIC_FILES:
-                filename, ctype = STATIC_FILES[path]
+            if path.split("?")[0] in STATIC_FILES:
+                filename, ctype = STATIC_FILES[path.split("?")[0]]
                 self._send_static(filename, ctype)
             elif path.split("?")[0] == "/api/overview":
                 q = parse_qs(urlsplit(path).query)

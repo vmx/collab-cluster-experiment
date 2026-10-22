@@ -171,6 +171,12 @@ const NodeRow = component({
   </div>`,
 });
 
+// A browser can't show a TIFF, so those open in the viewer page instead.
+function fileHref(path, label, url) {
+  if (!/\.tiff?$/i.test(path)) return url;
+  return `/tiff.html?${new URLSearchParams({ src: url, name: label })}`;
+}
+
 // One file's replication line. The name opens the file itself, in a new tab so
 // the dashboard keeps polling, once some node holds all of it.
 const FileRow = component({
@@ -196,7 +202,7 @@ const FileRow = component({
       const partial = f.partial.map((p) => `${p.name}=${Math.round(p.pct)}%`).join(" ");
       return this.make({
         name: disp,
-        href: `/api/dataset/${infoHash}/files/${i}`,
+        href: fileHref(f.path, disp, `/api/dataset/${infoHash}/files/${i}`),
         size: f.size,
         fullCopies: f.full_copies,
         reconCopies: f.recon_copies,
@@ -1223,6 +1229,35 @@ function main() {
 // lint/render/test and must not trigger the live mount + polling.
 if (typeof document !== "undefined" && document.getElementById("app")) {
   main();
+  document.addEventListener("click", openViewerOverlay);
+}
+
+// A plain click on a viewer link shows the viewer over the dashboard, which
+// keeps polling underneath; a modified click still opens it in a tab of its own.
+function openViewerOverlay(e) {
+  const a = e.target.closest?.("a[href^='/tiff.html?']");
+  if (!a || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+  e.preventDefault();
+  const overlay = document.createElement("div");
+  overlay.style.cssText = "position:fixed;inset:0;z-index:10;display:flex;flex-direction:column;background:rgba(0,0,0,.7);padding:2rem";
+  const bar = document.createElement("div");
+  bar.style.cssText = "display:flex;gap:1rem;justify-content:flex-end;padding:0.4rem 0.75rem;background:#161b22;border:1px solid #30363d;border-bottom:0";
+  const close = document.createElement("button");
+  close.textContent = "close";
+  bar.append(close);
+  const frame = document.createElement("iframe");
+  frame.src = a.getAttribute("href");
+  frame.style.cssText = "flex:1;border:1px solid #30363d;background:#0d1117";
+  overlay.append(bar, frame);
+  const done = () => {
+    overlay.remove();
+    document.removeEventListener("keydown", onKey);
+  };
+  const onKey = (k) => k.key === "Escape" && done();
+  close.onclick = done;
+  overlay.onclick = (c) => c.target === overlay && done();
+  document.addEventListener("keydown", onKey);
+  document.body.append(overlay);
 }
 
 // --- module exports for the tutuca CLI (lint / render / test) ------------------

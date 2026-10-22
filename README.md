@@ -306,7 +306,7 @@ reader fetches it once from any holder and keeps it.
 | `swarm_stats.py` | The copy-count arithmetic: `overview_row()` scores a dataset from holdings alone, `holder_rows()`/`per_file()` work from piece bitfields. Shared by `control.py` and `collector.py`. |
 | `index.py` | The swarm-wide index: finds a node on the beacon, follows every node's holdings stream by cursor, and keeps who holds what and how many copies exist. Answers queries; serves nothing itself. |
 | `collector.py` | *Optional.* Serves the index over HTTP: the `/api/*` dashboard endpoints, `/api/rescue` for nodes with spare space, and the web UI. |
-| `webui/` | *Optional.* Zero-build [Tutuca](https://github.com/marianoguerra/tutuca) SPA, framework vendored as one file. Served by `collector.py`. |
+| `webui/` | *Optional.* Zero-build [Tutuca](https://github.com/marianoguerra/tutuca) SPA, framework vendored as one file, as is [geotiff.js](https://github.com/geotiffjs/geotiff.js) (MIT, bundled with esbuild), which `tiff.html` uses to show TIFF files a browser can't. Served by `collector.py`. |
 
 Python standard library only, plus the `libtorrent` binding (tested with
 libtorrent 2.0.13 / Python 3.13). No third-party packages, nothing fetched at

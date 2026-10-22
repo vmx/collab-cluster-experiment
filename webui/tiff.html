@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <base href="/" />
+    <title>TIFF viewer</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0d1117;
+        --border: #30363d;
+        --fg: #c9d1d9;
+        --muted: #8b949e;
+        --bad: #f85149;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        box-sizing: border-box;
+        margin: 0;
+        padding: 1rem 1.25rem;
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      }
+      #info {
+        color: var(--muted);
+        margin-bottom: 0.75rem;
+      }
+      #info.err {
+        color: var(--bad);
+      }
+      #dl {
+        display: inline-block;
+        margin-bottom: 0.75rem;
+        color: #58a6ff;
+      }
+      canvas {
+        flex: 1;
+        min-height: 0;
+        width: 100%;
+        object-fit: contain;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="info">loading…</div>
+    <a id="dl" href="#" download hidden>download</a>
+    <canvas id="img" hidden></canvas>
+    <script type="module" src="/tiff.js"></script>
+  </body>
+</html>
